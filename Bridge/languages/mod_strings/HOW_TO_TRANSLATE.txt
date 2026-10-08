@@ -1,0 +1,43 @@
+================================================================================
+  SYNAPSE - COMMUNITY TRANSLATIONS / ПЕРЕВОД МОДА НА ДРУГИЕ ЯЗЫКИ
+================================================================================
+
+[ENGLISH]
+To translate Synapse into your language:
+1. Copy 'mod_strings_en.json' in this folder and rename it to:
+     mod_strings_<language_code>.json
+   Examples:
+     mod_strings_es.json (Spanish)
+     mod_strings_de.json (German)
+     mod_strings_fr.json (French)
+     mod_strings_zh.json (Chinese)
+     mod_strings_pt.json (Portuguese)
+     mod_strings_pl.json (Polish)
+     mod_strings_it.json (Italian)
+
+2. Open the file in any text editor (Notepad, VS Code, etc.).
+3. Translate the text values on the right side of each key:
+     "PIE_READ_THOUGHTS": "Leer pensamientos (IA)",
+     "MENU_TITLE": "Configuración de Synapse"
+
+4. Keep format placeholders intact: {name}, {lore}, {count}, {mode}, {minutes}.
+5. Save the file using UTF-8 encoding.
+6. Launch The Sims 4!
+   Synapse will automatically detect your file in:
+   Mods\Synapse\languages\mod_strings\
+   and your language will appear in Synapse Settings -> Language menu!
+
+--------------------------------------------------------------------------------
+
+[РУССКИЙ]
+Как перевести Synapse на свой язык или кастомизировать фразы:
+1. Скопируйте 'mod_strings_en.json' в этой папке и переименуйте в:
+     mod_strings_<код_языка>.json (например, mod_strings_es.json).
+2. Откройте файл в любом текстовом редакторе (Блокнот, VS Code).
+3. Переведите значения в кавычках справа от двоеточия.
+4. Не изменяйте системные теги в фигурных скобках: {name}, {count}, {lore}.
+5. Сохраните файл в кодировке UTF-8.
+6. Запустите игру — Synapse автоматически подхватит ваш перевод прямо из папки:
+   Mods\Synapse\languages\mod_strings\
+   и язык появится в меню настроек Synapse -> Выбор языка!
+================================================================================
