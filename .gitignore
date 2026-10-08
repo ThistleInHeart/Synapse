@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.old
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Executables (code is fully runnable from python source)
+*.exe
