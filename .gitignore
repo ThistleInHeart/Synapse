@@ -1,23 +1,21 @@
-# Byte-compiled / optimized / DLL files
+# Python byte code and caches
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-
-# Logs and temporary files
+# Logs and runtime databases
 *.log
+ai_mind_reader.log
+ai_social_pc.log
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Temporary and editor files
+.idea/
+.vscode/
+*.swp
 *.tmp
-*.bak
-*.old
-
-# OS generated files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Executables (code is fully runnable from python source)
-*.exe

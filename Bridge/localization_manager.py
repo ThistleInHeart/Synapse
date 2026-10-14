@@ -38,14 +38,12 @@ class LocalizationManager:
         candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "languages"))
         # 4. Current working dir
         candidates.append(os.path.join(os.getcwd(), "languages"))
-        # 5. Standard Desktop path
-        candidates.append(r"C:\Users\zayar\Desktop\Synapse\languages")
 
         for c in candidates:
             if os.path.isdir(c):
                 return c
         # Default to directory next to this file
-        target = candidates[1]
+        target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "languages")
         try:
             os.makedirs(target, exist_ok=True)
         except Exception:
@@ -292,8 +290,8 @@ class LocalizationManager:
                     "is_custom_friend_chat_system_prompt": bool(cfg.get("is_custom_friend_chat_system_prompt", False)),
                     "direct_dialogue_system_prompt": cfg.get("direct_dialogue_system_prompt", ""),
                     "is_custom_direct_dialogue_system_prompt": bool(cfg.get("is_custom_direct_dialogue_system_prompt", False)),
-                    "summarize_system_prompt": cfg.get("summarize_system_prompt", ""),
-                    "is_custom_summarize_system_prompt": bool(cfg.get("is_custom_summarize_system_prompt", False)),
+                    "sex_dialogue_system_prompt": cfg.get("sex_dialogue_system_prompt", ""),
+                    "is_custom_sex_dialogue_system_prompt": bool(cfg.get("is_custom_sex_dialogue_system_prompt", False)),
                     "group_summarize_system_prompt": cfg.get("group_summarize_system_prompt", ""),
                     "is_custom_group_summarize_system_prompt": bool(cfg.get("is_custom_group_summarize_system_prompt", False)),
                     "custom_age_prompts": dict(cfg.get("custom_age_prompts", {})),
@@ -343,8 +341,8 @@ class LocalizationManager:
         cfg["is_custom_friend_chat_system_prompt"] = bool(lang_p.get("is_custom_friend_chat_system_prompt", False))
         cfg["direct_dialogue_system_prompt"] = lang_p.get("direct_dialogue_system_prompt", "")
         cfg["is_custom_direct_dialogue_system_prompt"] = bool(lang_p.get("is_custom_direct_dialogue_system_prompt", False))
-        cfg["summarize_system_prompt"] = lang_p.get("summarize_system_prompt", "")
-        cfg["is_custom_summarize_system_prompt"] = bool(lang_p.get("is_custom_summarize_system_prompt", False))
+        cfg["sex_dialogue_system_prompt"] = lang_p.get("sex_dialogue_system_prompt", "")
+        cfg["is_custom_sex_dialogue_system_prompt"] = bool(lang_p.get("is_custom_sex_dialogue_system_prompt", False))
         cfg["group_summarize_system_prompt"] = lang_p.get("group_summarize_system_prompt", "")
         cfg["is_custom_group_summarize_system_prompt"] = bool(lang_p.get("is_custom_group_summarize_system_prompt", False))
         cfg["custom_age_prompts"] = dict(lang_p.get("custom_age_prompts", {}))
