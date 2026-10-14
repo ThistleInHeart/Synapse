@@ -3001,6 +3001,16 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
         effective_system_prompt += think_suffix
         think_log = f" [THINKING] Model thinking mode active (level: {reasoning_effort})" if is_en else f" [THINKING] Активирован режим размышлений для модели (уровень: {reasoning_effort})"
         print(think_log)
+    elif reasoning_effort == "none":
+        no_think_suffix = (
+            "\n\nNEGATIVE CONSTRAINT:"
+            "\nDo NOT output internal thoughts, reasoning trace, or <think>...</think> tags. Answer immediately with the final in-character output."
+            if is_en
+            else
+            "\n\nСТРОГИЙ ЗАПРЕТ:"
+            "\nКАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выводить рассуждения, внутренний монолог и теги <think>...</think>. Сразу выводи готовый финальный ответ."
+        )
+        effective_system_prompt += no_think_suffix
 
     # Check key requirement
     if not api_key and provider_id not in ("pollinations", "local_colab", "local_lmstudio", "local_kobold", "local_ollama"):
@@ -3139,11 +3149,12 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
                 if unsupported in payload:
                     del payload[unsupported]
 
-        if provider_id == "openrouter" and reasoning_effort in ("high", "medium", "low", "minimal", "none", "max", "xhigh"):
+        if provider_id in ("openrouter", "custom_openai") and reasoning_effort in ("high", "medium", "low", "minimal", "none", "max", "xhigh"):
             payload["reasoning"] = {"effort": reasoning_effort}
+            payload["reasoning_effort"] = reasoning_effort
         elif provider_id == "gemini" and reasoning_effort in ("high", "medium", "low"):
             payload["reasoning_effort"] = reasoning_effort
-        elif conn_mode in ("local", "colab") and reasoning_effort in ("high", "medium", "low"):
+        elif conn_mode in ("local", "colab") and reasoning_effort in ("high", "medium", "low", "none"):
             payload["reasoning_effort"] = reasoning_effort
 
         headers = {
