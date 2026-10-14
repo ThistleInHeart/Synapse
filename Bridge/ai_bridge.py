@@ -4939,26 +4939,74 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     disable_nagle_algorithm = True
 
+    def _is_untrusted_origin(self):
+        """Security guard: block any cross-origin browser requests from external websites."""
+        origin = self.headers.get("Origin") or self.headers.get("Referer")
+        if origin:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(origin)
+                hostname = (parsed.hostname or "").lower()
+                if hostname not in ("localhost", "127.0.0.1", "::1", ""):
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def do_OPTIONS(self):
+        # Reject browser preflight requests from untrusted external origins
+        if self._is_untrusted_origin():
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+            return
+        self.send_response(204)
+        self.end_headers()
+
     def do_GET(self):
+        if self._is_untrusted_origin():
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+            return
+
         clean_path = self.path.split("?")[0].rstrip("/")
         if clean_path in ("/health", "/status", ""):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             resp = {"status": "ok", "message": "AI Bridge is alive and running"}
             self.wfile.write(json.dumps(resp).encode("utf-8"))
         elif clean_path == "/config":
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             cfg = load_config()
-            self.wfile.write(json.dumps(cfg, ensure_ascii=False).encode("utf-8"))
+            # SECURITY: strictly sanitize config to prevent API key leakage over HTTP
+            safe_cfg = {
+                "active_model": cfg.get("active_model", ""),
+                "provider": cfg.get("provider", ""),
+                "bridge_port": cfg.get("bridge_port", DEFAULT_PORT),
+                "language": cfg.get("language", "RU"),
+                "max_tokens": cfg.get("max_tokens", 1000),
+                "temperature": cfg.get("temperature", 0.7),
+                "actions_enabled": cfg.get("actions_enabled", True),
+                "version": "0.9.2 Pre-Release"
+            }
+            self.wfile.write(json.dumps(safe_cfg, ensure_ascii=False).encode("utf-8"))
         else:
             self.send_response(404)
 
     def do_POST(self):
+        if self._is_untrusted_origin():
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+            return
+
         clean_path = self.path.split("?")[0].rstrip("/")
         if clean_path in ("/summarize", "/api/summarize", "/group_summarize"):
             content_length = int(self.headers.get("Content-Length", 0))
@@ -4975,7 +5023,6 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as e:
@@ -5108,7 +5155,6 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
 

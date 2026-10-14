@@ -1955,7 +1955,7 @@ class AILauncherApp(ctk.CTk):
             cursor="arrow",
         )
         self.icon_lbl.pack(side="left", padx=(0, 6))
-        self.icon_lbl.bind("<Button-1>", lambda event: webbrowser.open("https://www.youtube.com/watch?v=roqkaqOuNZE"))
+        self.icon_lbl.bind("<Button-1>", lambda event: webbrowser.open("https://github.com/ThistleInHeart/Synapse"))
 
         head_text = self.i18n.t("UI_HEADER_TITLE", "SYNAPSE — AI NEURAL BRIDGE") if self.i18n else "SYNAPSE — AI NEURAL BRIDGE"
         self.header_title_lbl = ctk.CTkLabel(
