@@ -4940,36 +4940,54 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
     disable_nagle_algorithm = True
 
     def _is_untrusted_origin(self):
-        """Security guard: block any cross-origin browser requests from external websites."""
+        """Security guard: block any cross-origin browser requests from external websites or sandboxes."""
         origin = self.headers.get("Origin") or self.headers.get("Referer")
         if origin:
             from urllib.parse import urlparse
             try:
                 parsed = urlparse(origin)
                 hostname = (parsed.hostname or "").lower()
-                if hostname not in ("localhost", "127.0.0.1", "::1", ""):
+                if not hostname or hostname not in ("localhost", "127.0.0.1", "::1"):
                     return True
             except Exception:
                 return True
         return False
 
-    def do_OPTIONS(self):
-        # Reject browser preflight requests from untrusted external origins
-        if self._is_untrusted_origin():
+    def _is_untrusted_host(self):
+        """Security guard: block DNS rebinding attacks by strictly validating the Host header."""
+        host = self.headers.get("Host", "").strip()
+        if host:
+            try:
+                if host.startswith("["):
+                    end_idx = host.find("]")
+                    hostname = host[1:end_idx].lower() if end_idx != -1 else host.lower()
+                else:
+                    hostname = host.split(":")[0].strip().lower()
+                if not hostname or hostname not in ("localhost", "127.0.0.1", "::1"):
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def _validate_request_security(self):
+        """Unified validation for Origin/Referer and Host headers."""
+        if self._is_untrusted_host() or self._is_untrusted_origin():
             self.send_response(403)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+            self.wfile.write(b"Forbidden: Untrusted host or cross-origin request blocked.")
+            return False
+        return True
+
+    def do_OPTIONS(self):
+        # Reject browser preflight requests from untrusted external origins or hosts
+        if not self._validate_request_security():
             return
         self.send_response(204)
         self.end_headers()
 
     def do_GET(self):
-        if self._is_untrusted_origin():
-            self.send_response(403)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+        if not self._validate_request_security():
             return
 
         clean_path = self.path.split("?")[0].rstrip("/")
@@ -5000,11 +5018,7 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
             self.send_response(404)
 
     def do_POST(self):
-        if self._is_untrusted_origin():
-            self.send_response(403)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Forbidden: Cross-origin browser access blocked.")
+        if not self._validate_request_security():
             return
 
         clean_path = self.path.split("?")[0].rstrip("/")

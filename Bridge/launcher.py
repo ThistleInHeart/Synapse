@@ -5054,11 +5054,11 @@ class AILauncherApp(ctk.CTk):
                     exe_path = sys.executable
                     subprocess.Popen([exe_path, "--bridge"], creationflags=flags, cwd=exe_dir, env=clean_env)
             else:
+                flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
                 if os.path.exists(BRIDGE_SCRIPT_PATH):
-                    cmd = f'start "Synapse Bridge Console" py -3 "{BRIDGE_SCRIPT_PATH}"'
-                    subprocess.Popen(cmd, shell=True, env=clean_env)
+                    bridge_dir = os.path.dirname(os.path.abspath(BRIDGE_SCRIPT_PATH))
+                    subprocess.Popen([sys.executable, BRIDGE_SCRIPT_PATH], creationflags=flags, cwd=bridge_dir, env=clean_env)
                 else:
-                    flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
                     subprocess.Popen([sys.executable, __file__, "--bridge"], creationflags=flags, env=clean_env)
             self.status_text.configure(text=self.i18n.t("UI_STATUS_STARTING", "Запуск Synapse Bridge..."), text_color="#fbbf24")
         except Exception as e:
