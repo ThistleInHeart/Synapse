@@ -5039,15 +5039,22 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(body)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                return
             except Exception as e:
+                if isinstance(e, OSError) and getattr(e, "winerror", None) in (10053, 10054):
+                    return
                 err_resp = {"has_memory": False, "error": str(e)}
                 body = json.dumps(err_resp, ensure_ascii=False).encode("utf-8")
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
             return
 
         if clean_path in ("/chat", "/generate", "/api/chat", "/group_chat", "/npc_group_chat", "/friend_chat", "/direct_dialogue", "/context", "/dump_context", ""):
@@ -5172,18 +5179,25 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                return
             except Exception as e:
+                if isinstance(e, OSError) and getattr(e, "winerror", None) in (10053, 10054):
+                    return
                 import traceback
                 traceback.print_exc()
                 print(f"[BRIDGE ERROR] Ошибка при обработке {clean_path}: {e}")
                 err_resp = {"success": False, "thought": "", "error": f"Внутренняя ошибка Bridge: {e}"}
                 body = json.dumps(err_resp, ensure_ascii=False).encode("utf-8")
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    pass
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -5212,6 +5226,17 @@ def disable_quick_edit():
                     kernel32.SetConsoleMode(h_stdin, new_mode)
         except Exception:
             pass
+
+
+class AIBridgeServer(ServerClass):
+    """Custom HTTP server that gracefully ignores client disconnects."""
+    def handle_error(self, request, client_address):
+        exc_type, exc_val, _ = sys.exc_info()
+        if exc_type in (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return
+        if isinstance(exc_val, OSError) and getattr(exc_val, "winerror", None) in (10053, 10054):
+            return
+        super().handle_error(request, client_address)
 
 
 def run_server(port=DEFAULT_PORT):
@@ -5284,7 +5309,7 @@ def run_server(port=DEFAULT_PORT):
         print("=" * 65 + "\n")
 
     server_address = ("127.0.0.1", port)
-    httpd = ServerClass(server_address, AIBridgeRequestHandler)
+    httpd = AIBridgeServer(server_address, AIBridgeRequestHandler)
 
     try:
         httpd.serve_forever()
