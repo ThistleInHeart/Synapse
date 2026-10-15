@@ -859,22 +859,6 @@ def _dispatch_direct_dialogue(actor_sim_info, target_sim_info, spoken_text: str)
         is_error=False,
     )
 
-    # 3. Synapse AI Balloon (Phase 3.2: Player Speech Balloon over actor Sim)
-    try:
-        try:
-            import synapse_balloons
-        except ImportError:
-            from balloons import synapse_balloons
-        if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
-            synapse_balloons.show_sim_balloon(
-                sim_info_or_id=actor_sim_info,
-                text=spoken_text,
-                balloon_type="speech",
-                name=getattr(actor_sim_info, "first_name", None),
-            )
-    except Exception as ex_b:
-        log(f"[BALLOON] Could not display player speech balloon: {ex_b}")
-
     t = threading.Thread(
         target=_worker_direct_dialogue,
         args=(actor_sim_info, target_sim_info, spoken_text, waiting_dialog, prev_speed),
@@ -1039,45 +1023,11 @@ def _apply_direct_dialogue_results(
     actor_id = getattr(actor_sim_info, "sim_id", 0)
     tgt_id = getattr(target_sim_info, "sim_id", 0)
 
-    # 1. Apply relationship change
-    if delta_fr != 0 or delta_rom != 0:
-        apply_chat_relationship_impact(actor_sim_info, target_sim_info, delta_fr=delta_fr, delta_rom=delta_rom)
+    from ai_social_pc.main_thread import run_on_main_thread
 
-    # 2. Trigger social animation
-    try:
-        actor_sim = actor_sim_info.get_sim_instance() if hasattr(actor_sim_info, "get_sim_instance") else None
-        target_sim = target_sim_info.get_sim_instance() if hasattr(target_sim_info, "get_sim_instance") else None
-        if actor_sim is not None and target_sim is not None:
-            play_direct_dialogue_animation(actor_sim, target_sim, anim_category)
-    except Exception as ex_anim:
-        log_exception("Error playing animation", ex_anim)
-
-    # 3. Format clean notification
-    is_en = _is_en()
-    if is_en:
-        anim_title = ANIM_NAME_EN.get(anim_category.upper(), "Conversation")
-    else:
-        anim_title = ANIM_NAME_RU.get(anim_category.upper(), "Разговор")
-    anim_ru = anim_title
-    stats_parts = []
-    if delta_fr != 0:
-        fr_lbl = "Friendship" if is_en else "Дружба"
-        stats_parts.append(f"{fr_lbl}: {delta_fr:+d}")
-    if delta_rom != 0:
-        rom_lbl = "Romance" if is_en else "Романтика"
-        stats_parts.append(f"{rom_lbl}: {delta_rom:+d}")
-    stats_tag = f" | {', '.join(stats_parts)}" if stats_parts else ""
-
-    notif_body = f"«{reply_text}»\n\n[{anim_ru}{stats_tag}]"
-
-    show_chat_notification(
-        title=f"{target_name}:",
-        text=notif_body,
-        sim_info=target_sim_info,
-        is_error=False,
-    )
-
-    # Synapse AI Balloon (Phase 3.2: AI Reply Speech Balloon over target Sim)
+    # =========================================================================
+    # Phase 1: Player Sim speaks first (sequential dialogue playback)
+    # =========================================================================
     try:
         try:
             import synapse_balloons
@@ -1085,13 +1035,88 @@ def _apply_direct_dialogue_results(
             from balloons import synapse_balloons
         if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
             synapse_balloons.show_sim_balloon(
-                sim_info_or_id=target_sim_info,
-                text=reply_text,
+                sim_info_or_id=actor_sim_info,
+                text=spoken_text,
                 balloon_type="speech",
-                name=getattr(target_sim_info, "first_name", None),
+                name=getattr(actor_sim_info, "first_name", None),
             )
     except Exception as ex_b:
-        log(f"[BALLOON] Could not display AI reply speech balloon: {ex_b}")
+        log(f"[BALLOON] Could not display player speech balloon: {ex_b}")
 
-    # 4. Immediate summarization after conversation turn (actions execute right away)
-    _trigger_immediate_summarization(actor_sim_info, target_sim_info)
+    # Calculate reading and typing delay for player's speech before NPC responds
+    # (35 characters per second typing speed + comfortable reading hold)
+    typing_time = len(spoken_text) / 35.0
+    player_delay = max(2.5, min(6.0, typing_time + 1.6))
+
+    # =========================================================================
+    # Phase 2: NPC Sim replies after player finishes speaking
+    # =========================================================================
+    def _execute_npc_reply():
+        if services is not None and hasattr(services, "current_zone"):
+            try:
+                zone = services.current_zone()
+                if zone is None or getattr(zone, "is_zone_shutting_down", False):
+                    return
+            except Exception:
+                pass
+
+        # 1. Apply relationship impact
+        if delta_fr != 0 or delta_rom != 0:
+            apply_chat_relationship_impact(actor_sim_info, target_sim_info, delta_fr=delta_fr, delta_rom=delta_rom)
+
+        # 2. Trigger social animation
+        try:
+            actor_sim = actor_sim_info.get_sim_instance() if hasattr(actor_sim_info, "get_sim_instance") else None
+            target_sim = target_sim_info.get_sim_instance() if hasattr(target_sim_info, "get_sim_instance") else None
+            if actor_sim is not None and target_sim is not None:
+                play_direct_dialogue_animation(actor_sim, target_sim, anim_category)
+        except Exception as ex_anim:
+            log_exception("Error playing animation", ex_anim)
+
+        # 3. Notification of reply with relationship deltas
+        is_en = _is_en()
+        if is_en:
+            anim_title = ANIM_NAME_EN.get(anim_category.upper(), "Conversation")
+        else:
+            anim_title = ANIM_NAME_RU.get(anim_category.upper(), "Разговор")
+        anim_ru = anim_title
+        stats_parts = []
+        if delta_fr != 0:
+            fr_lbl = "Friendship" if is_en else "Дружба"
+            stats_parts.append(f"{fr_lbl}: {delta_fr:+d}")
+        if delta_rom != 0:
+            rom_lbl = "Romance" if is_en else "Романтика"
+            stats_parts.append(f"{rom_lbl}: {delta_rom:+d}")
+        stats_tag = f" | {', '.join(stats_parts)}" if stats_parts else ""
+
+        notif_body = f"«{reply_text}»\n\n[{anim_ru}{stats_tag}]"
+
+        show_chat_notification(
+            title=f"{target_name}:",
+            text=notif_body,
+            sim_info=target_sim_info,
+            is_error=False,
+        )
+
+        # 4. Synapse AI Balloon (Phase 3.2: AI Reply Speech Balloon over target Sim)
+        try:
+            try:
+                import synapse_balloons
+            except ImportError:
+                from balloons import synapse_balloons
+            if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
+                synapse_balloons.show_sim_balloon(
+                    sim_info_or_id=target_sim_info,
+                    text=reply_text,
+                    balloon_type="speech",
+                    name=getattr(target_sim_info, "first_name", None),
+                )
+        except Exception as ex_b:
+            log(f"[BALLOON] Could not display AI reply speech balloon: {ex_b}")
+
+        # 5. Immediate summarization after conversation turn
+        _trigger_immediate_summarization(actor_sim_info, target_sim_info)
+
+    reply_timer = threading.Timer(player_delay, lambda: run_on_main_thread(_execute_npc_reply))
+    reply_timer.daemon = True
+    reply_timer.start()
