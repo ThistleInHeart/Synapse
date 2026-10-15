@@ -192,10 +192,10 @@ package s4ai.boot
          balloon.addChild(body);
          
          var isThought:Boolean = (balloonType == "thought");
-         var maxTextWidth:Number = 240;
-         var padX:Number = 14;
-         var padY:Number = 10;
-         var radius:Number = isThought ? 16 : 14;
+         var maxTextWidth:Number = 290;
+         var padX:Number = 18;
+         var padY:Number = 14;
+         var radius:Number = isThought ? 20 : 16;
          
          // Text field with Scaleform embedded font
          var tf:TextField = new TextField();
@@ -206,8 +206,8 @@ package s4ai.boot
          tf.mouseEnabled = false;
          tf.embedFonts = true;
          
-         var fmt:TextFormat = new TextFormat("$TextFont", 13, 0x1E1E24);
-         fmt.leading = 3;
+         var fmt:TextFormat = new TextFormat("$TextFont", 15, 0x1E1E24);
+         fmt.leading = 4;
          tf.defaultTextFormat = fmt;
          tf.width = maxTextWidth;
          
@@ -236,13 +236,13 @@ package s4ai.boot
             ntf.mouseEnabled = false;
             ntf.embedFonts = true;
             
-            var nfmt:TextFormat = new TextFormat("$BoldHeadlineFont", 10, 0xFFFFFF, true);
+            var nfmt:TextFormat = new TextFormat("$BoldHeadlineFont", 11, 0xFFFFFF, true);
             ntf.defaultTextFormat = nfmt;
             ntf.text = simName;
             
-            var pillPadX:Number = 7;
-            var pillPadY:Number = 2;
-            nameH = Math.round(ntf.textHeight + pillPadY * 2 + 1);
+            var pillPadX:Number = 8;
+            var pillPadY:Number = 3;
+            nameH = Math.round(ntf.textHeight + pillPadY * 2 + 2);
             nameW = Math.round(ntf.textWidth + 4 + pillPadX * 2);
             
             var nMat:Matrix = new Matrix();
@@ -261,7 +261,7 @@ package s4ai.boot
          
          var contentW:Number = Math.max(actualTextW, nameW);
          var boxW:Number = contentW + padX * 2;
-         var boxH:Number = actualTextH + padY * 2 + (hasName ? nameH + 6 : 0);
+         var boxH:Number = actualTextH + padY * 2 + (hasName ? nameH + 8 : 0);
          
          var left:Number = -boxW / 2;
          var top:Number = -boxH;
@@ -283,9 +283,9 @@ package s4ai.boot
             tail = new Shape();
             tail.graphics.lineStyle(1.6, 0xD4D9E2, 0.95, true);
             tail.graphics.beginFill(0xFFFFFF, 0.98);
-            tail.graphics.drawCircle(-5, top + boxH + 7, 4.2);
-            tail.graphics.drawCircle(-2.5, top + boxH + 15, 3.0);
-            tail.graphics.drawCircle(0, top + boxH + 21, 1.8);
+            tail.graphics.drawCircle(-6, top + boxH + 9, 5.0);
+            tail.graphics.drawCircle(-3, top + boxH + 19, 3.5);
+            tail.graphics.drawCircle(0, top + boxH + 27, 2.0);
             tail.graphics.endFill();
          }
          else
@@ -299,15 +299,15 @@ package s4ai.boot
             // Speech pointer triangle
             bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
             bg.graphics.beginFill(0xF4F6F9, 1.0);
-            bg.graphics.moveTo(-7, top + boxH);
-            bg.graphics.lineTo(0, top + boxH + 9);
-            bg.graphics.lineTo(7, top + boxH);
+            bg.graphics.moveTo(-9, top + boxH);
+            bg.graphics.lineTo(0, top + boxH + 11);
+            bg.graphics.lineTo(9, top + boxH);
             bg.graphics.endFill();
             
             // Erase dividing border line across the base of the triangle
             bg.graphics.lineStyle(2.4, 0xF4F6F9, 1.0);
-            bg.graphics.moveTo(-6, top + boxH);
-            bg.graphics.lineTo(6, top + boxH);
+            bg.graphics.moveTo(-8, top + boxH);
+            bg.graphics.lineTo(8, top + boxH);
          }
          
          body.addChild(bg);
@@ -322,7 +322,7 @@ package s4ai.boot
             nameSprite.x = left + padX;
             nameSprite.y = curY;
             body.addChild(nameSprite);
-            curY += nameH + 6;
+            curY += nameH + 8;
          }
          
          tf.x = left + padX;
