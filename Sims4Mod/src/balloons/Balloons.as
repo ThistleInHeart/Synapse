@@ -49,12 +49,14 @@ package s4ai.boot
          try
          {
             var dbg:Object = getDefinitionByName("olympus.io.DebugCommands");
-            dbg.Register(CMD_SHOW, this.onShowCommand, "Show Synapse AI Balloon", "simId name text duration");
+            dbg.Register(CMD_SHOW, this.onShowCommand, "Show Synapse AI Balloon", "simId [type] name text duration");
             dbg.Register(CMD_CLEAR, this.onClearCommand, "Clear Synapse AI Balloons", "");
          }
          catch(e2:Error) {}
          
+         // Immediately clear any modal state in constructor
          this.releaseModality();
+         
          addEventListener(Event.ADDED_TO_STAGE, this.onAdded, false, 0, true);
       }
       
@@ -67,7 +69,7 @@ package s4ai.boot
          }
          this.isStarted = true;
          
-         // Attach balloonLayer directly to the root Stage so it is never hidden or clipped
+         // Attach balloonLayer directly to root Stage
          if(stage)
          {
             stage.addChild(this.balloonLayer);
@@ -79,7 +81,7 @@ package s4ai.boot
          }
          catch(err:Error) {}
          
-         // Immediately release modality so no modal blue backdrop or click interception occurs
+         // Release modality instantly and backup at 250ms
          this.releaseModality();
          setTimeout(this.releaseModality, 250);
          
@@ -151,18 +153,29 @@ package s4ai.boot
          }
          
          var simId:String = String(args[0]);
-         var simName:String = args.length > 1 ? this.decodeSafe(String(args[1])) : "";
-         var text:String = args.length > 2 ? this.decodeSafe(String(args[2])) : "Привет!";
-         var duration:Number = args.length > 3 ? Number(args[3]) : 6.0;
+         var balloonType:String = "speech";
+         var idx:int = 1;
+         
+         if(args.length > 2 && (String(args[1]) == "speech" || String(args[1]) == "thought"))
+         {
+            balloonType = String(args[1]);
+            idx = 2;
+         }
+         
+         var simName:String = args.length > idx ? this.decodeSafe(String(args[idx])) : "";
+         idx++;
+         var text:String = args.length > idx ? this.decodeSafe(String(args[idx])) : "Привет!";
+         idx++;
+         var duration:Number = args.length > idx ? Number(args[idx]) : 6.0;
          if(isNaN(duration) || duration <= 0)
          {
             duration = 6.0;
          }
          
-         this.createBalloon(simId, simName, text, duration);
+         this.createBalloon(simId, balloonType, simName, text, duration);
       }
       
-      private function createBalloon(simId:String, simName:String, text:String, durationSec:Number):void
+      private function createBalloon(simId:String, balloonType:String, simName:String, text:String, durationSec:Number):void
       {
          if(this.activeBalloons[simId])
          {
@@ -178,11 +191,12 @@ package s4ai.boot
          body.mouseChildren = false;
          balloon.addChild(body);
          
-         var maxTextWidth:Number = 280;
+         var maxTextWidth:Number = 290;
          var padX:Number = 16;
          var padY:Number = 12;
-         var radius:Number = 16;
+         var radius:Number = (balloonType == "thought") ? 22 : 16;
          
+         // Text field with Scaleform embedded font
          var tf:TextField = new TextField();
          tf.multiline = true;
          tf.wordWrap = true;
@@ -195,15 +209,18 @@ package s4ai.boot
          fmt.leading = 4;
          tf.defaultTextFormat = fmt;
          tf.width = maxTextWidth;
-         tf.text = text;
          
+         // Temporarily set full text to measure final dimensions accurately
+         tf.text = text;
          if(tf.textWidth + 8 < maxTextWidth)
          {
             tf.width = tf.textWidth + 8;
          }
-         
          var actualTextW:Number = tf.width;
          var actualTextH:Number = tf.height;
+         
+         // Reset text to empty string for typewriter effect
+         tf.text = "";
          
          var hasName:Boolean = simName != null && simName.length > 0 && simName != "null";
          var nameSprite:Sprite = new Sprite();
@@ -227,7 +244,10 @@ package s4ai.boot
             
             var nMat:Matrix = new Matrix();
             nMat.createGradientBox(nameW, nameH, Math.PI / 2, 0, 0);
-            nameSprite.graphics.beginGradientFill(GradientType.LINEAR, [0x7A5CFA, 0x5D3EBC], [1, 1], [0, 255], nMat);
+            
+            var nColorTop:uint = (balloonType == "thought") ? 0x8E65FA : 0x7A5CFA;
+            var nColorBot:uint = (balloonType == "thought") ? 0x6E48C9 : 0x5D3EBC;
+            nameSprite.graphics.beginGradientFill(GradientType.LINEAR, [nColorTop, nColorBot], [1, 1], [0, 255], nMat);
             nameSprite.graphics.drawRoundRect(0, 0, nameW, nameH, 8, 8);
             nameSprite.graphics.endFill();
             
@@ -247,18 +267,54 @@ package s4ai.boot
          var bgMat:Matrix = new Matrix();
          bgMat.createGradientBox(boxW, boxH, Math.PI / 2, left, top);
          
-         bg.graphics.lineStyle(1.8, 0xDADEE5, 0.95, true);
-         bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.97, 0.97], [0, 255], bgMat);
-         bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
-         bg.graphics.endFill();
+         if(balloonType == "thought")
+         {
+            // Thought Cloud Body
+            bg.graphics.lineStyle(1.8, 0xD0D6E2, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF6F8FC], [0.98, 0.98], [0, 255], bgMat);
+            bg.graphics.drawRoundRect(left, top, boxW, boxH, 22, 22);
+            bg.graphics.endFill();
+            
+            // Soft cloud scallop lobes on top
+            bg.graphics.lineStyle(1.6, 0xD0D6E2, 0.95, true);
+            bg.graphics.beginFill(0xFFFFFF, 0.98);
+            var rLobe:Number = 9;
+            bg.graphics.drawCircle(left + rLobe + 3, top + 4, rLobe * 0.85);
+            bg.graphics.drawCircle(left + boxW - rLobe - 3, top + 4, rLobe * 0.85);
+            bg.graphics.drawCircle(left + boxW * 0.38, top + 1, rLobe * 0.95);
+            bg.graphics.drawCircle(left + boxW * 0.62, top + 1, rLobe * 0.95);
+            bg.graphics.endFill();
+         }
+         else
+         {
+            // Speech Card Body
+            bg.graphics.lineStyle(1.8, 0xDADEE5, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.97, 0.97], [0, 255], bgMat);
+            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
+            bg.graphics.endFill();
+         }
          
          var tail:Shape = new Shape();
-         tail.graphics.lineStyle(1.8, 0xDADEE5, 0.95, true);
-         tail.graphics.beginFill(0xF4F6F9, 0.97);
-         tail.graphics.moveTo(-9, top + boxH);
-         tail.graphics.lineTo(0, 10);
-         tail.graphics.lineTo(9, top + boxH);
-         tail.graphics.endFill();
+         if(balloonType == "thought")
+         {
+            // 3 descending circular thought bubbles pointing to head
+            tail.graphics.lineStyle(1.6, 0xD0D6E2, 0.95, true);
+            tail.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF6F8FC], [0.98, 0.98], [0, 255], bgMat);
+            tail.graphics.drawCircle(-5, top + boxH + 6, 5.5);
+            tail.graphics.drawCircle(-2, top + boxH + 15, 3.8);
+            tail.graphics.drawCircle(0, top + boxH + 22, 2.2);
+            tail.graphics.endFill();
+         }
+         else
+         {
+            // Speech pointer triangle
+            tail.graphics.lineStyle(1.8, 0xDADEE5, 0.95, true);
+            tail.graphics.beginFill(0xF4F6F9, 0.97);
+            tail.graphics.moveTo(-9, top + boxH);
+            tail.graphics.lineTo(0, top + boxH + 10);
+            tail.graphics.lineTo(9, top + boxH);
+            tail.graphics.endFill();
+         }
          
          body.addChild(bg);
          body.addChild(tail);
@@ -289,7 +345,7 @@ package s4ai.boot
          }
          this.balloonLayer.addChild(balloon);
          
-         // Safety guard: ensure balloon is on stage to prevent C++ NULL dereference
+         // Safety guard: ensure balloon is on stage
          if(!balloon.stage)
          {
             return;
@@ -335,6 +391,10 @@ package s4ai.boot
             "simId": simId,
             "balloon": balloon,
             "body": body,
+            "tf": tf,
+            "fullText": text,
+            "typedChars": 0,
+            "type": balloonType,
             "startTime": getTimer(),
             "duration": durationSec * 1000,
             "state": "opening",
@@ -354,6 +414,21 @@ package s4ai.boot
             var b:Object = this.activeBalloons[key];
             var elapsed:Number = now - b.startTime;
             var body:Sprite = b.body as Sprite;
+            
+            // Typewriter effect (35 characters per second)
+            if(b.tf != null && b.fullText != null)
+            {
+               var typeElapsed:Number = now - b.startTime - 120; // start typing 120ms after open starts
+               if(typeElapsed > 0)
+               {
+                  var targetCount:int = Math.min(b.fullText.length, Math.floor(typeElapsed * 0.035));
+                  if(targetCount != b.typedChars)
+                  {
+                     b.typedChars = targetCount;
+                     (b.tf as TextField).text = b.fullText.substr(0, targetCount);
+                  }
+               }
+            }
             
             if(b.state == "opening")
             {
