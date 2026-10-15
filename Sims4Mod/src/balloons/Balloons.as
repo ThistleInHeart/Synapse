@@ -193,9 +193,9 @@ package s4ai.boot
          
          var isThought:Boolean = (balloonType == "thought");
          var maxTextWidth:Number = 290;
-         var padX:Number = isThought ? 22 : 16;
-         var padY:Number = isThought ? 16 : 12;
-         var radius:Number = isThought ? 22 : 16;
+         var padX:Number = 18;
+         var padY:Number = 14;
+         var radius:Number = isThought ? 20 : 16;
          
          // Text field with Scaleform embedded font
          var tf:TextField = new TextField();
@@ -269,139 +269,43 @@ package s4ai.boot
          var bgMat:Matrix = new Matrix();
          bgMat.createGradientBox(boxW, boxH, Math.PI / 2, left, top);
          
-         var borderW:Number = 1.8;
-         
          if(isThought)
          {
-            var bHalf:Number = boxH / 2;
-            var cornerR:Number = Math.min(18, bHalf * 0.5);
-            var lobeR:Number = Math.max(12, Math.min(17, bHalf * 0.36));
-            
-            // Build list of perimeter lobes
-            var lobesX:Array = [];
-            var lobesY:Array = [];
-            var lobesR:Array = [];
-            
-            // 4 corners
-            var cOff:Number = cornerR * 0.25;
-            lobesX.push(left + cornerR - cOff);
-            lobesY.push(top + cornerR - cOff);
-            lobesR.push(lobeR * 1.15);
-            
-            lobesX.push(left + boxW - cornerR + cOff);
-            lobesY.push(top + cornerR - cOff);
-            lobesR.push(lobeR * 1.12);
-            
-            lobesX.push(left + boxW - cornerR + cOff);
-            lobesY.push(top + boxH - cornerR + cOff);
-            lobesR.push(lobeR * 1.14);
-            
-            lobesX.push(left + cornerR - cOff);
-            lobesY.push(top + boxH - cornerR + cOff);
-            lobesR.push(lobeR * 1.1);
-            
-            // Top edge lobes
-            var topW:Number = boxW - cornerR * 2;
-            var nTop:int = Math.max(1, Math.round(topW / (lobeR * 2.2)));
-            for(var kt:int = 1; kt <= nTop; kt++)
-            {
-               var fracT:Number = kt / (nTop + 1);
-               lobesX.push(left + cornerR + topW * fracT);
-               lobesY.push(top + lobeR * 0.12);
-               lobesR.push(lobeR * (kt % 2 == 1 ? 1.18 : 1.05));
-            }
-            
-            // Bottom edge lobes
-            var botW:Number = boxW - cornerR * 2;
-            var nBot:int = Math.max(1, Math.round(botW / (lobeR * 2.2)));
-            for(var kb:int = 1; kb <= nBot; kb++)
-            {
-               var fracB:Number = kb / (nBot + 1);
-               lobesX.push(left + cornerR + botW * fracB);
-               lobesY.push(top + boxH - lobeR * 0.12);
-               lobesR.push(lobeR * (kb % 2 == 0 ? 1.15 : 1.02));
-            }
-            
-            // Side edges (left & right)
-            var sideH:Number = boxH - cornerR * 2;
-            var nSide:int = Math.max(1, Math.round(sideH / (lobeR * 2.0)));
-            for(var ks:int = 1; ks <= nSide; ks++)
-            {
-               var fracS:Number = ks / (nSide + 1);
-               var pyS:Number = top + cornerR + sideH * fracS;
-               lobesX.push(left + lobeR * 0.12);
-               lobesY.push(pyS);
-               lobesR.push(lobeR * 1.08);
-               
-               lobesX.push(left + boxW - lobeR * 0.12);
-               lobesY.push(pyS);
-               lobesR.push(lobeR * 1.06);
-            }
-            
-            // Center inner core rect
-            var coreInset:Number = 7;
-            var coreLeft:Number = left + coreInset;
-            var coreTop:Number = top + coreInset;
-            var coreW:Number = boxW - coreInset * 2;
-            var coreH:Number = boxH - coreInset * 2;
-            var coreR:Number = 14;
-            
-            // PASS 1: Unified Outer Border Silhouette (Solid Border Fill)
-            bg.graphics.beginFill(0xCBD1DC, 0.96);
-            bg.graphics.drawRoundRect(coreLeft - borderW, coreTop - borderW, coreW + borderW * 2, coreH + borderW * 2, coreR + borderW * 2, coreR + borderW * 2);
-            for(var i1:int = 0; i1 < lobesX.length; i1++)
-            {
-               bg.graphics.drawCircle(lobesX[i1], lobesY[i1], lobesR[i1] + borderW);
-            }
+            // Modern Thought Card (Life is Strange / Detroit style)
+            bg.graphics.lineStyle(1.8, 0xCBC7DE, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF5F3FA], [0.98, 0.98], [0, 255], bgMat);
+            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
             bg.graphics.endFill();
             
-            // PASS 2: Unified Inner Fill (Soft Gradient White to Pale Blue-Gray)
-            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF6F8FC], [0.98, 0.98], [0, 255], bgMat);
-            bg.graphics.drawRoundRect(coreLeft, coreTop, coreW, coreH, coreR, coreR);
-            for(var i2:int = 0; i2 < lobesX.length; i2++)
-            {
-               bg.graphics.drawCircle(lobesX[i2], lobesY[i2], lobesR[i2]);
-            }
-            bg.graphics.endFill();
-            
-            // Descending Thought Bubble Tail (3 cleanly spaced bubbles pointing to head)
-            var tailX:Array = [-8, -4, -1];
-            var tailY:Array = [top + boxH + 13, top + boxH + 24, top + boxH + 33];
-            var tailR:Array = [5.5, 3.8, 2.2];
-            
+            // 3 descending circular thought bubbles pointing to head
             tail = new Shape();
-            // Tail Border Pass
-            tail.graphics.beginFill(0xCBD1DC, 0.96);
-            for(var tb1:int = 0; tb1 < 3; tb1++)
-            {
-               tail.graphics.drawCircle(tailX[tb1], tailY[tb1], tailR[tb1] + borderW);
-            }
-            tail.graphics.endFill();
-            // Tail Fill Pass
+            tail.graphics.lineStyle(1.6, 0xCBC7DE, 0.95, true);
             tail.graphics.beginFill(0xFFFFFF, 0.98);
-            for(var tb2:int = 0; tb2 < 3; tb2++)
-            {
-               tail.graphics.drawCircle(tailX[tb2], tailY[tb2], tailR[tb2]);
-            }
+            tail.graphics.drawCircle(-6, top + boxH + 9, 5.0);
+            tail.graphics.drawCircle(-3, top + boxH + 19, 3.5);
+            tail.graphics.drawCircle(0, top + boxH + 27, 2.0);
             tail.graphics.endFill();
          }
          else
          {
-            // Speech Card Body (Pass 1: Border with fused tail triangle)
-            bg.graphics.beginFill(0xDADEE5, 0.96);
-            bg.graphics.drawRoundRect(left - borderW, top - borderW, boxW + borderW * 2, boxH + borderW * 2, radius + borderW * 2, radius + borderW * 2);
-            bg.graphics.moveTo(-10 - borderW, top + boxH - 1);
-            bg.graphics.lineTo(0, top + boxH + 11 + borderW);
-            bg.graphics.lineTo(10 + borderW, top + boxH - 1);
-            bg.graphics.endFill();
-            
-            // Speech Card Body (Pass 2: Inner Fill with fused tail triangle)
+            // Modern Speech Card Body
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
             bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
             bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
-            bg.graphics.moveTo(-10, top + boxH - 1);
-            bg.graphics.lineTo(0, top + boxH + 11);
-            bg.graphics.lineTo(10, top + boxH - 1);
             bg.graphics.endFill();
+            
+            // Speech pointer triangle
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
+            bg.graphics.beginFill(0xF4F6F9, 1.0);
+            bg.graphics.moveTo(-9, top + boxH);
+            bg.graphics.lineTo(0, top + boxH + 11);
+            bg.graphics.lineTo(9, top + boxH);
+            bg.graphics.endFill();
+            
+            // Erase dividing border line across the base of the triangle
+            bg.graphics.lineStyle(2.4, 0xF4F6F9, 1.0);
+            bg.graphics.moveTo(-8, top + boxH);
+            bg.graphics.lineTo(8, top + boxH);
          }
          
          body.addChild(bg);
@@ -423,7 +327,14 @@ package s4ai.boot
          tf.y = curY;
          body.addChild(tf);
          
-         body.filters = [new DropShadowFilter(5, 90, 0x000000, 0.28, 10, 10, 1, 3)];
+         if(isThought)
+         {
+            body.filters = [new DropShadowFilter(5, 90, 0x3E2D60, 0.22, 12, 12, 1, 3)];
+         }
+         else
+         {
+            body.filters = [new DropShadowFilter(5, 90, 0x000000, 0.25, 10, 10, 1, 3)];
+         }
          
          body.scaleX = 0.2;
          body.scaleY = 0.2;
