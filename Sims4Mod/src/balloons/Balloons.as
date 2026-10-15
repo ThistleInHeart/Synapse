@@ -210,17 +210,6 @@ package s4ai.boot
          fmt.leading = 4;
          tf.defaultTextFormat = fmt;
          tf.width = maxTextWidth;
-         
-         // Temporarily set full text to measure final dimensions accurately
-         tf.text = text;
-         if(tf.textWidth + 8 < maxTextWidth)
-         {
-            tf.width = tf.textWidth + 8;
-         }
-         var actualTextW:Number = tf.width;
-         var actualTextH:Number = tf.height;
-         
-         // Reset text to empty string for typewriter effect
          tf.text = "";
          
          var hasName:Boolean = simName != null && simName.length > 0 && simName != "null";
@@ -259,74 +248,23 @@ package s4ai.boot
             nameSprite.addChild(ntf);
          }
          
-         var contentW:Number = Math.max(actualTextW, nameW);
-         var boxW:Number = contentW + padX * 2;
-         var boxH:Number = actualTextH + padY * 2 + (hasName ? nameH + 8 : 0);
-         
-         var left:Number = -boxW / 2;
-         var top:Number = -boxH;
+         var minBoxW:Number = Math.max(76, hasName ? (nameW + padX * 2) : 60);
+         var initialBoxH:Number = 22 + padY * 2 + (hasName ? nameH + 8 : 0);
          
          var bg:Shape = new Shape();
-         var tail:Shape = null;
-         var bgMat:Matrix = new Matrix();
-         bgMat.createGradientBox(boxW, boxH, Math.PI / 2, left, top);
+         body.addChild(bg);
          
+         var tail:Shape = null;
          if(isThought)
          {
-            // Modern Thought Card (Clean neutral style)
-            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
-            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
-            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
-            bg.graphics.endFill();
-            
-            // 3 descending circular thought bubbles pointing to head
             tail = new Shape();
-            tail.graphics.lineStyle(1.6, 0xD4D9E2, 0.95, true);
-            tail.graphics.beginFill(0xFFFFFF, 0.98);
-            tail.graphics.drawCircle(-6, top + boxH + 9, 5.0);
-            tail.graphics.drawCircle(-3, top + boxH + 19, 3.5);
-            tail.graphics.drawCircle(0, top + boxH + 27, 2.0);
-            tail.graphics.endFill();
-         }
-         else
-         {
-            // Modern Speech Card Body
-            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
-            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
-            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
-            bg.graphics.endFill();
-            
-            // Speech pointer triangle
-            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
-            bg.graphics.beginFill(0xF4F6F9, 1.0);
-            bg.graphics.moveTo(-9, top + boxH);
-            bg.graphics.lineTo(0, top + boxH + 11);
-            bg.graphics.lineTo(9, top + boxH);
-            bg.graphics.endFill();
-            
-            // Erase dividing border line across the base of the triangle
-            bg.graphics.lineStyle(2.4, 0xF4F6F9, 1.0);
-            bg.graphics.moveTo(-8, top + boxH);
-            bg.graphics.lineTo(8, top + boxH);
-         }
-         
-         body.addChild(bg);
-         if(tail != null)
-         {
             body.addChild(tail);
          }
          
-         var curY:Number = top + padY;
          if(hasName)
          {
-            nameSprite.x = left + padX;
-            nameSprite.y = curY;
             body.addChild(nameSprite);
-            curY += nameH + 8;
          }
-         
-         tf.x = left + padX;
-         tf.y = curY;
          body.addChild(tf);
          
          body.filters = [new DropShadowFilter(5, 90, 0x000000, 0.25, 10, 10, 1, 3)];
@@ -388,7 +326,22 @@ package s4ai.boot
             "simId": simId,
             "balloon": balloon,
             "body": body,
+            "bg": bg,
+            "tail": tail,
             "tf": tf,
+            "nameSprite": nameSprite,
+            "hasName": hasName,
+            "nameW": nameW,
+            "nameH": nameH,
+            "padX": padX,
+            "padY": padY,
+            "radius": radius,
+            "leftOffset": -34,
+            "minBoxW": minBoxW,
+            "currentBoxW": minBoxW,
+            "currentBoxH": initialBoxH,
+            "targetBoxW": minBoxW,
+            "targetBoxH": initialBoxH,
             "fullText": text,
             "typedChars": 0,
             "type": balloonType,
@@ -399,6 +352,78 @@ package s4ai.boot
          };
          
          this.activeBalloons[simId] = balloonData;
+         this.redrawBalloon(balloonData);
+      }
+      
+      private function redrawBalloon(b:Object):void
+      {
+         var bg:Shape = b.bg as Shape;
+         if(!bg) return;
+         
+         var boxW:Number = Math.round(b.currentBoxW);
+         var boxH:Number = Math.round(b.currentBoxH);
+         var left:Number = b.leftOffset;
+         var top:Number = -boxH;
+         var radius:Number = b.radius;
+         var isThought:Boolean = (b.type == "thought");
+         
+         bg.graphics.clear();
+         
+         var bgMat:Matrix = new Matrix();
+         bgMat.createGradientBox(boxW, boxH, Math.PI / 2, left, top);
+         
+         if(isThought)
+         {
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
+            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
+            bg.graphics.endFill();
+            
+            var tail:Shape = b.tail as Shape;
+            if(tail != null)
+            {
+               tail.graphics.clear();
+               tail.graphics.lineStyle(1.6, 0xD4D9E2, 0.95, true);
+               tail.graphics.beginFill(0xFFFFFF, 0.98);
+               tail.graphics.drawCircle(-6, top + boxH + 9, 5.0);
+               tail.graphics.drawCircle(-3, top + boxH + 19, 3.5);
+               tail.graphics.drawCircle(0, top + boxH + 27, 2.0);
+               tail.graphics.endFill();
+            }
+         }
+         else
+         {
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
+            bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
+            bg.graphics.endFill();
+            
+            // Pointer triangle at x = 0
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
+            bg.graphics.beginFill(0xF4F6F9, 1.0);
+            bg.graphics.moveTo(-9, top + boxH);
+            bg.graphics.lineTo(0, top + boxH + 11);
+            bg.graphics.lineTo(9, top + boxH);
+            bg.graphics.endFill();
+            
+            // Erase dividing border line across base of pointer
+            bg.graphics.lineStyle(2.4, 0xF4F6F9, 1.0);
+            bg.graphics.moveTo(-8, top + boxH);
+            bg.graphics.lineTo(8, top + boxH);
+         }
+         
+         var curY:Number = top + b.padY;
+         if(b.hasName && b.nameSprite != null)
+         {
+            b.nameSprite.x = left + b.padX;
+            b.nameSprite.y = curY;
+            curY += b.nameH + 8;
+         }
+         if(b.tf != null)
+         {
+            b.tf.x = left + b.padX;
+            b.tf.y = curY;
+         }
       }
       
       private function onEnterFrame(e:Event):void
@@ -412,19 +437,47 @@ package s4ai.boot
             var elapsed:Number = now - b.startTime;
             var body:Sprite = b.body as Sprite;
             
-            // Typewriter effect (35 characters per second)
+            // Typewriter effect (35 characters per second) & dynamic real-time auto-expansion
             if(b.tf != null && b.fullText != null)
             {
-               var typeElapsed:Number = now - b.startTime - 120; // start typing 120ms after open starts
+               var typeElapsed:Number = now - b.startTime - 100; // start typing 100ms after open starts
                if(typeElapsed > 0)
                {
                   var targetCount:int = Math.min(b.fullText.length, Math.floor(typeElapsed * 0.035));
                   if(targetCount != b.typedChars)
                   {
                      b.typedChars = targetCount;
-                     (b.tf as TextField).text = b.fullText.substr(0, targetCount);
+                     var currentText:String = b.fullText.substr(0, targetCount);
+                     (b.tf as TextField).text = currentText;
+                     
+                     var curTextW:Number = Math.ceil((b.tf as TextField).textWidth) + 8;
+                     var curTextH:Number = Math.ceil((b.tf as TextField).textHeight);
+                     if(curTextH < 22)
+                     {
+                        curTextH = 22;
+                     }
+                     
+                     var contentW:Number = Math.max(curTextW, b.nameW);
+                     b.targetBoxW = Math.max(b.minBoxW, contentW + b.padX * 2);
+                     b.targetBoxH = curTextH + b.padY * 2 + (b.hasName ? b.nameH + 8 : 0);
                   }
                }
+            }
+            
+            // Smoothly interpolate width and height towards target size
+            var dw:Number = b.targetBoxW - b.currentBoxW;
+            var dh:Number = b.targetBoxH - b.currentBoxH;
+            if(Math.abs(dw) > 0.4 || Math.abs(dh) > 0.4)
+            {
+               b.currentBoxW += dw * 0.45;
+               b.currentBoxH += dh * 0.45;
+               this.redrawBalloon(b);
+            }
+            else if(b.currentBoxW != b.targetBoxW || b.currentBoxH != b.targetBoxH)
+            {
+               b.currentBoxW = b.targetBoxW;
+               b.currentBoxH = b.targetBoxH;
+               this.redrawBalloon(b);
             }
             
             if(b.state == "opening")
