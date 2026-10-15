@@ -171,11 +171,15 @@ package s4ai.boot
          {
             duration = 6.0;
          }
+         idx++;
+         var colorTop:uint = args.length > idx ? uint(args[idx]) : 0;
+         idx++;
+         var colorBot:uint = args.length > idx ? uint(args[idx]) : 0;
          
-         this.createBalloon(simId, balloonType, simName, text, duration);
+         this.createBalloon(simId, balloonType, simName, text, duration, colorTop, colorBot);
       }
       
-      private function createBalloon(simId:String, balloonType:String, simName:String, text:String, durationSec:Number):void
+      private function createBalloon(simId:String, balloonType:String, simName:String, text:String, durationSec:Number, colorTop:uint = 0, colorBot:uint = 0):void
       {
          if(this.activeBalloons[simId])
          {
@@ -237,8 +241,44 @@ package s4ai.boot
             var nMat:Matrix = new Matrix();
             nMat.createGradientBox(nameW, nameH, Math.PI / 2, 0, 0);
             
-            var nColorTop:uint = (balloonType == "thought") ? 0x8E65FA : 0x7A5CFA;
-            var nColorBot:uint = (balloonType == "thought") ? 0x6E48C9 : 0x5D3EBC;
+            // 16 Curated Signature Designer Palette Colors (Top, Bottom)
+            var palette:Array = [
+               [0x569670, 0x3D7252], // 0: Sage Green
+               [0x3598A8, 0x227582], // 1: Ocean Teal
+               [0x4290B8, 0x2D7092], // 2: Coastal Azure
+               [0x4D6BFA, 0x344ECA], // 3: Royal Cobalt
+               [0x6966F0, 0x4D4ABF], // 4: Deep Indigo
+               [0x896BB8, 0x674D91], // 5: Lavender Violet
+               [0xA4559F, 0x7E3A7A], // 6: Berry Magenta
+               [0xD6628A, 0xAB4569], // 7: Rose Coral
+               [0xD45B4F, 0xA83F34], // 8: Warm Terracotta
+               [0xC77934, 0x9B5A1F], // 9: Honey Amber
+               [0xB08B32, 0x86671E], // 10: Golden Ochre
+               [0x789842, 0x59742B], // 11: Olive Moss
+               [0x45A38E, 0x307E6D], // 12: Eucalyptus Mint
+               [0x677882, 0x4B5B64], // 13: Slate Steel
+               [0x94677A, 0x72495B], // 14: Dusty Mauve
+               [0x8B6B54, 0x6B4F3A]  // 15: Warm Espresso
+            ];
+            
+            var nColorTop:uint = colorTop;
+            var nColorBot:uint = colorBot;
+            
+            if(nColorTop == 0 || nColorBot == 0)
+            {
+               var hash:uint = 0;
+               for(var chI:int = 0; chI < simId.length; chI++)
+               {
+                  hash = ((hash << 5) - hash) + simId.charCodeAt(chI);
+                  hash &= 0xFFFFFFFF;
+               }
+               var pIdx:int = int(hash % palette.length);
+               nColorTop = uint(palette[pIdx][0]);
+               nColorBot = uint(palette[pIdx][1]);
+            }
+            
+            // Subtle frosted highlight border + volumetric designer gradient
+            nameSprite.graphics.lineStyle(1.0, 0xFFFFFF, 0.45, true);
             nameSprite.graphics.beginGradientFill(GradientType.LINEAR, [nColorTop, nColorBot], [1, 1], [0, 255], nMat);
             nameSprite.graphics.drawRoundRect(0, 0, nameW, nameH, nameH, nameH);
             nameSprite.graphics.endFill();

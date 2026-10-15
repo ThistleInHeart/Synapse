@@ -79,8 +79,50 @@ def calculate_smart_duration(text):
     total = typing_time + hold_time
     return max(4.2, min(14.0, round(total, 1)))
 
-def _do_client_cheat(sim_id, balloon_type, enc_name, enc_text, duration, cid):
-    cmd = "ui.synapse_balloon {} {} {} {} {}".format(sim_id, balloon_type, enc_name, enc_text, duration)
+# 16 Curated Signature Designer Badges: (TopHex, BotHex)
+# Perceptually balanced, guaranteed contrast with white text (#FFFFFF)
+BADGE_PALETTE = [
+    (0x569670, 0x3D7252),  # 0: Sage Green
+    (0x3598A8, 0x227582),  # 1: Ocean Teal
+    (0x4290B8, 0x2D7092),  # 2: Coastal Azure
+    (0x4D6BFA, 0x344ECA),  # 3: Royal Cobalt
+    (0x6966F0, 0x4D4ABF),  # 4: Deep Indigo
+    (0x896BB8, 0x674D91),  # 5: Lavender Violet
+    (0xA4559F, 0x7E3A7A),  # 6: Berry Magenta
+    (0xD6628A, 0xAB4569),  # 7: Rose Coral
+    (0xD45B4F, 0xA83F34),  # 8: Warm Terracotta
+    (0xC77934, 0x9B5A1F),  # 9: Honey Amber
+    (0xB08B32, 0x86671E),  # 10: Golden Ochre
+    (0x789842, 0x59742B),  # 11: Olive Moss
+    (0x45A38E, 0x307E6D),  # 12: Eucalyptus Mint
+    (0x677882, 0x4B5B64),  # 13: Slate Steel
+    (0x94677A, 0x72495B),  # 14: Dusty Mauve
+    (0x8B6B54, 0x6B4F3A),  # 15: Warm Espresso
+]
+
+def get_sim_color_index(sim_id, avoid_index=None):
+    try:
+        sid = int(sim_id or 0)
+    except Exception:
+        sid = 0
+    h = (sid ^ (sid >> 16) ^ (sid >> 32)) & 0xFFFFFFFF
+    idx = h % len(BADGE_PALETTE)
+    if avoid_index is not None and idx == avoid_index:
+        shift = ((h >> 8) % (len(BADGE_PALETTE) - 1)) + 1
+        idx = (idx + shift) % len(BADGE_PALETTE)
+    return idx
+
+def get_sim_badge_colors(sim_id, avoid_sim_id=None):
+    avoid_idx = None
+    if avoid_sim_id and str(avoid_sim_id) != str(sim_id):
+        avoid_idx = get_sim_color_index(avoid_sim_id)
+    idx = get_sim_color_index(sim_id, avoid_index=avoid_idx)
+    return BADGE_PALETTE[idx]
+
+def _do_client_cheat(sim_id, balloon_type, enc_name, enc_text, duration, cid, color_top=0, color_bot=0):
+    cmd = "ui.synapse_balloon {} {} {} {} {} {} {}".format(
+        sim_id, balloon_type, enc_name, enc_text, duration, color_top, color_bot
+    )
     sims4.commands.client_cheat(cmd, cid)
 
 @sims4.commands.Command('synapse.ui_ready', command_type=sims4.commands.CommandType.Live)
@@ -94,8 +136,8 @@ def synapse_ui_ready_cmd(_connection=None):
     
     # Flush any pending balloons
     if _PENDING_BALLOONS:
-        for sim_id, b_type, enc_name, enc_text, duration, old_cid in _PENDING_BALLOONS:
-            _do_client_cheat(sim_id, b_type, enc_name, enc_text, duration, cid or old_cid)
+        for sim_id, b_type, enc_name, enc_text, duration, old_cid, c_top, c_bot in _PENDING_BALLOONS:
+            _do_client_cheat(sim_id, b_type, enc_name, enc_text, duration, cid or old_cid, c_top, c_bot)
         _PENDING_BALLOONS.clear()
         output("Synapse AI Balloons: Отложенные сообщения успешно отображены!")
     return True
@@ -108,7 +150,7 @@ def synapse_balloon_boot_cmd(_connection=None):
     output("Synapse AI Balloons: UI-слот запущен.")
     return True
 
-def show_sim_balloon(sim_info_or_id=None, text="", balloon_type="speech", name=None, duration=None):
+def show_sim_balloon(sim_info_or_id=None, text="", balloon_type="speech", name=None, duration=None, avoid_sim_id=None, color_override=None):
     """
     Public API to display a speech or thought balloon over any Sim in the world.
     
@@ -180,15 +222,21 @@ def show_sim_balloon(sim_info_or_id=None, text="", balloon_type="speech", name=N
     # 4. Smart duration
     if duration is None or duration <= 0:
         duration = calculate_smart_duration(clean_text)
+
+    # 5. Determine unique signature badge colors
+    if color_override and isinstance(color_override, (tuple, list)) and len(color_override) >= 2:
+        color_top, color_bot = int(color_override[0]), int(color_override[1])
+    else:
+        color_top, color_bot = get_sim_badge_colors(sim_id_str, avoid_sim_id=avoid_sim_id)
         
     enc_name = quote(author_name)
     enc_text = quote(clean_text)
     cid = _get_client_id()
     
     if _UI_READY:
-        _do_client_cheat(sim_id_str, balloon_type, enc_name, enc_text, duration, cid)
+        _do_client_cheat(sim_id_str, balloon_type, enc_name, enc_text, duration, cid, color_top, color_bot)
     else:
-        _PENDING_BALLOONS.append((sim_id_str, balloon_type, enc_name, enc_text, duration, cid))
+        _PENDING_BALLOONS.append((sim_id_str, balloon_type, enc_name, enc_text, duration, cid, color_top, color_bot))
         
     return True
 

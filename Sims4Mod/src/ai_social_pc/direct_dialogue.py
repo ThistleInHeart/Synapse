@@ -1039,6 +1039,7 @@ def _apply_direct_dialogue_results(
                 text=spoken_text,
                 balloon_type="speech",
                 name=getattr(actor_sim_info, "first_name", None),
+                avoid_sim_id=tgt_id,
             )
     except Exception as ex_b:
         log(f"[BALLOON] Could not display player speech balloon: {ex_b}")
@@ -1110,6 +1111,7 @@ def _apply_direct_dialogue_results(
                     text=reply_text,
                     balloon_type="speech",
                     name=getattr(target_sim_info, "first_name", None),
+                    avoid_sim_id=actor_id,
                 )
         except Exception as ex_b:
             log(f"[BALLOON] Could not display AI reply speech balloon: {ex_b}")
