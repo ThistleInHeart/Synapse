@@ -240,8 +240,10 @@ package s4ai.boot
             ntf.defaultTextFormat = nfmt;
             ntf.text = simName;
             
-            nameW = ntf.textWidth + 14;
-            nameH = ntf.textHeight + 4;
+            var pillPadX:Number = 8;
+            var pillPadY:Number = 3;
+            nameH = Math.round(ntf.textHeight + pillPadY * 2 + 2);
+            nameW = Math.round(ntf.textWidth + 4 + pillPadX * 2);
             
             var nMat:Matrix = new Matrix();
             nMat.createGradientBox(nameW, nameH, Math.PI / 2, 0, 0);
@@ -249,17 +251,17 @@ package s4ai.boot
             var nColorTop:uint = (balloonType == "thought") ? 0x8E65FA : 0x7A5CFA;
             var nColorBot:uint = (balloonType == "thought") ? 0x6E48C9 : 0x5D3EBC;
             nameSprite.graphics.beginGradientFill(GradientType.LINEAR, [nColorTop, nColorBot], [1, 1], [0, 255], nMat);
-            nameSprite.graphics.drawRoundRect(0, 0, nameW, nameH, 8, 8);
+            nameSprite.graphics.drawRoundRect(0, 0, nameW, nameH, nameH, nameH);
             nameSprite.graphics.endFill();
             
-            ntf.x = 7;
-            ntf.y = 1;
+            ntf.x = Math.round((nameW - ntf.width) / 2);
+            ntf.y = Math.round((nameH - ntf.textHeight) / 2) - 2;
             nameSprite.addChild(ntf);
          }
          
          var contentW:Number = Math.max(actualTextW, nameW);
          var boxW:Number = contentW + padX * 2;
-         var boxH:Number = actualTextH + padY * 2 + (hasName ? nameH + 6 : 0);
+         var boxH:Number = actualTextH + padY * 2 + (hasName ? nameH + 8 : 0);
          
          var left:Number = -boxW / 2;
          var top:Number = -boxH;
@@ -320,7 +322,7 @@ package s4ai.boot
             nameSprite.x = left + padX;
             nameSprite.y = curY;
             body.addChild(nameSprite);
-            curY += nameH + 6;
+            curY += nameH + 8;
          }
          
          tf.x = left + padX;
