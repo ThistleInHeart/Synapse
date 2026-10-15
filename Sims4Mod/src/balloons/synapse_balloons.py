@@ -47,13 +47,14 @@ def synapse_ui_ready_cmd(_connection=None):
     """Callback from ActionScript when Flash UI is added to stage and ready."""
     global _UI_READY, _PENDING_BALLOONS
     _UI_READY = True
-    output = sims4.commands.CheatOutput(_connection)
+    cid = _get_client_id(_connection)
+    output = sims4.commands.CheatOutput(cid)
     output("Synapse AI Balloons: Flash UI подключен и готов к работе!")
     
     # Flush any pending balloons
     if _PENDING_BALLOONS:
-        for sim_id, enc_name, enc_text, duration, cid in _PENDING_BALLOONS:
-            _do_client_cheat(sim_id, enc_name, enc_text, duration, cid)
+        for sim_id, enc_name, enc_text, duration, old_cid in _PENDING_BALLOONS:
+            _do_client_cheat(sim_id, enc_name, enc_text, duration, cid or old_cid)
         _PENDING_BALLOONS.clear()
         output("Synapse AI Balloons: Отложенные сообщения успешно отображены!")
     return True

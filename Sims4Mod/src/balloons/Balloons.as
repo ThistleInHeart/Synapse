@@ -184,15 +184,14 @@ package s4ai.boot
          tf.multiline = true;
          tf.wordWrap = true;
          tf.autoSize = TextFieldAutoSize.LEFT;
-         tf.width = maxTextWidth;
          tf.selectable = false;
+         tf.mouseEnabled = false;
+         tf.embedFonts = true;
          
-         var fmt:TextFormat = new TextFormat();
-         fmt.font = "$TextFont";
-         fmt.size = 15;
-         fmt.color = 0x1E1E24;
+         var fmt:TextFormat = new TextFormat("$TextFont", 15, 0x1E1E24);
          fmt.leading = 4;
          tf.defaultTextFormat = fmt;
+         tf.width = maxTextWidth;
          tf.text = text;
          
          if(tf.textWidth + 8 < maxTextWidth)
@@ -213,12 +212,10 @@ package s4ai.boot
             var ntf:TextField = new TextField();
             ntf.autoSize = TextFieldAutoSize.LEFT;
             ntf.selectable = false;
+            ntf.mouseEnabled = false;
+            ntf.embedFonts = true;
             
-            var nfmt:TextFormat = new TextFormat();
-            nfmt.font = "$BoldHeadlineFont";
-            nfmt.size = 11;
-            nfmt.color = 0xFFFFFF;
-            nfmt.bold = true;
+            var nfmt:TextFormat = new TextFormat("$BoldHeadlineFont", 11, 0xFFFFFF, true);
             ntf.defaultTextFormat = nfmt;
             ntf.text = simName;
             
