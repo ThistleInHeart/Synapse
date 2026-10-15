@@ -11,10 +11,12 @@ BUILD_DIR = os.path.join(SCRIPT_DIR, "build")
 
 # Auto-detect default Sims 4 Mods directory if present
 USER_DOCS = os.path.expanduser(r"~\Documents\Electronic Arts\The Sims 4\Mods")
-SYNAPSE_MODS_DIR = os.path.join(USER_DOCS, "Synapse") if os.path.exists(USER_DOCS) else None
+SYNAPSE_MODS_DIR = os.path.join(USER_DOCS, "SynapseMod") if os.path.exists(os.path.join(USER_DOCS, "SynapseMod")) else (os.path.join(USER_DOCS, "Synapse") if os.path.exists(USER_DOCS) else None)
 
-PACKAGE_SRC = os.path.join(SCRIPT_DIR, "Synapse_Interactions.package")
-PACKAGE_OUTPUT_NAME = "Synapse_Interactions.package"
+PACKAGES_TO_SYNC = [
+    "Synapse_Interactions.package",
+    "Synapse_Balloons.package",
+]
 
 MODULES_TO_BUILD = [
     {
@@ -26,6 +28,11 @@ MODULES_TO_BUILD = [
         "name": "Synapse_SocialMessenger",
         "sub_dir": "ai_social_pc",
         "output_name": "Synapse_SocialMessenger.ts4script",
+    },
+    {
+        "name": "Synapse_Balloons",
+        "sub_dir": "balloons",
+        "output_name": "Synapse_Balloons.ts4script",
     },
 ]
 
@@ -63,12 +70,18 @@ def compile_package(mod_info):
                         py_compile.compile(full_py, cfile=temp_pyc, doraise=True)
                         print(f"[COMPILED] {rel_path} -> {rel_pyc}")
                         zf.write(temp_pyc, rel_pyc)
+                        if mod_info["sub_dir"] == "balloons" and file == "synapse_balloons.py":
+                            zf.write(temp_pyc, "synapse_balloons.pyc")
 
         if os.path.exists(out_file):
             os.remove(out_file)
         os.rename(temp_zip, out_file)
         size = os.path.getsize(out_file)
         print(f"[SUCCESS] Built {mod_info['output_name']} ({size:,} bytes) in:\n  -> {out_file}")
+
+        # Also copy to root of repo
+        root_dest = os.path.join(SCRIPT_DIR, mod_info["output_name"])
+        shutil.copy2(out_file, root_dest)
 
         # Deploy to game Mods folder if found
         if SYNAPSE_MODS_DIR and os.path.exists(os.path.dirname(SYNAPSE_MODS_DIR)):
@@ -100,17 +113,19 @@ def ensure_python_37():
 
 
 def sync_package():
-    if os.path.exists(PACKAGE_SRC):
-        build_pkg = os.path.join(BUILD_DIR, PACKAGE_OUTPUT_NAME)
-        shutil.copy2(PACKAGE_SRC, build_pkg)
-        print(f"[PACKAGE] Copied {PACKAGE_OUTPUT_NAME} to build directory.")
+    for pkg_name in PACKAGES_TO_SYNC:
+        pkg_src = os.path.join(SCRIPT_DIR, pkg_name)
+        if os.path.exists(pkg_src):
+            build_pkg = os.path.join(BUILD_DIR, pkg_name)
+            shutil.copy2(pkg_src, build_pkg)
+            print(f"[PACKAGE] Copied {pkg_name} to build directory.")
 
-        if SYNAPSE_MODS_DIR and os.path.exists(os.path.dirname(SYNAPSE_MODS_DIR)):
-            game_pkg = os.path.join(SYNAPSE_MODS_DIR, PACKAGE_OUTPUT_NAME)
-            shutil.copy2(PACKAGE_SRC, game_pkg)
-            print(f"[PACKAGE] Deployed to Sims 4 Mods:\n  -> {game_pkg}")
-    else:
-        print(f"[WARN] Package file not found: {PACKAGE_SRC}")
+            if SYNAPSE_MODS_DIR and os.path.exists(os.path.dirname(SYNAPSE_MODS_DIR)):
+                game_pkg = os.path.join(SYNAPSE_MODS_DIR, pkg_name)
+                shutil.copy2(pkg_src, game_pkg)
+                print(f"[PACKAGE] Deployed to Sims 4 Mods:\n  -> {game_pkg}")
+        else:
+            print(f"[WARN] Package file not found: {pkg_src}")
 
 
 def build_all():

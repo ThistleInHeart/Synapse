@@ -108,18 +108,99 @@ def synapse_balloon_boot_cmd(_connection=None):
     output("Synapse AI Balloons: UI-слот запущен.")
     return True
 
+def show_sim_balloon(sim_info_or_id=None, text="", balloon_type="speech", name=None, duration=None):
+    """
+    Public API to display a speech or thought balloon over any Sim in the world.
+    
+    :param sim_info_or_id: SimInfo, Sim instance, int/str sim_id, or None (active sim).
+    :param text: Text string to display inside the balloon.
+    :param balloon_type: 'speech' or 'thought'.
+    :param name: Optional author name override for NameBadge. If None, auto-detected from SimInfo.
+    :param duration: Optional explicit display time in seconds. If None, calculated smartly.
+    :return: True if sent or queued, False on error.
+    """
+    global _UI_READY, _PENDING_BALLOONS
+    if not text:
+        return False
+        
+    _ensure_ui_slot()
+    
+    # 1. Resolve SimInfo and sim_id
+    sim_info = None
+    sim_id_str = None
+    
+    if sim_info_or_id is None:
+        if services is not None:
+            sim_info = services.active_sim_info()
+    elif hasattr(sim_info_or_id, 'sim_info'):
+        # Sim instance (e.g. from interaction or actor)
+        sim_info = getattr(sim_info_or_id, 'sim_info', None)
+    elif hasattr(sim_info_or_id, 'first_name') or hasattr(sim_info_or_id, 'id') or hasattr(sim_info_or_id, 'sim_id'):
+        # SimInfo object
+        sim_info = sim_info_or_id
+    elif isinstance(sim_info_or_id, (int, str)):
+        sim_id_str = str(sim_info_or_id)
+        if services is not None:
+            sim_info_mgr = services.sim_info_manager()
+            if sim_info_mgr is not None:
+                try:
+                    sim_info = sim_info_mgr.get(int(sim_info_or_id))
+                except Exception:
+                    pass
+
+    if sim_id_str is None:
+        if sim_info is not None:
+            raw_id = getattr(sim_info, 'id', getattr(sim_info, 'sim_id', None))
+            if raw_id is not None:
+                sim_id_str = str(raw_id)
+                
+    if not sim_id_str:
+        return False
+        
+    # 2. Resolve display name
+    author_name = "Сим"
+    if name is not None and str(name).strip():
+        author_name = str(name).strip()
+    elif sim_info is not None:
+        first = getattr(sim_info, 'first_name', '')
+        if first:
+            author_name = str(first).strip()
+            
+    # 3. Clean and normalize text
+    clean_text = str(text).strip()
+    if balloon_type == "thought":
+        # Remove surrounding quotes from thought if present
+        clean_text = clean_text.strip('"\'«»')
+    elif balloon_type == "speech":
+        # Auto-detect thought indicators if speech was requested
+        if clean_text.startswith(('*', '(', '«', '[думает]')):
+            balloon_type = "thought"
+            clean_text = clean_text.strip('"\'«»*()')
+
+    # 4. Smart duration
+    if duration is None or duration <= 0:
+        duration = calculate_smart_duration(clean_text)
+        
+    enc_name = quote(author_name)
+    enc_text = quote(clean_text)
+    cid = _get_client_id()
+    
+    if _UI_READY:
+        _do_client_cheat(sim_id_str, balloon_type, enc_name, enc_text, duration, cid)
+    else:
+        _PENDING_BALLOONS.append((sim_id_str, balloon_type, enc_name, enc_text, duration, cid))
+        
+    return True
+
 def _show_balloon_internal(balloon_type, *args, _connection=None):
     global _UI_READY, _PENDING_BALLOONS
     output = sims4.commands.CheatOutput(_connection)
     
-    _ensure_ui_slot()
-    
-    sim_info = services.active_sim_info()
+    sim_info = services.active_sim_info() if services is not None else None
     if sim_info is None:
         output("Synapse AI Balloons: Нет активного сима на участке!")
         return False
         
-    sim_id = str(sim_info.id)
     first_name = str(getattr(sim_info, 'first_name', 'Сим'))
     
     if args:
@@ -130,26 +211,16 @@ def _show_balloon_internal(balloon_type, *args, _connection=None):
         else:
             text = "Привет! Это AI Balloons от Synapse с эффектом печатной машинки!"
             
-    # Auto-detect thought if starting with * or (
-    if balloon_type == "speech":
-        if text.startswith(('*', '(', '«', '[думает]')):
-            balloon_type = "thought"
-            
+    res = show_sim_balloon(sim_info_or_id=sim_info, text=text, balloon_type=balloon_type, name=first_name)
+    
     duration = calculate_smart_duration(text)
-    enc_name = quote(first_name)
-    enc_text = quote(text)
-    cid = _get_client_id(_connection)
-    
     type_label = "Мысль" if balloon_type == "thought" else "Речь"
-    
     if _UI_READY:
-        _do_client_cheat(sim_id, balloon_type, enc_name, enc_text, duration, cid)
         output("Synapse AI Balloons [{}]: Показано над головой {} (длительность: {}с)!".format(type_label, first_name, duration))
     else:
-        _PENDING_BALLOONS.append((sim_id, balloon_type, enc_name, enc_text, duration, cid))
         output("Synapse AI Balloons: Инициализация Flash UI... {} появится над головой {} сразу после загрузки.".format(type_label, first_name))
         
-    return True
+    return res
 
 @sims4.commands.Command('synapse.balloon', command_type=sims4.commands.CommandType.Live)
 def synapse_balloon_cmd(*args, _connection=None):

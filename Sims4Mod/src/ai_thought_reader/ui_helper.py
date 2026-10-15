@@ -95,6 +95,22 @@ def show_sim_thought_notification(sim_info, thought: str):
     formatted_thought = f"\"{thought}\"" if is_en else f"«{thought}»"
     show_notification(title, formatted_thought, sim_info=sim_info, is_error=False)
 
+    # Synapse AI Balloon (Phase 3.1: Thought Balloon over Sim's head)
+    try:
+        try:
+            import synapse_balloons
+        except ImportError:
+            from balloons import synapse_balloons
+        if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
+            synapse_balloons.show_sim_balloon(
+                sim_info_or_id=sim_info,
+                text=thought,
+                balloon_type="thought",
+                name=getattr(sim_info, "first_name", None),
+            )
+    except Exception as ex_balloon:
+        log(f"[BALLOON] Could not display thought balloon: {ex_balloon}")
+
 
 def show_error_notification(error_msg: str):
     """Shows an error notification."""

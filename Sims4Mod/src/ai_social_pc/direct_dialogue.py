@@ -859,6 +859,22 @@ def _dispatch_direct_dialogue(actor_sim_info, target_sim_info, spoken_text: str)
         is_error=False,
     )
 
+    # 3. Synapse AI Balloon (Phase 3.2: Player Speech Balloon over actor Sim)
+    try:
+        try:
+            import synapse_balloons
+        except ImportError:
+            from balloons import synapse_balloons
+        if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
+            synapse_balloons.show_sim_balloon(
+                sim_info_or_id=actor_sim_info,
+                text=spoken_text,
+                balloon_type="speech",
+                name=getattr(actor_sim_info, "first_name", None),
+            )
+    except Exception as ex_b:
+        log(f"[BALLOON] Could not display player speech balloon: {ex_b}")
+
     t = threading.Thread(
         target=_worker_direct_dialogue,
         args=(actor_sim_info, target_sim_info, spoken_text, waiting_dialog, prev_speed),
@@ -1060,6 +1076,22 @@ def _apply_direct_dialogue_results(
         sim_info=target_sim_info,
         is_error=False,
     )
+
+    # Synapse AI Balloon (Phase 3.2: AI Reply Speech Balloon over target Sim)
+    try:
+        try:
+            import synapse_balloons
+        except ImportError:
+            from balloons import synapse_balloons
+        if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
+            synapse_balloons.show_sim_balloon(
+                sim_info_or_id=target_sim_info,
+                text=reply_text,
+                balloon_type="speech",
+                name=getattr(target_sim_info, "first_name", None),
+            )
+    except Exception as ex_b:
+        log(f"[BALLOON] Could not display AI reply speech balloon: {ex_b}")
 
     # 4. Immediate summarization after conversation turn (actions execute right away)
     _trigger_immediate_summarization(actor_sim_info, target_sim_info)
