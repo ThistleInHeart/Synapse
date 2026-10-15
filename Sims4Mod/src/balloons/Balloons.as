@@ -54,6 +54,7 @@ package s4ai.boot
          }
          catch(e2:Error) {}
          
+         this.releaseModality();
          addEventListener(Event.ADDED_TO_STAGE, this.onAdded, false, 0, true);
       }
       

@@ -21,7 +21,7 @@ _PENDING_BALLOONS = []
 def _ensure_ui_slot():
     """Ensure the FacebookDisplay Scaleform slot is shown so our GFx movie is loaded."""
     global _SLOT_BOOTED
-    if HAS_DISTRIBUTOR:
+    if not _SLOT_BOOTED and HAS_DISTRIBUTOR:
         try:
             Distributor.instance().add_op_with_no_owner(SendUIMessage("ShowFacebookDisplay"))
             _SLOT_BOOTED = True
@@ -34,6 +34,9 @@ def _hook_zone_load():
         orig = getattr(Zone, 'on_loading_screen_animation_finished', None)
         if orig is not None and not getattr(orig, '_synapse_balloon_hooked', False):
             def _wrapped(self, *args, **kwargs):
+                global _SLOT_BOOTED, _UI_READY
+                _SLOT_BOOTED = False
+                _UI_READY = False
                 res = orig(self, *args, **kwargs)
                 try:
                     _ensure_ui_slot()
