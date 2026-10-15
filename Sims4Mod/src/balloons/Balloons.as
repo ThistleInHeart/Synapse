@@ -78,8 +78,9 @@ package s4ai.boot
          }
          catch(err:Error) {}
          
-         // Safe delay to let C++ UI engine finish showing slot before releasing modality
-         setTimeout(this.releaseModality, 1500);
+         // Immediately release modality so no modal blue backdrop or click interception occurs
+         this.releaseModality();
+         setTimeout(this.releaseModality, 250);
          
          // Notify Python that the Flash UI is alive and ready
          try
@@ -110,7 +111,8 @@ package s4ai.boot
       
       private function onReshow(data:Object):void
       {
-         setTimeout(this.releaseModality, 500);
+         this.releaseModality();
+         setTimeout(this.releaseModality, 200);
       }
       
       private function onClearCommand(args:Array, params:Object, ctx:String):void

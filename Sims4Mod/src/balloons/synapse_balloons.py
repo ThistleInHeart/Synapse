@@ -28,6 +28,25 @@ def _ensure_ui_slot():
         except Exception:
             pass
 
+def _hook_zone_load():
+    try:
+        from zone import Zone
+        orig = getattr(Zone, 'on_loading_screen_animation_finished', None)
+        if orig is not None and not getattr(orig, '_synapse_balloon_hooked', False):
+            def _wrapped(self, *args, **kwargs):
+                res = orig(self, *args, **kwargs)
+                try:
+                    _ensure_ui_slot()
+                except Exception:
+                    pass
+                return res
+            _wrapped._synapse_balloon_hooked = True
+            Zone.on_loading_screen_animation_finished = _wrapped
+    except Exception:
+        pass
+
+_hook_zone_load()
+
 def _get_client_id(_connection=None):
     if _connection is not None:
         client = services.client_manager().get(_connection)
