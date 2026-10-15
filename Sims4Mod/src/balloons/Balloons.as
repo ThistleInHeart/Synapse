@@ -273,15 +273,15 @@ package s4ai.boot
          
          if(isThought)
          {
-            // Modern Thought Card (Life is Strange / Detroit style)
-            bg.graphics.lineStyle(1.8, 0xCBC7DE, 0.95, true);
-            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF5F3FA], [0.98, 0.98], [0, 255], bgMat);
+            // Modern Thought Card (Clean neutral style)
+            bg.graphics.lineStyle(1.8, 0xD4D9E2, 0.95, true);
+            bg.graphics.beginGradientFill(GradientType.LINEAR, [0xFFFFFF, 0xF4F6F9], [0.98, 0.98], [0, 255], bgMat);
             bg.graphics.drawRoundRect(left, top, boxW, boxH, radius, radius);
             bg.graphics.endFill();
             
             // 3 descending circular thought bubbles pointing to head
             tail = new Shape();
-            tail.graphics.lineStyle(1.6, 0xCBC7DE, 0.95, true);
+            tail.graphics.lineStyle(1.6, 0xD4D9E2, 0.95, true);
             tail.graphics.beginFill(0xFFFFFF, 0.98);
             tail.graphics.drawCircle(-6, top + boxH + 9, 5.0);
             tail.graphics.drawCircle(-3, top + boxH + 19, 3.5);
@@ -329,14 +329,7 @@ package s4ai.boot
          tf.y = curY;
          body.addChild(tf);
          
-         if(isThought)
-         {
-            body.filters = [new DropShadowFilter(5, 90, 0x3E2D60, 0.22, 12, 12, 1, 3)];
-         }
-         else
-         {
-            body.filters = [new DropShadowFilter(5, 90, 0x000000, 0.25, 10, 10, 1, 3)];
-         }
+         body.filters = [new DropShadowFilter(5, 90, 0x000000, 0.25, 10, 10, 1, 3)];
          
          body.scaleX = 0.2;
          body.scaleY = 0.2;
