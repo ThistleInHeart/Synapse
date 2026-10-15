@@ -20,15 +20,24 @@ package s4ai.boot
    public class Boot extends Sprite
    {
       private static const SLOT:String = "FacebookDisplay";
-      private static const CMD_SHOW:String = "synapse_balloon";
-      private static const CMD_CLEAR:String = "synapse_balloon_clear";
+      private static const CMD_SHOW:String = "ui.synapse_balloon";
+      private static const CMD_CLEAR:String = "ui.synapse_balloon_clear";
+      private static const SERVER_READY:String = "synapse.ui_ready";
       
       public var widget:Object;
+      private var balloonLayer:Sprite = new Sprite();
       private var activeBalloons:Dictionary = new Dictionary();
+      private var isStarted:Boolean = false;
       
       public function Boot()
       {
          super();
+         mouseEnabled = false;
+         mouseChildren = false;
+         
+         this.balloonLayer.mouseEnabled = false;
+         this.balloonLayer.mouseChildren = false;
+         
          try
          {
             var wb:Class = getDefinitionByName("olympus.core.widget.WidgetBase") as Class;
@@ -51,13 +60,37 @@ package s4ai.boot
       private function onAdded(e:Event):void
       {
          removeEventListener(Event.ADDED_TO_STAGE, this.onAdded);
+         if(this.isStarted)
+         {
+            return;
+         }
+         this.isStarted = true;
+         
+         // Attach balloonLayer directly to the root Stage so it is never hidden or clipped
+         if(stage)
+         {
+            stage.addChild(this.balloonLayer);
+         }
+         
          try
          {
             getDefinitionByName("olympus.io.CommunicationManager").AddMessageListenerByName("Show" + SLOT, this.onReshow, "SynapseBalloons");
          }
          catch(err:Error) {}
          
-         setTimeout(this.releaseModality, 500);
+         // Safe delay to let C++ UI engine finish showing slot before releasing modality
+         setTimeout(this.releaseModality, 1500);
+         
+         // Notify Python that the Flash UI is alive and ready
+         try
+         {
+            ExternalInterface.call("CallGameService", "PostServerCommand", {
+               "command": SERVER_READY,
+               "commandArgs": []
+            }, false);
+         }
+         catch(e3:Error) {}
+         
          addEventListener(Event.ENTER_FRAME, this.onEnterFrame);
       }
       
@@ -77,7 +110,7 @@ package s4ai.boot
       
       private function onReshow(data:Object):void
       {
-         setTimeout(this.releaseModality, 200);
+         setTimeout(this.releaseModality, 500);
       }
       
       private function onClearCommand(args:Array, params:Object, ctx:String):void
@@ -93,16 +126,30 @@ package s4ai.boot
          this.activeBalloons = new Dictionary();
       }
       
+      private function decodeSafe(s:String):String
+      {
+         if(!s) return "";
+         try
+         {
+            return decodeURIComponent(s);
+         }
+         catch(e:Error)
+         {
+            return s;
+         }
+         return s;
+      }
+      
       private function onShowCommand(args:Array, params:Object, ctx:String):void
       {
-         if(!args || args.length < 3)
+         if(!args || args.length < 1)
          {
             return;
          }
          
          var simId:String = String(args[0]);
-         var simName:String = decodeURIComponent(String(args[1]));
-         var text:String = decodeURIComponent(String(args[2]));
+         var simName:String = args.length > 1 ? this.decodeSafe(String(args[1])) : "";
+         var text:String = args.length > 2 ? this.decodeSafe(String(args[2])) : "Привет!";
          var duration:Number = args.length > 3 ? Number(args[3]) : 6.0;
          if(isNaN(duration) || duration <= 0)
          {
@@ -120,7 +167,12 @@ package s4ai.boot
          }
          
          var balloon:Sprite = new Sprite();
+         balloon.mouseEnabled = false;
+         balloon.mouseChildren = false;
+         
          var body:Sprite = new Sprite();
+         body.mouseEnabled = false;
+         body.mouseChildren = false;
          balloon.addChild(body);
          
          var maxTextWidth:Number = 280;
@@ -230,21 +282,52 @@ package s4ai.boot
          body.scaleY = 0.2;
          body.alpha = 0;
          
-         stage.addChild(balloon);
+         // Ensure balloonLayer is attached to stage
+         if(!this.balloonLayer.stage && stage)
+         {
+            stage.addChild(this.balloonLayer);
+         }
+         this.balloonLayer.addChild(balloon);
          
+         // Safety guard: ensure balloon is on stage to prevent C++ NULL dereference
+         if(!balloon.stage)
+         {
+            return;
+         }
+         
+         // Call C++ Game Service to bind to head bone
          ExternalInterface.call("CallGameService", "BindDisplayObject", {
             "displayObject": balloon,
             "objectId": simId,
             "attachPoint": "b__Head__",
-            "worldOffset": { "x": 0, "y": 0.38, "z": 0 },
-            "viewOffset": { "x": 0, "y": 0, "z": 0 },
-            "screenOffset": { "x": 0, "y": 0, "z": -0.2 },
+            "worldOffset": {
+               "x": 0,
+               "y": 0.35,
+               "z": 0
+            },
+            "viewOffset": {
+               "x": 0,
+               "y": 0,
+               "z": 0
+            },
+            "screenOffset": {
+               "x": 0,
+               "y": 0,
+               "z": -0.2
+            },
             "isOccludedByWorld": false,
             "isScaledByCamera": false,
             "minScale": 0.1,
             "maxVisibleScale": 0,
             "lockVisibility": false,
             "lockToScreenEdge": false,
+            "lockToScreenEdgeScale": {
+               "mTop": 1,
+               "mBottom": 1,
+               "mBot": 1,
+               "mLeft": 1,
+               "mRight": 1
+            },
             "adjustScreenPositionForMargin": false
          }, false);
          
