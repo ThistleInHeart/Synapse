@@ -248,7 +248,7 @@ package s4ai.boot
             nameSprite.addChild(ntf);
          }
          
-         var minBoxW:Number = Math.max(76, hasName ? (nameW + padX * 2) : 60);
+         var minBoxW:Number = Math.max(86, hasName ? (nameW + padX * 2) : 70);
          var initialBoxH:Number = 22 + padY * 2 + (hasName ? nameH + 8 : 0);
          
          var bg:Shape = new Shape();
@@ -336,7 +336,6 @@ package s4ai.boot
             "padX": padX,
             "padY": padY,
             "radius": radius,
-            "leftOffset": -34,
             "minBoxW": minBoxW,
             "currentBoxW": minBoxW,
             "currentBoxH": initialBoxH,
@@ -362,7 +361,7 @@ package s4ai.boot
          
          var boxW:Number = Math.round(b.currentBoxW);
          var boxH:Number = Math.round(b.currentBoxH);
-         var left:Number = b.leftOffset;
+         var left:Number = -Math.round(boxW / 2);
          var top:Number = -boxH;
          var radius:Number = b.radius;
          var isThought:Boolean = (b.type == "thought");
