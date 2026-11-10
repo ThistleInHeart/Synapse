@@ -946,6 +946,24 @@ def command_ai_direct_talk(*args, _connection=None, **kwargs):
         cheat_print(_connection, f"{tag} {'Error' if is_en else 'Ошибка'}: {e}")
 
 
+@Command("ai_direct_talk_ww", "ai.direct_talk_ww", "direct_talk_ww", command_type=CommandType.Live if CommandType else 0)
+def command_ai_direct_talk_ww(*args, _connection=None, **kwargs):
+    """
+    Called by the pie-menu interaction «Talk during sex (AI)...» or via console.
+    Usage:
+    ai_direct_talk_ww <target_sim_id>
+    """
+    is_en = _is_en()
+    tag = "[INTIMATE DIALOGUE]" if is_en else "[ИНТИМНЫЙ ДИАЛОГ]"
+    try:
+        from ai_social_pc.direct_dialogue import start_direct_dialogue
+        target = args[0] if args else None
+        start_direct_dialogue(target, is_ww_sex=True)
+    except Exception as e:
+        log_exception("Error in command_ai_direct_talk_ww", e)
+        cheat_print(_connection, f"{tag} {'Error' if is_en else 'Ошибка'}: {e}")
+
+
 @Command("ai_talk", "ai.talk", "ai_talk_test", command_type=CommandType.Live if CommandType else 0)
 def command_ai_talk(*args, _connection=None, **kwargs):
     """
@@ -1151,7 +1169,450 @@ def command_ai_money(*args, _connection=None, **kwargs):
         cheat_print(_connection, f"{tag} {'Error' if is_en else 'Ошибка'}: {e}")
 
 
+# =========================================================================
+# SYNAPSE SIMPLIFIED AUTONOMOUS DIALOGUE COMMANDS (CONSOLES & TESTING)
+# =========================================================================
+
+@Command("synapse.simplified_scan", "synapse.simp_scan", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_scan(*args, _connection=None, **kwargs):
+    """Scans and outputs active chatting groups and nearby candidate Sims."""
+    try:
+        from ai_social_pc.simplified_dialogue import scan_conversing_details
+        data = scan_conversing_details()
+        active_groups = data.get("active_groups", [])
+        candidates = data.get("potential_candidates", [])
+        all_sims = data.get("all_sims", [])
+
+        cheat_print(_connection, "=== [СКАНИРОВАНИЕ УПРОЩЁННОГО ОБЩЕНИЯ] ===")
+        cheat_print(_connection, f"Всего симов на участке: {len(all_sims)}")
+
+        cheat_print(_connection, "[АКТИВНЫЕ РАЗГОВОРЫ В ИГРЕ]:")
+        if not active_groups:
+            cheat_print(_connection, "  (Нет активных разговоров. Симы сейчас не общаются)")
+        else:
+            for i, g in enumerate(active_groups, 1):
+                g_type = "Пара (2 сима)" if g["type"] == "pair" else f"Группа ({g['count']} симов)"
+                members_str = ", ".join([f"{m['name']} [{m['mood']}{', Семья' if m['selectable'] else ''}]" for m in g['members']])
+                cheat_print(_connection, f"  #{i} {g_type} в '{g['location']}':")
+                cheat_print(_connection, f"     Участники: {members_str}")
+
+        cheat_print(_connection, "")
+        cheat_print(_connection, f"[ПОТЕНЦИАЛЬНЫЕ КАНДИДАТЫ РЯДОМ] (найдено: {len(candidates)}):")
+        if not candidates:
+            cheat_print(_connection, "  (Свободных кандидатов рядом не найдено)")
+            if all_sims:
+                cheat_print(_connection, "  [Обнаруженные симы на участке]:")
+                for s in all_sims:
+                    hh_str = "Активная семья" if s["household"] else "Гость/Горожанин"
+                    av_str = "Доступен" if s["available"] else "Занят/Спит"
+                    cheat_print(_connection, f"    • {s['name']} ({hh_str}, {s['mood']}, {av_str}, комната: '{s['location']}')")
+        else:
+            for j, c in enumerate(candidates[:6], 1):
+                dist_str = f"~{c['distance']}м" if c.get('distance', -1) > 0 else "в одной комнате"
+                cheat_print(_connection, f"  #{j} {c['sim_a']} + {c['sim_b']} [{dist_str}, '{c['location']}']")
+                cheat_print(_connection, f"     Отношения: {c['relationship']} | Настроения: {c['mood_a']} / {c['mood_b']}")
+
+        cheat_print(_connection, "")
+        cheat_print(_connection, "Подсказка: введите 'synapse.run_simplified' для запуска диалога.")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_scan", e)
+        cheat_print(_connection, f"Error: {e}")
 
 
+@Command("synapse.simplified_candidates", "synapse.simp_candidates", "synapse.simp_groups", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_candidates(*args, _connection=None, **kwargs):
+    """Outputs candidate pairs/groups for simplified dialogue."""
+    try:
+        from ai_social_pc.simplified_dialogue import find_potential_candidates, find_conversing_groups
+        active_groups = find_conversing_groups()
+        candidates = find_potential_candidates()
+
+        cheat_print(_connection, "=== [КАНДИДАТЫ ДЛЯ ОБЩЕНИЯ НА УЧАСТКЕ] ===")
+        cheat_print(_connection, f"• Активных групп/пар сейчас разговаривают: {len(active_groups)}")
+        cheat_print(_connection, f"• Найдено потенциальных кандидатов рядом: {len(candidates)}")
+        if not candidates:
+            cheat_print(_connection, "  Кандидатов не найдено. Симы должны быть доступны и находиться в одной комнате или поблизости.")
+        else:
+            for i, c in enumerate(candidates, 1):
+                dist_str = f"~{c['distance']}м" if c.get('distance', -1) > 0 else "в одной комнате"
+                cheat_print(_connection, f"  Кандидат #{i}: {c['sim_a']} & {c['sim_b']}")
+                cheat_print(_connection, f"     Локация: {c['location']} ({dist_str}) | {c['relationship']}")
+                cheat_print(_connection, f"     Настроения: {c['sim_a']} ({c['mood_a']}), {c['sim_b']} ({c['mood_b']})")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_candidates", e)
+        cheat_print(_connection, f"Error: {e}")
 
 
+@Command("synapse.simplified_status", "synapse.simp_status", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_status(*args, _connection=None, **kwargs):
+    """Displays operational status of simplified dialogue mode."""
+    try:
+        from ai_social_pc.simplified_dialogue import get_simplified_status
+        st = get_simplified_status()
+        cheat_print(_connection, "=== [СТАТУС: УПРОЩЁННОЕ ОБЩЕНИЕ] ===")
+        cheat_print(_connection, f"• Включено в настройках: {'ДА' if st['enabled'] else 'НЕТ'}")
+        if st['director_conflict']:
+            cheat_print(_connection, "• [!] ВНИМАНИЕ: Режиссёр общения включен! Упрощённое общение заблокировано взаимным исключением.")
+        cheat_print(_connection, f"• Пауза тишины: {st['silence_sec']} сек. (Осталось: {st['remaining_sec']} сек.)")
+        cheat_print(_connection, f"• Шанс генерации: {st['chance_pct']}%")
+        cheat_print(_connection, f"• Игра на паузе: {'ДА' if st['is_paused'] else 'НЕТ'}")
+        cheat_print(_connection, f"• Запрос в процессе (in_flight): {'ДА' if st['in_flight'] else 'НЕТ'}")
+        cheat_print(_connection, f"• 3D Облачка: {'ВКЛ' if st['balloon'] else 'ВЫКЛ'} | Уведомления: {'ВКЛ' if st['notification'] else 'ВЫКЛ'}")
+        cheat_print(_connection, f"• Активных групп общения: {st.get('active_groups_count', 0)} (пар: {st.get('pairs_count', 0)}, групп 3+: {st.get('groups_3plus_count', 0)})")
+        for g in st.get('conversing_groups', []):
+            cheat_print(_connection, f"    -> {g}")
+        cheat_print(_connection, f"• Потенциальных кандидатов рядом: {st.get('candidates_count', 0)}")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_status", e)
+        cheat_print(_connection, f"Error: {e}")
+
+
+@Command("synapse.run_simplified", "synapse.run_simp", "synapse.simplified_run", "synapse.simp_run", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_run_simplified(*args, _connection=None, **kwargs):
+    """Forces an immediate simplified dialogue execution."""
+    try:
+        from ai_social_pc.simplified_dialogue import force_trigger_simplified_dialogue
+        force_trigger_simplified_dialogue(_connection=_connection)
+    except Exception as e:
+        log_exception("Error in command_synapse_run_simplified", e)
+        cheat_print(_connection, f"Error: {e}")
+
+
+@Command("synapse.simplified_reset", "synapse.simp_reset", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_reset(*args, _connection=None, **kwargs):
+    """Resets silence timer for simplified dialogue."""
+    try:
+        from ai_social_pc.simplified_dialogue import reset_simplified_silence
+        reset_simplified_silence()
+        cheat_print(_connection, "[УСПЕХ] Пауза тишины сброшена в 0! Следующий диалог сгенерируется при первой возможности.")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_reset", e)
+        cheat_print(_connection, f"Error: {e}")
+
+
+@Command("synapse.simplified_chance", "synapse.simp_chance", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_chance(pct_str: str = "100", _connection=None, **kwargs):
+    """Sets trigger chance % for simplified dialogue."""
+    try:
+        from ai_thought_reader.config import get_simplified_dialogue_timers, set_simplified_dialogue_timers
+        curr = get_simplified_dialogue_timers()
+        val = max(1, min(100, int(pct_str)))
+        set_simplified_dialogue_timers(curr.get("silence_sec", 180), val)
+        cheat_print(_connection, f"[УСПЕХ] Шанс упрощённого общения установлен на {val}%")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_chance", e)
+        cheat_print(_connection, f"Error: {e}")
+
+
+@Command("synapse.simplified_silence", "synapse.simp_silence", command_type=CommandType.Live if CommandType else 0)
+def command_synapse_simplified_silence(sec_str: str = "30", _connection=None, **kwargs):
+    """Sets silence cooldown in seconds for simplified dialogue."""
+    try:
+        from ai_thought_reader.config import get_simplified_dialogue_timers, set_simplified_dialogue_timers
+        curr = get_simplified_dialogue_timers()
+        val = max(5, int(sec_str))
+        set_simplified_dialogue_timers(val, curr.get("trigger_chance_pct", 40))
+        cheat_print(_connection, f"[УСПЕХ] Пауза тишины упрощённого общения установлена на {val} сек.")
+    except Exception as e:
+        log_exception("Error in command_synapse_simplified_silence", e)
+        cheat_print(_connection, f"Error: {e}")
+
+
+# =========================================================================
+# SYNAPSE DIRECTOR TESTING & SCENE COMMANDS
+# =========================================================================
+
+@Command('synapse.scan', 'synapse.scan_all', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_scan(_connection=None):
+    """
+    [РЕЖИССЁР] Сканер всех возможных действий Режиссёра на лоте прямо сейчас.
+    Выводит полный список действий в формате: [ДА] / [НЕТ] (причина).
+    """
+    is_en = _is_en()
+    cheat_print(_connection, '=== [SYNAPSE DIRECTOR: GLOBAL SCANNER] ===' if is_en else '=== [РЕЖИССЁР: СКАНЕР ВСЕХ ДЕЙСТВИЙ] ===')
+    try:
+        from ai_social_pc.director_testing import scan_all_triggers_report
+        report = scan_all_triggers_report()
+        yes_count = 0
+        for item in report:
+            tid = item['id']
+            name = item['name']
+            is_met = item['is_met']
+            details = item['details']
+            if is_met:
+                yes_count += 1
+                cheat_print(_connection, f' [ДА]  {name} ({tid}) -> {details}')
+            else:
+                cheat_print(_connection, f' [НЕТ] {name} ({tid}) -> {details}')
+
+        summary = f'\nИТОГ: Готово к срабатыванию {yes_count} из {len(report)} действий.' if not is_en else f'\nSUMMARY: {yes_count} of {len(report)} actions ready.'
+        cheat_print(_connection, summary)
+    except Exception as e:
+        log_exception('Error in command_synapse_scan', e)
+        cheat_print(_connection, f'Error in scan: {e}')
+
+
+@Command('synapse.test', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_test(trigger_id: str = '', _connection=None):
+    """
+    [РЕЖИССЁР] Точечная проверка условий для конкретного действия.
+    Использование: synapse.test cooking_together
+    """
+    is_en = _is_en()
+    if not trigger_id:
+        cheat_print(_connection, 'Укажите ID действия! Пример: synapse.test cooking_together' if not is_en else 'Specify action ID! Example: synapse.test cooking_together')
+        cheat_print(_connection, 'Используйте synapse.scan, чтобы увидеть список ID.' if not is_en else 'Use synapse.scan to see all action IDs.')
+        return
+
+    tid = str(trigger_id).strip().lower()
+    cheat_print(_connection, f'=== [ПРОВЕРКА УСЛОВИЯ: {tid}] ===' if not is_en else f'=== [TEST CONDITION: {tid}] ===')
+    try:
+        from ai_social_pc.director_testing import evaluate_trigger_conditions, TRIGGER_MAP
+        meta = TRIGGER_MAP.get(tid, {})
+        name = meta.get('name_ru' if not is_en else 'name_en', tid)
+        is_met, details, _ = evaluate_trigger_conditions(tid)
+
+        if is_met:
+            cheat_print(_connection, f'[ИТОГ: ВЫПОЛНЕНО] {name} ({tid})')
+            cheat_print(_connection, f'Детали: {details}')
+        else:
+            cheat_print(_connection, f'[ИТОГ: НЕ ВЫПОЛНЕНО] {name} ({tid})')
+            cheat_print(_connection, f'Причина: {details}')
+    except Exception as e:
+        log_exception('Error in command_synapse_test', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.run', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_run(trigger_id: str = '', force_flag: str = '', _connection=None):
+    """
+    [РЕЖИССЁР] Запуск действия Режиссёра.
+    Использование:
+      synapse.run cooking_together        - запуск при наличии условий
+      synapse.run cooking_together force  - принудительный запуск без условий
+    """
+    is_en = _is_en()
+    if not trigger_id:
+        cheat_print(_connection, 'Укажите ID действия! Пример: synapse.run cooking_together' if not is_en else 'Specify action ID! Example: synapse.run cooking_together')
+        return
+
+    tid = str(trigger_id).strip().lower()
+    force = str(force_flag).strip().lower() in ('force', 'true', '1')
+
+    force_lbl = ' (FORCE)' if force else ''
+    cheat_print(_connection, f'=== [ЗАПУСК ДЕЙСТВИЯ: {tid}{force_lbl}] ===' if not is_en else f'=== [RUN ACTION: {tid}{force_lbl}] ===')
+    try:
+        from ai_social_pc.director_testing import evaluate_trigger_conditions, generate_forced_trigger_spark, TRIGGER_MAP
+        from ai_social_pc.autonomous_director import dispatch_autonomous_scene, is_scene_in_flight
+
+        meta = TRIGGER_MAP.get(tid, {})
+        name = meta.get('name_ru' if not is_en else 'name_en', tid)
+
+        if force:
+            spark = generate_forced_trigger_spark(tid)
+            if not spark:
+                cheat_print(_connection, f'[ОТКАЗ] Не удалось создать принудительную сцену для {name} ({tid}). На лоте недостаточно симов.')
+                return
+            details = 'Принудительный запуск (FORCE)'
+        else:
+            is_met, details, spark = evaluate_trigger_conditions(tid)
+            if not is_met or not spark:
+                cheat_print(_connection, f'[ОТКАЗ: УСЛОВИЯ НЕТ] Действие \'{name}\' ({tid}) отклонено!')
+                cheat_print(_connection, f'Причина: {details}')
+                cheat_print(_connection, f'Подсказка: Для принудительного теста используйте:\nsynapse.run {tid} force')
+                return
+
+        if is_scene_in_flight():
+            cheat_print(_connection, 'Внимание: В данный момент сцена уже воспроизводится! Подождите пару секунд.')
+            return
+
+        cheat_print(_connection, f'[УСЛОВИЕ ЕСТЬ!] {name} ({tid})')
+        cheat_print(_connection, f'Детали: {details}')
+        cheat_print(_connection, 'Отправка запроса в Synapse AI Bridge...')
+
+        dispatched = dispatch_autonomous_scene(spark, force=force)
+        if dispatched:
+            cheat_print(_connection, 'Успех! Сцена поставлена в очередь и скоро воспроизведется над симами.')
+        else:
+            cheat_print(_connection, 'Ошибка: Сцена не была запущена диспетчером.')
+    except Exception as e:
+        log_exception('Error in command_synapse_run', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.force', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_force(trigger_id: str = '', _connection=None):
+    """
+    [РЕЖИССЁР] Принудительный запуск любого сценария Режиссёра.
+    Использование: synapse.force cooking_together
+    """
+    command_synapse_run(trigger_id, 'force', _connection=_connection)
+
+
+@Command('synapse.reset_auto', 'synapse.director_reset', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_reset_auto(_connection=None):
+    """Сбрасывает все кулдауны и лимиты Режиссёра для мгновенного тестирования."""
+    try:
+        from ai_social_pc.autonomous_director import reset_all_cooldowns
+        reset_all_cooldowns()
+        cheat_print(_connection, '[СБРОС] Все кулдауны и счетчики Автономного Режиссёра обнулены!', notify=True, title='Synapse Director')
+    except Exception as e:
+        log_exception('Error in command_synapse_reset_auto', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.check_scene', 'synapse.auto_debug', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_check_scene(_connection=None):
+    """Диагностика Автономного Режиссёра: проверяет текущую готовность сцены на участке."""
+    try:
+        from ai_social_pc.autonomous_director import scan_household_for_best_scene, get_director_lot_state
+        lot_st = get_director_lot_state()
+        cheat_print(_connection, f'=== [ДИАГНОСТИКА РЕЖИССЁРА (Режим участка: {lot_st})] ===')
+        spark = scan_household_for_best_scene(force=False)
+        if spark:
+            cheat_print(_connection, f'[ГОТОВО] Найдена подходящая сцена: {spark.get("trigger_type")} (Приоритет: {spark.get("priority")})')
+            cheat_print(_connection, f'Повод: {spark.get("premise", "-")}')
+        else:
+            cheat_print(_connection, '[ОЖИДАНИЕ] Естественная сцена сейчас не готова (кулдаун или нет условий).')
+            cheat_print(_connection, 'Для принудительного запуска используйте: synapse.force_auto или synapse.run <id> force')
+    except Exception as e:
+        log_exception('Error in command_synapse_check_scene', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.force_auto', 'synapse.auto_chat', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_force_auto(_connection=None):
+    """Принудительно запускает лучшее автономное событие Режиссёра прямо сейчас."""
+    try:
+        from ai_social_pc.autonomous_director import scan_household_for_best_scene, dispatch_autonomous_scene
+        spark = scan_household_for_best_scene(force=True)
+        if spark:
+            cheat_print(_connection, f'[РЕЖИССЁР] Принудительный запуск сцены: {spark.get("trigger_type")}')
+            dispatch_autonomous_scene(spark, force=True)
+        else:
+            cheat_print(_connection, '[РЕЖИССЁР] Не удалось подобрать пару симов для принудительной сцены.')
+    except Exception as e:
+        log_exception('Error in command_synapse_force_auto', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.director_state', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_director_state(_connection=None):
+    """Выводит текущее состояние режима Режиссёра (HOME, VISITING_FRIENDS, VISITING_RELATIVES, COMMUNITY)."""
+    try:
+        from ai_social_pc.autonomous_director import (
+            get_director_lot_state,
+            DIRECTOR_STATE_HOME,
+            DIRECTOR_STATE_VISITING_FRIENDS,
+            DIRECTOR_STATE_VISITING_RELATIVES,
+            DIRECTOR_STATE_COMMUNITY,
+            DIRECTOR_STATE_OTHER,
+        )
+        st = get_director_lot_state()
+        labels = {
+            DIRECTOR_STATE_HOME: 'ДОМ (Активная семья)',
+            DIRECTOR_STATE_VISITING_FRIENDS: 'В ГОСТЯХ У ДРУЗЕЙ',
+            DIRECTOR_STATE_VISITING_RELATIVES: 'В ГОСТЯХ У РОДСТВЕННИКОВ',
+            DIRECTOR_STATE_COMMUNITY: 'ОБЩЕСТВЕННЫЙ УЧАСТОК',
+            DIRECTOR_STATE_OTHER: 'ДРУГОЙ УЧАСТОК',
+        }
+        cheat_print(_connection, f'[РЕЖИССЁР] Текущий режим участка: {labels.get(st, st)} ({st})', notify=True, title='Synapse Director')
+    except Exception as e:
+        log_exception('Error in command_synapse_director_state', e)
+        cheat_print(_connection, f'Error: {e}')
+
+
+@Command('synapse.test_npc_npc', 'synapse.run_npc_npc', command_type=CommandType.Live if CommandType else 0)
+def command_synapse_test_npc_npc(_connection=None):
+    """
+    Тестирует диалог между двумя NPC/симами без участия активного игрока.
+    Работает:
+    - На общественных участках (между 2 свободными NPC на лоте);
+    - В гостях (между двумя хозяевами дома);
+    - На домашнем участке (между двумя гостями).
+    """
+    try:
+        from ai_social_pc.autonomous_director import (
+            get_director_lot_state,
+            is_sim_host_resident,
+            is_sim_active_guest,
+            is_sim_available,
+            evaluate_scene_spark,
+            dispatch_autonomous_scene,
+            get_distance_between_sims,
+            DIRECTOR_STATE_HOME,
+            DIRECTOR_STATE_COMMUNITY,
+            DIRECTOR_STATE_VISITING_FRIENDS,
+            DIRECTOR_STATE_VISITING_RELATIVES,
+        )
+
+        state = get_director_lot_state()
+        sim_mgr = services.sim_info_manager() if hasattr(services, 'sim_info_manager') else None
+        if not sim_mgr:
+            cheat_print(_connection, 'Ошибка: sim_info_manager недоступен.')
+            return
+
+        candidates = []
+        for inst in sim_mgr.instanced_sims_gen():
+            inf = getattr(inst, 'sim_info', None)
+            if not inf or not is_sim_available(inst):
+                continue
+            if state in (DIRECTOR_STATE_VISITING_FRIENDS, DIRECTOR_STATE_VISITING_RELATIVES):
+                if is_sim_host_resident(inf):
+                    candidates.append(inst)
+            elif state == DIRECTOR_STATE_COMMUNITY:
+                if not is_sim_active_guest(inf) and getattr(inf, 'is_npc', True):
+                    candidates.append(inst)
+            elif state == DIRECTOR_STATE_HOME:
+                if not is_sim_active_guest(inf) and getattr(inf, 'is_npc', True):
+                    candidates.append(inst)
+            else:
+                if not is_sim_active_guest(inf) and getattr(inf, 'is_npc', True):
+                    candidates.append(inst)
+
+        if len(candidates) < 2:
+            cheat_print(_connection, f'[ОШИБКА] На участке недостаточно свободных NPC ({len(candidates)}). Требуется минимум 2 свободных NPC для диалога.', notify=True, title='Synapse NPC-NPC')
+            return
+
+        # Перебираем пары кандидатов, сортируя их по физической близости (ближайшие пары проверяются первыми)
+        all_pairs = []
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                c1 = candidates[i]
+                c2 = candidates[j]
+                d = get_distance_between_sims(c1, c2)
+                all_pairs.append((c1, c2, d if d is not None else 999.0))
+
+        all_pairs.sort(key=lambda item: item[2])
+
+        selected_spark = None
+        tried_pairs_info = []
+
+        for c1, c2, dist_m in all_pairs:
+            inf1 = getattr(c1, 'sim_info', None)
+            inf2 = getattr(c2, 'sim_info', None)
+            name1 = getattr(inf1, 'first_name', 'NPC 1')
+            name2 = getattr(inf2, 'first_name', 'NPC 2')
+            tried_pairs_info.append(f"{name1} и {name2} ({dist_m:.1f}м)")
+
+            spark = evaluate_scene_spark(c1, c2, force=True)
+            if spark is not None:
+                selected_spark = spark
+                cheat_print(_connection, f'[ТЕСТ NPC <-> NPC] Найдена подходящая пара: {name1} и {name2} (Дистанция: {dist_m:.1f}м, Режим лота: {state})...')
+                break
+
+        if selected_spark is None:
+            pairs_str = ", ".join(tried_pairs_info[:4])
+            cheat_print(_connection, f'[ОШИБКА] Ни для одной из проверенных пар не удалось создать повод (проверено: {pairs_str}). Убедитесь, что симы находятся рядом или в одной зоне лота.', notify=True, title='Synapse NPC-NPC')
+            return
+
+        trig = selected_spark.get('trigger_type', 'ambient')
+        prio = selected_spark.get('priority', 0)
+        premise = selected_spark.get('premise', '')
+        cheat_print(_connection, f'[УСПЕХ] Выбран повод: [{trig}] (Приоритет: {prio})\nПовод: {premise}\nЗапуск диалога...', notify=True, title='Synapse NPC-NPC')
+
+        dispatch_autonomous_scene(selected_spark, force=True)
+
+    except Exception as e:
+        log_exception('Error in command_synapse_test_npc_npc', e)
+        cheat_print(_connection, f'Error: {e}')

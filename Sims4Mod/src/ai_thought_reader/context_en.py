@@ -806,6 +806,16 @@ TRAIT_MAP_EN = {
 # =========================================================================
 
 RELATIONSHIP_MAP_EN = {
+    # Domestic Staff & Butlers
+    "Дворецкий семьи": "Family Butler",
+    "Дворецкий": "Butler",
+    "Домашний персонал / Прислуга в доме": "Household Domestic Staff",
+    "Домашняя прислуга": "Domestic Staff",
+    "Няня семьи": "Family Nanny",
+    "Горничная": "Maid",
+    "Садовник": "Gardener",
+    "Мастер по ремонту": "Repair Technician",
+
     # Compounds & Strangers (longest matches first)
     "Незнакомец / Не знаком": "Stranger / Not Acquainted",
     "Незнакомка / Не знакома": "Stranger / Not Acquainted",
@@ -2885,6 +2895,7 @@ ACTIVITY_PATTERNS_EN = [
     (r"(?i)поливает растения", "Watering houseplants / garden"),
 
     # Multitasking & Group Dialogues
+    (r"(?i)и параллельно общается в компании с\s*", "while chatting in a group with "),
     (r"(?i)и параллельно общается с\s*", "while chatting with "),
     (r"(?i)и параллельно ведет беседу", "while having a conversation"),
     (r"(?i)ведет групповую беседу с\s*", "Having a group conversation with "),
@@ -3338,6 +3349,23 @@ GENERIC_IDLES_MAP_EN = {
 }
 
 ACTIVITY_MAP_EXACT_EN = {
+    # SP09 Vintage Glamour - Butler Actions
+    "Придирчиво проверяет чистоту комнат, проводя пальцем по поверхностям в поисках пыли": "Meticulously inspecting room cleanliness, running a finger across surfaces checking for dust",
+    "Стоит по стойке смирно с безупречной выправкой, ожидая распоряжений хозяев дома": "Standing at attention with impeccable posture, awaiting orders from the household masters",
+    "Готовит изысканный коктейль за барной стойкой с профессиональным мастерством дворецкого": "Crafting an exquisite cocktail behind the bar with professional butler flair",
+    "Подносит освежающие напитки и закуски на сияющем серебряном подносе": "Serving refreshing drinks and delicacies on a gleaming silver platter",
+    "Торжественно звонит в старинный бронзовый гонг, созывая семью к трапезе": "Solemnly ringing the antique bronze dinner gong, calling the household to the dining table",
+    "Тщательно полирует антикварное серебро и натирает хрустальные бокалы до сияющего блеска": "Meticulously polishing antique silverware and rubbing crystal glassware to a brilliant shine",
+    "Наводит безупречный порядок в комнатах особняка, прибирая и наводя лоск": "Maintaining spotless order across the manor rooms, tidying up and polishing surfaces",
+    "Делает расслабляющий профессиональный массаж плеч хозяину дома": "Giving a relaxing professional shoulder massage to the master of the house",
+    "Ухаживает за оранжереей и цветочными клумбами особняка по поручению хозяев": "Tending to the manor greenhouse and flower beds as tasked by the household",
+    "Устраняет поломку и чинит домашнюю технику с невозмутимым достоинством дворецкого": "Fixing a malfunction and repairing household appliances with composed butler dignity",
+    "Идёт проверить чистоту комнат": "Heading to inspect room cleanliness",
+    "Идёт звонить в обеденный гонг": "Heading to ring the dinner gong",
+    "Идёт подавать напитки на серебряном подносе": "Heading to serve drinks on a silver platter",
+    "Идёт к барной стойке готовить напитки для семьи": "Heading to the bar to prepare drinks for the household",
+    "Идёт наводить порядок в комнатах особняка": "Heading to tidy up the manor rooms",
+
     # Basemental Drugs & Substances Activities
     "Курит марихуану через бонг": "Smoking marijuana from a bong",
     "Курит блант с марихуаной": "Smoking a weed blunt",
@@ -3474,7 +3502,13 @@ ACTIVITY_MAP_EXACT_EN = {
     "Выносит / выбрасывает мусор": "Taking out / discarding trash",
     "Выполняет заказ на фрилансе": "Working on a freelance gig",
     "Вытирает личико и моет ручки для": "Wiping face and washing hands of",
-    "Вытирает шваброй и убирает устроенный беспорядок на полу": "Mopping up a messy puddle on the floor",
+    "Вытирает шваброй лужу на полу": "Mopping up a puddle on the floor",
+    "Убирает беспорядок на полу": "Cleaning up a mess on the floor",
+    "Моет пол шваброй": "Mopping the floor",
+    "Идёт вытирать лужу на полу": "Heading to mop up a puddle on the floor",
+    "Идёт убирать беспорядок на полу": "Heading to clean up a mess on the floor",
+    "Идёт мыть пол шваброй": "Heading to mop the floor",
+    "Вытирает шваброй и убирает устроенный беспорядок на полу": "Mopping up a puddle on the floor",
     "Готовит буррито": "Making burritos",
     "Готовит горячий бутерброд с сыром": "Making a grilled cheese sandwich",
     "Готовит горячий бутерброд с сыром (жареный сыр)": "Making a grilled cheese sandwich",
@@ -5572,6 +5606,20 @@ ACTIVITY_MAP_EXACT_EN = {
     "С азартом делится кулинарными секретами идеального хрустящего теста для пиццы и вафель с": "Passionately sharing culinary secrets of perfect crispy crust and batter with",
     "С легким вздохом жалуется на привередливых клиентов уличного прилавка и пригоревшую корочку для": "With a light sigh complaining about picky food stand customers and burnt crust to",
     "С неподдельным восторгом хвалит умопомрачительный аппетитный аромат свежей выпечки перед": "Enthusiastically praising the mouthwatering aroma of freshly baked goods to",
+    # Cooking, cleaning, repairing generic fallbacks
+    "Готовит еду на кухне": "Cooking in the kitchen",
+    "Занимается выпечкой на кухне": "Baking in the kitchen",
+    "Готовит еду на гриле": "Grilling on the BBQ",
+    "Занимается домашними заготовками": "Making homemade preserves",
+    "Занят починкой и ремонтом сломанного предмета": "Repairing a broken object",
+    "Тюнингует и улучшает оборудование": "Upgrading equipment",
+    "Разбирает сломанный предмет на детали и запчасти": "Salvaging spare parts from broken object",
+    "Убирает / моет и чистит": "Cleaning and tidying up",
+    "Идёт готовить еду на кухне": "Heading to the kitchen to cook",
+    "Идёт заниматься выпечкой": "Heading to bake in the kitchen",
+    "Идёт готовить на гриле": "Heading to grill on the BBQ",
+    "Идёт делать заготовки": "Heading to make homemade preserves",
+
     # SP20 Crystal Creations Stuff exact
     "Виртуозно гранит драгоценный камень за геммологическим столом, придавая минералу безупречную форму": "Masterfully cutting a gemstone at the gemology table, shaping the mineral into flawless perfection",
     "Тщательно полирует грани свежеограненного самоцвета, добиваясь ослепительного блеска": "Carefully polishing the facets of a freshly cut gem, achieving a dazzling sparkle",
@@ -6079,6 +6127,124 @@ WORD_LEXICON_EN = {
     "биография": "Biography",
 }
 
+_RU_TO_EN_CACHE = None
+
+
+def _translate_dish_or_item(name: str) -> str:
+    """Translates a localized Russian dish, object, or ingredient name into English."""
+    if not name:
+        return ""
+    s = name.strip()
+    if not any('\u0400' <= c <= '\u04FF' for c in s):
+        return s
+
+    global _RU_TO_EN_CACHE
+    if _RU_TO_EN_CACHE is None:
+        try:
+            from ai_thought_reader.context import _load_strings_table
+            ru_tbl = _load_strings_table(is_en=False)
+            en_tbl = _load_strings_table(is_en=True)
+            common = set(ru_tbl.keys()) & set(en_tbl.keys())
+            _RU_TO_EN_CACHE = {ru_tbl[k].lower().strip(): en_tbl[k].strip() for k in common}
+        except Exception:
+            _RU_TO_EN_CACHE = {}
+
+    clean_s = s.replace('\u00ab', '').replace('\u00bb', '').replace('"', '').replace("'", '').strip()
+    low = clean_s.lower().strip()
+    if low in _RU_TO_EN_CACHE:
+        return _RU_TO_EN_CACHE[low]
+    if s.lower().strip() in _RU_TO_EN_CACHE:
+        return _RU_TO_EN_CACHE[s.lower().strip()]
+
+    # Plants, vegetables and fruits reverse map
+    try:
+        from ai_thought_reader.context import PLANT_NAMES_RU
+        for en_k, ru_v in PLANT_NAMES_RU.items():
+            if en_k and ru_v:
+                for part in ru_v.split('/'):
+                    clean_p = part.split('(')[0].strip().lower()
+                    if clean_p and clean_p in low:
+                        return en_k.replace('_', ' ').capitalize()
+    except Exception:
+        pass
+
+    # Culinary & domestic item dictionary overrides
+    if "торт" in low and ("шоколад" in low or "шоколадн" in low):
+        return "Chocolate Cake"
+    if "торт" in low and "клубнич" in low:
+        return "Strawberry Cake"
+    if "торт" in low and "бел" in low:
+        return "White Cake"
+    if "пирог" in low and "яблоч" in low:
+        return "Apple Pie"
+    if "пирог" in low and "лимон" in low:
+        return "Lemon Tart / Pie"
+    if "печень" in low and "брауни" in low:
+        return "Brownies"
+    if "печень" in low and "шоколад" in low:
+        return "Chocolate Chip Cookies"
+    if "сосиск" in low and "фасол" in low:
+        return "Franks and Beans"
+    for ru_w, en_w in [
+        ("сосиски с фасолью", "Franks and Beans"),
+        ("фруктовый салат", "Fruit Salad"),
+        ("шоколадный торт", "Chocolate Cake"),
+        ("белый торт", "White Cake"),
+        ("клубничный торт", "Strawberry Cake"),
+        ("яблочный пирог", "Apple Pie"),
+        ("брауни", "Brownies"),
+        ("печенье брауни", "Brownies"),
+        ("шоколадное печенье", "Chocolate Chip Cookies"),
+        ("печенье", "Cookies"),
+        ("гамбургер", "Hamburger"),
+        ("бургер", "Burger"),
+        ("чизбургер", "Cheeseburger"),
+        ("жареный сыр", "Grilled Cheese"),
+        ("спагетти", "Spaghetti"),
+        ("пицца", "Pizza"),
+        ("пепперони", "Pepperoni Pizza"),
+        ("сырная пицца", "Cheese Pizza"),
+        ("вафли", "Waffles"),
+        ("блинчики", "Pancakes"),
+        ("оладьи", "Pancakes"),
+        ("яичница", "Scrambled Eggs"),
+        ("омлет", "Omelet"),
+        ("салат цезарь", "Caesar Salad"),
+        ("садовый салат", "Garden Salad"),
+        ("рагу", "Stew"),
+        ("жаркое", "Pot Roast"),
+        ("рыба и чипсы", "Fish and Chips"),
+        ("лобстер термидор", "Lobster Thermidor"),
+        ("унитаз", "Toilet"),
+        ("раковина", "Sink"),
+        ("раковину", "Sink"),
+        ("ванна", "Bathtub"),
+        ("ванну", "Bathtub"),
+        ("душ", "Shower"),
+        ("холодильник", "Refrigerator"),
+        ("плита", "Stove"),
+        ("плиту", "Stove"),
+        ("тумба", "Counter"),
+        ("тумбу", "Counter"),
+        ("стол", "Table"),
+        ("стул", "Chair"),
+        ("диван", "Sofa"),
+        ("кровать", "Bed"),
+        ("стереосистема", "Stereo System"),
+        ("стереосистему", "Stereo System"),
+        ("телевизор", "TV"),
+        ("компьютер", "Computer"),
+    ]:
+        if low == ru_w or ru_w in low:
+            return en_w
+
+    try:
+        from ai_thought_reader.context_en import transliterate_to_latin
+        return transliterate_to_latin(s)
+    except Exception:
+        return s
+
+
 def translate_activity_en(activity_str: str) -> str:
     """
     Translates Russian activity descriptions into natural English.
@@ -6102,6 +6268,144 @@ def translate_activity_en(activity_str: str) -> str:
     elif act.startswith("Направляется"):
         heading_prefix = True
         act = act[len("Направляется"):].strip()
+
+    # Layer 0.5: High-Precision Structured Engines (Cooking, Crafting, Repairing, Cleaning, Transitioning)
+    # Transitioning (Routing)
+    m_head = re.match(r"(?i)^ид[её]т\s+готовить\s+блюдо:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to cook dish: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+печь:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to bake: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+готовить\s+на\s+гриле:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to grill: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+готовить\s+пиццу:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to make pizza: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+печь\s+вафли:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to make waffles: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+(?:делать|заниматься)\s+заготовки?:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to make preserves: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+подготавливать\s+ингредиенты:\s*(.+)$", act)
+    if m_head:
+        return f"Heading to prep ingredients: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+(?:чинить|ремонтировать):\s*(.+)$", act)
+    if m_head:
+        return f"Heading to repair: {_translate_dish_or_item(m_head.group(1))}"
+    m_head = re.match(r"(?i)^ид[её]т\s+(?:убираться|чистить|мыть):\s*(.+)$", act)
+    if m_head:
+        return f"Heading to clean: {_translate_dish_or_item(m_head.group(1))}"
+
+    # Active eating / drinking
+    m_eat = re.match(r"(?i)^ест\s+блюдо:\s*(.+)$", act)
+    if m_eat:
+        return f"Eating dish: {_translate_dish_or_item(m_eat.group(1))}"
+    m_eat_plant = re.match(r"(?i)^ест\s+свежий\s+урожай\s*/\s*плод\s*(?:\((.+?)\)|:\s*(.+))$", act)
+    if m_eat_plant:
+        item = m_eat_plant.group(1) or m_eat_plant.group(2)
+        return f"Eating fresh produce ({_translate_dish_or_item(item)})"
+    m_drk = re.match(r"(?i)^пь[её]т\s+напиток:\s*(.+)$", act)
+    if m_drk:
+        return f"Drinking: {_translate_dish_or_item(m_drk.group(1))}"
+
+    # Routing to eat / drink
+    m_head_eat = re.match(r"(?i)^ид[её]т\s+есть\s+блюдо:\s*(.+)$", act)
+    if m_head_eat:
+        return f"Heading to eat: {_translate_dish_or_item(m_head_eat.group(1))}"
+    m_head_drk = re.match(r"(?i)^ид[её]т\s+пить\s+напиток:\s*(.+)$", act)
+    if m_head_drk:
+        return f"Heading to drink: {_translate_dish_or_item(m_head_drk.group(1))}"
+    m_head_pln = re.match(r"(?i)^ид[её]т\s+есть\s+свежий\s+урожай\s*(?:\((.+?)\)|:\s*(.+))$", act)
+    if m_head_pln:
+        item = m_head_pln.group(1) or m_head_pln.group(2)
+        return f"Heading to eat produce ({_translate_dish_or_item(item)})"
+
+    # Active cooking / baking / grill / preserves
+    m_cook = re.match(r"(?i)^готовит\s+блюдо:\s*(.+)$", act)
+    if m_cook:
+        return f"Cooking dish: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^выпекает:\s*(.+)$", act)
+    if m_cook:
+        return f"Baking: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^готовит\s+на\s+гриле:\s*(.+)$", act)
+    if m_cook:
+        return f"Grilling: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^готовит\s+пиццу:\s*(.+)$", act)
+    if m_cook:
+        return f"Making pizza: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^выпекает\s+вафли:\s*(.+)$", act)
+    if m_cook:
+        return f"Making waffles: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^занимается\s+заготовками\s*\(консервация\):\s*(.+)$", act)
+    if m_cook:
+        return f"Canning / Preserving: {_translate_dish_or_item(m_cook.group(1))}"
+    m_cook = re.match(r"(?i)^подготавливает\s+ингредиенты:\s*(.+)$", act)
+    if m_cook:
+        return f"Prepping ingredients: {_translate_dish_or_item(m_cook.group(1))}"
+
+    # Active repair / upgrade
+    m_rep = re.match(r"(?i)^занят\s+починкой\s+и\s+ремонтом:\s*(.+)$", act)
+    if m_rep:
+        return f"Repairing: {_translate_dish_or_item(m_rep.group(1))}"
+    m_rep = re.match(r"(?i)^занят\s+ремонтом:\s*(.+)$", act)
+    if m_rep:
+        return f"Repairing: {_translate_dish_or_item(m_rep.group(1))}"
+    m_rep = re.match(r"(?i)^тюнингует\s+и\s+улучшает:\s*(.+)$", act)
+    if m_rep:
+        return f"Upgrading: {_translate_dish_or_item(m_rep.group(1))}"
+
+    # Trash and Discarding
+    m_trash = re.match(r"(?i)^выбрасывает\s+в\s+мусорное\s+ведро:\s*(.+)$", act)
+    if m_trash:
+        return f"Throwing away into trash can: {_translate_dish_or_item(m_trash.group(1))}"
+    if act == "Выбрасывает использованный подгузник в мусорное ведро":
+        return "Throwing away a dirty diaper into the trash can"
+    if act == "Выбрасывает мусор в мусорное ведро":
+        return "Throwing away trash into the trash can"
+
+    # Dishwashing
+    m_dishes = re.match(r"(?i)^моет\s+посуду\s+\(остатки\s+(.+?)\)\s+в\s+раковине$", act)
+    if m_dishes:
+        return f"Washing dishes (remnants of {_translate_dish_or_item(m_dishes.group(1))}) in the sink"
+    m_dishes_dw = re.match(r"(?i)^загружает\s+посуду\s+\((.+?)\)\s+в\s+посудомоечную\s+машину$", act)
+    if m_dishes_dw:
+        return f"Loading dishes ({_translate_dish_or_item(m_dishes_dw.group(1))}) into the dishwasher"
+    if act == "Моет посуду в раковине":
+        return "Washing dishes in the sink"
+    if act == "Моет посуду в посудомоечной машине":
+        return "Loading dishes into the dishwasher"
+
+    # Erratic Sim Actions
+    if act == "Общается с воображаемыми друзьями (галлюцинации безумца / разговаривает сам с собой)":
+        return "Talking to imaginary friends (erratic hallucinations / talking to self)"
+    if act == "Идёт общаться с воображаемыми друзьями (галлюцинации безумца / разговор с пустотой)":
+        return "Heading to talk to imaginary friends (erratic hallucinations / talking to empty air)"
+    if act == "Разговаривает сам с собой (приступ безумия / бормочет себе под нос)":
+        return "Talking to self (erratic episode / muttering under breath)"
+    if act == "Яростно спорит сам с собой (галлюцинации безумца / ругается с пустотой)":
+        return "Fiercely arguing with self (erratic hallucination / yelling at empty air)"
+    if act == "Рассказывает историю самому себе (бред безумца)":
+        return "Telling a story to self (erratic ramblings)"
+    if act == "Флиртует сам с собой перед зеркалом (приступ безумия и самолюбования)":
+        return "Flirting with self in the mirror (erratic self-infatuation episode)"
+    if act == "В приступе паранойи осматривает одежду и ищет скрытых жучков":
+        return "Inspecting clothing for hidden bugs in a fit of paranoia"
+
+    # Active cleaning
+    m_cln = re.match(r"(?i)^чистит\s+и\s+наводит\s+блеск:\s*(.+)$", act)
+    if m_cln:
+        return f"Cleaning: {_translate_dish_or_item(m_cln.group(1))}"
+    m_cln = re.match(r"(?i)^убирает\s+и\s+наводит\s+порядок:\s*(.+)$", act)
+    if m_cln:
+        return f"Cleaning up: {_translate_dish_or_item(m_cln.group(1))}"
+
+    # Woodworking / craft
+    m_crf = re.match(r"(?i)^(?:мастерит|созда[её]т)\s+на\s+верстаке:\s*(.+)$", act)
+    if m_crf:
+        return f"Crafting at woodworking table: {_translate_dish_or_item(m_crf.group(1))}"
 
     # Layer 1: Comprehensive Exact Match
     if act in ACTIVITY_MAP_EXACT_EN:
@@ -6351,7 +6655,7 @@ WORLD_NAMES_MAP_EN = {
 # Enhanced World & Town Descriptions (for AI immersion & atmospheric context)
 # =========================================================================
 WORLD_DESCRIPTIONS_EN = {
-    "Willow Creek": "classic American Southern suburb: lush shaded avenues, weeping willows, New Orleans colonial mansions, bayous, and blooming magnolias",
+    "Willow Creek": "lush flowering suburb: shaded avenues, weeping willows, parks, blooming magnolias, and traditional residential neighborhoods with beautiful mansions",
     "Oasis Springs": "sun-drenched desert oasis in Southwestern USA: palm trees, towering cacti, red rock canyons, mid-century modern architecture, and dry arid heat",
     "Newcrest": "spacious tranquil green suburb with tidy manicured lawns, a central park, and distant modern skyline views",
     "Magnolia Promenade": "bustling waterfront shopping district: upscale boutiques, trendy retail shops, brick promenades, and scenic coastal parks",
@@ -6756,6 +7060,10 @@ def translate_relationship_en(rel_str: str) -> str:
 
 
 FAMILY_DETAIL_MAP_EN = {
+    "Служит в доме: Дворецкий семьи": "Serves in household: Family Butler",
+    "Служит в доме: Горничная": "Serves in household: Maid",
+    "Служит в доме: Няня семьи": "Serves in household: Family Nanny",
+    "Служит в доме: Садовник": "Serves in household: Gardener",
     "Живут вместе в одном доме": "Lives together in the same household",
     "Живут вместе": "Lives together",
     "Живет отдельно": "Lives separately",
@@ -7135,6 +7443,55 @@ ASPIRATION_MAP_EN = {
 }
 
 
+_CAREER_STATUS_PHRASES_EN = [
+    (r'Домашнее задание: Не сделано', 'Homework: NOT done'),
+    (r'Домашнее задание: Сделано', 'Homework: done'),
+    (r'Задание на день:', 'Daily task:'),
+    (r'Следующая смена:', 'Next shift:'),
+    (r'Старшая школа', 'High School'),
+    (r'Начальная школа', 'Elementary School'),
+    (r'Оценка:\s*(\d)\s*\(Двоечник\)', r'Grade: \1 (failing student)'),
+    (r'Оценка:\s*(\d)\s*\(Троечник\)', r'Grade: \1 (C student)'),
+    (r'Оценка:\s*(\d)\s*\(Хорошист\)', r'Grade: \1 (B student)'),
+    (r'Оценка:\s*(\d)\s*\(Отличник\)', r'Grade: \1 (A student)'),
+    (r'Оценка:', 'Grade:'),
+    (r'Статус:', 'Status:'),
+    (r'График:', 'Schedule:'),
+    (r'Свободный график', 'Flexible schedule'),
+    (r'Ежедневно', 'Daily'),
+    (r'Пн, Вт, Ср, Чт, Пт', 'Mon, Tue, Wed, Thu, Fri'),
+    (r'Сб, Вс', 'Sat, Sun'),
+    (r'\bПн\b', 'Mon'), (r'\bВт\b', 'Tue'), (r'\bСр\b', 'Wed'), (r'\bЧт\b', 'Thu'),
+    (r'\bПт\b', 'Fri'), (r'\bСб\b', 'Sat'), (r'\bВс\b', 'Sun'),
+    (r'Сегодня', 'Today'), (r'Завтра', 'Tomorrow'), (r'День (\d+)', r'Day \1'),
+    (r'Прогуливает уроки', 'Skipping school'),
+    (r'Прогуливает работу', 'Skipping work'),
+    (r'Опаздывает на уроки', 'Late for school'),
+    (r'Опаздывает на работу', 'Late for work'),
+    (r'\(смена с ', '(shift since '), (r'\(смена в ', '(shift at '), (r'\(начало в ', '(starts at '),
+    (r'До уроков', 'Before school'), (r'До работы', 'Before work'),
+    (r'После уроков', 'After school'), (r'После работы', 'After work'),
+    (r'Выходной', 'Day off'), (r'Каникулы', 'School break'),
+    (r'В отпуске \(Оплачиваемый отгул\)', 'On vacation (paid time off)'),
+    (r'В отпуске', 'On vacation'), (r'На больничном', 'On sick leave'),
+    (r'Работает из дома', 'Working from home'),
+    (r'В школе', 'In school'), (r'На работе', 'At work'),
+]
+
+
+def _translate_career_tail_en(tail: str) -> str:
+    """Translates the status / schedule / homework tail that follows the job title."""
+    if not tail:
+        return ""
+    res = tail
+    for _ru, _en in _CAREER_STATUS_PHRASES_EN:
+        res = re.sub(_ru, _en, res, flags=re.IGNORECASE)
+    res = re.sub(r'(Today|Tomorrow|Day \d+) в ', r'\1 at ', res)
+    if any('\u0400' <= c <= '\u04FF' for c in res):
+        res = transliterate_to_latin(res)
+    return res
+
+
 def translate_single_career_entry_en(entry: str) -> str:
     """Translates a single career entry e.g. 'Военный — Должность: «Капрал» (Уровень 3: младший командир)'."""
     if not entry or not entry.strip():
@@ -7169,7 +7526,7 @@ def translate_single_career_entry_en(entry: str) -> str:
             res = f'{c_title_en} — Position: "{j_title_en}" (Level {c_lvl})'
         if any('\u0400' <= c <= '\u04FF' for c in res):
             res = transliterate_to_latin(res)
-        return res
+        return res + _translate_career_tail_en(ent[m.end():])
 
     m_simple = re.match(r'^(.*?)\s*\(Уровень\s*(\d+)\)', ent, flags=re.IGNORECASE)
     if m_simple:
@@ -7179,11 +7536,14 @@ def translate_single_career_entry_en(entry: str) -> str:
         res = f"{c_title_en} (Level {c_lvl})"
         if any('\u0400' <= c <= '\u04FF' for c in res):
             res = transliterate_to_latin(res)
-        return res
+        return res + _translate_career_tail_en(ent[m_simple.end():])
 
     res = ent
     res = re.sub(r'(?i)должность:\s*', 'Position: ', res)
     res = re.sub(r'(?i)уровень\s*(\d+)', r'Level \1', res)
+    for _ru, _en in _CAREER_STATUS_PHRASES_EN:
+        res = re.sub(_ru, _en, res, flags=re.IGNORECASE)
+    res = re.sub(r'(Today|Tomorrow|Day \d+) в ', r'\1 at ', res)
     for k in sorted(CAREER_JOB_MAP_EN.keys(), key=len, reverse=True):
         if k in res:
             res = res.replace(k, CAREER_JOB_MAP_EN[k])
@@ -7261,11 +7621,13 @@ def build_sim_prompt_en(
     nearby_sims_ru: List[str],
     roommates_ru: List[str],
     household_pets_ru: List[str],
+    livein_staff_ru: Optional[List[str]] = None,
     sex_info: Optional[dict] = None,
     social_info: Optional[dict] = None,
     is_active_intimate_incest: bool = False,
     flags_func=None,
     sim_id: Optional[int] = None,
+    sim_info: Optional[Any] = None,
 ) -> str:
     """
     Constructs 100% native, error-free English context prompt.
@@ -7292,42 +7654,116 @@ def build_sim_prompt_en(
     pregnancy_en = translate_pregnancy_en(pregnancy_ru)
     fame_en = translate_phrase(fame_info_ru, FAME_MAP_EN)
 
+    trapped_tag = ""
+    try:
+        from ai_thought_reader.trapped_detector import get_sim_trapped_status
+        trapped_tag = get_sim_trapped_status(sim_info, is_en=True)
+    except Exception:
+        pass
+
     lines = [
         "Character Information:",
-        f"- Name: {full_name}",
-        f"- Age & Gender: {age_en}, {gender_en}",
-        f"- Race: {race_en}",
+        f"- Name: {full_name}{trapped_tag}",
     ]
+
+    if get_flag("age_gender"):
+        lines.append(f"- Age & Gender: {age_en}, {gender_en}")
+
+    if get_flag("occult"):
+        lines.append(f"- Race: {race_en}")
 
     if get_flag("world_time") and world_time_en:
         lines.append(f"- In-Game Time: {world_time_en}")
+
     if get_flag("weather"):
         if season_en:
             lines.append(f"- Season: {season_en}")
         if weather_en:
             lines.append(f"- Weather: {weather_en}")
-    if get_flag("world_time") and holiday_ru:
-        lines.append(f"- Holiday: {translate_holiday_en(holiday_ru)}")
+
+    if get_flag("events"):
+        if holiday_ru:
+            lines.append(f"- Holiday: {translate_holiday_en(holiday_ru)}")
+        try:
+            from ai_thought_reader.context import get_active_social_event_info
+            ev_en = get_active_social_event_info(sim_info, is_en=True)
+            if ev_en and isinstance(ev_en, dict):
+                ev_name = ev_en.get("event_name_en") or ev_en.get("event_name", "")
+                ev_role = ev_en.get("role_en") or ev_en.get("role")
+                is_part = ev_en.get("is_participant", False)
+                is_on_lot = ev_en.get("is_on_lot", True)
+                is_hh_mem = ev_en.get("is_household_member", False)
+                is_resid = ev_en.get("is_residential", True)
+                if ev_name:
+                    if is_part and ev_role:
+                        lines.append(f"- Active Event: {ev_name} (Role: {ev_role})")
+                    elif is_part:
+                        lines.append(f"- Active Event: {ev_name} (Participant)")
+                    elif not is_on_lot:
+                        lines.append(
+                            f"- Nearby Event on Lot: {ev_name} "
+                            f"(Sim is NOT invited and not participating — just a passerby walking down the street outside)"
+                        )
+                    elif is_hh_mem:
+                        lines.append(
+                            f"- Event at Home: {ev_name} "
+                            f"(Household Member — event is taking place at their home, but not registered as an official participant)"
+                        )
+                    elif is_resid:
+                        lines.append(
+                            f"- Active Event on Lot: {ev_name} "
+                            f"(Uninvited Visitor — not a household member and NOT invited to the party, just came to the residential lot during the event)"
+                        )
+                    else:
+                        lines.append(
+                            f"- Event at Venue: {ev_name} "
+                            f"(Regular Venue Patron — visiting this public venue for their own business, was NOT invited and has no connection to this private event)"
+                        )
+            elif ev_en:
+                lines.append(f"- Current Social Event: {ev_en}")
+        except Exception:
+            pass
+
+    if get_flag("emergencies"):
+        try:
+            from ai_thought_reader.context import get_fire_hazard_context, get_sim_labor_hazard_context
+            fire_en = get_fire_hazard_context(sim_info, is_en=True)
+            if fire_en:
+                f_sum = fire_en.get("summary_en") or fire_en.get("summary", str(fire_en)) if isinstance(fire_en, dict) else str(fire_en)
+                lines.append(f"- EMERGENCY (FIRE): {f_sum}")
+            labor_en = get_sim_labor_hazard_context(sim_info, is_en=True)
+            if labor_en:
+                l_sum = labor_en.get("summary_en") or labor_en.get("summary", str(labor_en)) if isinstance(labor_en, dict) else str(labor_en)
+                lines.append(f"- EMERGENCY (LABOR & CHILDBIRTH): {l_sum}")
+        except Exception:
+            pass
 
     if get_flag("clothing"):
         lines.append(f"- Outfit: {clothing_en}")
         if nudity_en:
-            lines.append(f"- Degree of Nudity: {nudity_en}")
+            try:
+                from ai_social_pc.child_safety import should_hide_nudity_level
+                hide_nudity = should_hide_nudity_level(sim_info)
+            except Exception:
+                hide_nudity = False
+            if not hide_nudity:
+                lines.append(f"- Degree of Nudity: {nudity_en}")
 
-    if sex_info:
-        action_en = translate_activity_en(sex_info.get("action", ""))
-        lines.append(f"- Current Action: {action_en}")
-        partner_label = "Partner"
-        partners_en = translate_relationship_en(str(sex_info.get("partners", "")))
-        lines.append(f"- {partner_label}: {partners_en}")
-        if sex_info.get("group_type"):
-            lines.append(f"- Intimacy Format: {sex_info['group_type']}")
-        if sex_info.get("pose"):
-            lines.append(f"- Intimacy Pose / Type: {translate_activity_en(str(sex_info['pose']))}")
-        if sex_info.get("location_and_privacy"):
-            lines.append(f"- Location & Privacy: {translate_location_en(str(sex_info['location_and_privacy']))}")
-    else:
-        lines.append(f"- Current Action: {activity_en}")
+    if get_flag("activity"):
+        if sex_info:
+            action_en = translate_activity_en(sex_info.get("action", ""))
+            lines.append(f"- Current Action: {action_en}")
+            partner_label = "Partner"
+            partners_en = translate_relationship_en(str(sex_info.get("partners", "")))
+            lines.append(f"- {partner_label}: {partners_en}")
+            if sex_info.get("group_type"):
+                lines.append(f"- Intimacy Format: {sex_info['group_type']}")
+            if sex_info.get("pose"):
+                lines.append(f"- Intimacy Pose / Type: {translate_activity_en(str(sex_info['pose']))}")
+            if sex_info.get("location_and_privacy"):
+                lines.append(f"- Location & Privacy: {translate_location_en(str(sex_info['location_and_privacy']))}")
+        else:
+            lines.append(f"- Current Action: {activity_en}")
 
     # Social Dialog block
     if social_info and get_flag("social"):
@@ -7387,6 +7823,15 @@ def build_sim_prompt_en(
         else:
             lines.append("- Household Roommates: No roommates (lives alone or only with family)")
 
+    # Household Domestic Staff block
+    if get_flag("livein_staff"):
+        if livein_staff_ru:
+            lines.append("- Household Domestic Staff (Domestic servants):")
+            for staff_entry in livein_staff_ru:
+                lines.append(f"  • {translate_nearby_sim_en(staff_entry)}")
+        else:
+            lines.append("- Household Domestic Staff: No live-in servants or butler in the house")
+
     # Household Pets block
     if get_flag("pets"):
         if household_pets_ru:
@@ -7397,15 +7842,27 @@ def build_sim_prompt_en(
         else:
             lines.append("- Household Pets: No pets in household")
 
-    lines.append(f"- Current Mood: {mood_en}")
+    if get_flag("mood"):
+        lines.append(f"- Current Mood: {mood_en}")
 
     if get_flag("location"):
         lines.append(f"- Current Location: {location_en}")
 
-    lines.append(f"- Needs & Motives: {motives_en}")
-    lines.append(f"- Personality Traits: {traits_en}")
+    is_on_lot = True
+    if sim_info:
+        try:
+            from ai_thought_reader.context import is_sim_on_active_lot
+            is_on_lot = is_sim_on_active_lot(sim_info)
+        except Exception:
+            is_on_lot = True
 
-    if custom_lore:
+    if get_flag("needs"):
+        lines.append(f"- Needs & Motives: {motives_en}")
+
+    if get_flag("traits"):
+        lines.append(f"- Personality Traits: {traits_en}")
+
+    if get_flag("lore") and custom_lore:
         lines.append(f"- Additional Lore (Personal Backstory): {custom_lore}")
 
     if get_flag("pregnancy") and pregnancy_en:
@@ -7416,12 +7873,41 @@ def build_sim_prompt_en(
 
     if get_flag("career") and career_ru:
         lines.append(f"- Career & Profession: {translate_career_en(career_ru)}")
+        try:
+            from ai_thought_reader.context import get_sim_education_info
+            edu_info_en = get_sim_education_info(sim_info, is_en=True)
+            edu_str_en = edu_info_en if edu_info_en else "None"
+            lines.append(f"- Higher Education & Degree: {edu_str_en}")
+        except Exception:
+            lines.append("- Higher Education & Degree: None")
+        try:
+            from ai_thought_reader.context import get_sim_active_lot_role
+            lot_role_en = get_sim_active_lot_role(sim_info, is_en=True)
+            if lot_role_en:
+                lines.append(f"- Active Lot Role / Duty: {lot_role_en}")
+        except Exception:
+            pass
 
     if get_flag("aspiration") and aspiration_ru:
         lines.append(f"- Aspiration & Life Goal: {translate_aspiration_en(aspiration_ru)}")
 
     if get_flag("funds") and funds_ru:
         lines.append(f"- Household Budget: {translate_funds_en(funds_ru)}")
+
+    if get_flag("clubs"):
+        try:
+            from ai_thought_reader.context import get_sim_clubs_info
+            clubs_en = get_sim_clubs_info(sim_info, is_en=True)
+            if not clubs_en:
+                lines.append("- Club Memberships: Not a member of any club")
+            elif len(clubs_en) == 1:
+                lines.append(f"- Club Memberships: {clubs_en[0]}")
+            else:
+                lines.append(f"- Club Memberships (Total {len(clubs_en)}):")
+                for c_str in clubs_en:
+                    lines.append(f"  * {c_str}")
+        except Exception:
+            lines.append("- Club Memberships: Not a member of any club")
 
     if get_flag("memory") and sim_id:
         try:
@@ -7431,6 +7917,34 @@ def build_sim_prompt_en(
                 lines.append(f"- {mem_text}")
         except Exception:
             pass
+
+    if get_flag("recent_dialogs"):
+        try:
+            from ai_social_pc.conversation_log import format_recent_conversations_for_prompt
+            conv_log_en = format_recent_conversations_for_prompt(sim_id or sim_info, is_en=True)
+            if conv_log_en:
+                lines.append(conv_log_en)
+        except Exception:
+            pass
+
+    try:
+        from ai_thought_reader.last_thought_tracker import get_sim_last_thought_context
+        lt_en = get_sim_last_thought_context(sim_info, is_en=True)
+        if lt_en:
+            lines.append(lt_en)
+    except Exception:
+        pass
+
+    # Home / Small Business Context (EP18 Businesses & Hobbies / Get to Work) - placed strictly at the end of context
+    try:
+        from ai_thought_reader.config import get_experimental_flag
+        if get_experimental_flag("home_business_context") and sim_info is not None:
+            from ai_thought_reader.business_context import get_business_prompt_block
+            biz_block_en = get_business_prompt_block(sim_info, is_en=True)
+            if biz_block_en and biz_block_en.strip():
+                lines.append(biz_block_en.strip())
+    except Exception as e_biz_en:
+        pass
 
     lines.append("")
 
@@ -7457,15 +7971,22 @@ def build_sim_prompt_en(
             lines.append("")
 
     # Dynamic Age-Specific Rule
-    age_rule_en = AGE_INSTRUCTION_RULES_EN.get(age_raw, "")
-    if age_rule_en:
-        lines.append(age_rule_en)
-        lines.append("")
+    try:
+        from ai_thought_reader.config import get_age_instructions_enabled
+        age_instr_active = get_age_instructions_enabled()
+    except Exception:
+        age_instr_active = True
+
+    if age_instr_active:
+        age_rule_en = AGE_INSTRUCTION_RULES_EN.get(age_raw, "")
+        if age_rule_en:
+            lines.append(age_rule_en)
+            lines.append("")
 
     # Dynamic Classic Insane Trait Guidance (Experimental Flag)
     try:
-        from ai_thought_reader.config import get_experimental_flag
-        has_classic_insane = get_experimental_flag("classic_insane_trait")
+        import ai_thought_reader.config as _cfg_mod_insane_en
+        has_classic_insane = _cfg_mod_insane_en.get_experimental_flag("classic_insane_trait")
     except Exception:
         has_classic_insane = False
 
@@ -7476,8 +7997,15 @@ def build_sim_prompt_en(
         )
         lines.append("")
 
+
     # Incest / Taboo dynamic guidance
-    if is_active_intimate_incest and get_flag("incest"):
+    try:
+        from ai_thought_reader.config import get_special_situations_enabled
+        special_situations_active = get_special_situations_enabled()
+    except Exception:
+        special_situations_active = False
+
+    if special_situations_active and is_active_intimate_incest and get_flag("incest"):
         lines.append(
             "IMPORTANT (Forbidden Romance / Taboo Bond): The character is currently in a romantic or intimate interaction with their blood/close relative (marked [TABOO/INCEST]). "
             "Reflect the psychological complexity of a forbidden connection: awareness of the taboo, secret attraction, guilt, awkwardness, thrill, or overwhelming passion from the forbidden nature of the moment."
@@ -7544,6 +8072,7 @@ def build_pet_prompt_en(
     weather_ru: str,
     custom_lore: str = "",
     flags_func=None,
+    sim_info=None,
 ) -> str:
     """Builds English pet prompt for Dogs and Cats."""
     get_flag = flags_func if flags_func else (lambda f: True)
@@ -7557,9 +8086,17 @@ def build_pet_prompt_en(
     season_en = SEASONS_MAP_EN.get(season_ru, season_ru)
     weather_en = translate_phrase(weather_ru, WEATHER_MAP_EN)
 
+    trapped_tag = ""
+    if sim_info is not None:
+        try:
+            from ai_thought_reader.trapped_detector import get_sim_trapped_status
+            trapped_tag = get_sim_trapped_status(sim_info, is_en=True)
+        except Exception:
+            pass
+
     lines = [
         f"Pet Information ({species_en}):",
-        f"- Name: {first_name}",
+        f"- Name: {first_name}{trapped_tag}",
         f"- Species: {species_en}",
         f"- Age & Gender: {age_gender_en}",
     ]

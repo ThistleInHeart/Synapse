@@ -51,13 +51,27 @@ except ImportError:
     output = lambda msg, c=None: None
 
 
-def cheat_print(connection, text: str):
+def cheat_print(connection, text: str, notify: bool = False, title: str = "Synapse"):
     """Outputs text to the cheat console and logs it."""
     log(f"[CONSOLE] {text}")
     try:
-        output(text, connection)
+        if sims4 is not None and hasattr(sims4, "commands") and hasattr(sims4.commands, "cheat_output"):
+            sims4.commands.cheat_output(text, connection)
+        elif hasattr(sims4.commands, "output"):
+            sims4.commands.output(text, connection)
     except Exception:
         pass
+    try:
+        if output is not None:
+            output(text, connection)
+    except Exception:
+        pass
+    if notify:
+        try:
+            from ai_thought_reader.ui_helper import show_notification
+            show_notification(title, text, is_error=False)
+        except Exception:
+            pass
 
 
 def execute_set_key(key: str, _connection=None):
@@ -503,8 +517,8 @@ def execute_dump_context(target_arg=None, _connection=None, is_ww: bool = False)
     send_context_to_bridge_async(prompt, full_name, on_context_sent)
 
 
-def execute_menu(target_sim_id=None, _connection=None):
-    """Opens the in-game UI Settings Menu for target_sim_id or active sim."""
+def execute_old_menu(target_sim_id=None, _connection=None):
+    """Opens the legacy EA Dialog Settings Menu for target_sim_id or active sim."""
     try:
         from ai_thought_reader.ui_dialogs import open_settings_menu
         target_sim_info = None
@@ -515,10 +529,25 @@ def execute_menu(target_sim_id=None, _connection=None):
                 if sim_info_mgr is not None:
                     target_sim_info = sim_info_mgr.get(int(raw_str))
         open_settings_menu(target_sim_info)
-        cheat_print(_connection, "[AI Mod] Settings menu opened." if _is_en() else "[AI Mod] Открыто меню настроек.")
+        cheat_print(_connection, "[AI Mod] Legacy settings menu opened." if _is_en() else "[AI Mod] Открыто классическое меню настроек.")
     except Exception as e:
-        log_exception("Error opening settings menu", e)
+        log_exception("Error opening legacy settings menu", e)
         cheat_print(_connection, f"[AI Mod] Error opening menu: {e}" if _is_en() else f"[AI Mod] Ошибка открытия меню: {e}")
+
+
+def execute_menu(target_sim_id=None, _connection=None):
+    """Opens the modern Scaleform/Flash Synapse Settings & Lore Window, falling back to legacy dialogs if needed."""
+    try:
+        from ai_thought_reader.lore_ui import open_lore_window
+        opened = open_lore_window(target_sim_id=target_sim_id, _connection=_connection)
+        if opened:
+            cheat_print(_connection, "[AI Mod] Synapse UI opened." if _is_en() else "[AI Mod] Открыто окно настроек Synapse.")
+            return
+    except Exception as e:
+        log_exception("Error opening modern Synapse UI window, attempting fallback", e)
+
+    # Fallback to legacy EA dialogs if modern UI window fails to open
+    execute_old_menu(target_sim_id=target_sim_id, _connection=_connection)
 
 
 def execute_lore(text_arg: str = None, _connection=None):
@@ -754,6 +783,26 @@ if sims4 is not None and hasattr(sims4, "commands"):
         except Exception as e:
             log_exception("Error in ai_pc_chat command", e)
 
+    # S4S direct pie menu command for direct dialogue: ai_direct_talk
+    @Command("ai_direct_talk", "ai.direct_talk", "direct_talk", command_type=CommandType.Live)
+    def _cmd_ai_direct_talk(*args, _connection=None, **kwargs):
+        try:
+            from ai_social_pc.direct_dialogue import start_direct_dialogue
+            target = args[0] if args else kwargs.get("target_sim_id", None)
+            start_direct_dialogue(target, is_ww_sex=False)
+        except Exception as e:
+            log_exception("Error in ai_direct_talk command", e)
+
+    # S4S direct pie menu command for intimate direct dialogue: ai_direct_talk_ww
+    @Command("ai_direct_talk_ww", "ai.direct_talk_ww", "direct_talk_ww", command_type=CommandType.Live)
+    def _cmd_ai_direct_talk_ww(*args, _connection=None, **kwargs):
+        try:
+            from ai_social_pc.direct_dialogue import start_direct_dialogue
+            target = args[0] if args else kwargs.get("target_sim_id", None)
+            start_direct_dialogue(target, is_ww_sex=True)
+        except Exception as e:
+            log_exception("Error in ai_direct_talk_ww command", e)
+
     # In-game settings menu commands
     @Command("ai.menu", command_type=CommandType.Live)
     def _cmd_dot_menu(*args, _connection=None, **kwargs):
@@ -771,6 +820,515 @@ if sims4 is not None and hasattr(sims4, "commands"):
     @Command("synapse.settings", command_type=CommandType.Live)
     def _cmd_synapse_dot_settings(*args, _connection=None, **kwargs):
         execute_menu(target_sim_id=None, _connection=_connection)
+
+    @Command("synapse.old_menu", "ai.old_menu", "synapse.oldmenu", command_type=CommandType.Live)
+    def _cmd_synapse_old_menu(*args, _connection=None, **kwargs):
+        target_arg = args[0] if args else kwargs.get("target_sim_id", None)
+        execute_old_menu(target_arg, _connection=_connection)
+
+    # Maxis-Style Lore & Settings UI Window commands
+    @Command("synapse.lore", "synapse.open_lore", "ai.lore_ui", "synapse.lore_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_lore(*args, _connection=None, **kwargs):
+        """Opens the Maxis-style Lore and Synapse Settings window for target Sim or active Sim."""
+        target_arg = args[0] if args else kwargs.get("target_sim_id", None)
+        try:
+            from ai_thought_reader.lore_ui import open_lore_window
+            open_lore_window(target_arg, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening Lore UI", e)
+
+    @Command("synapse.pick_lore_sim", command_type=CommandType.Live)
+    def _cmd_synapse_pick_lore_sim(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import pick_sim_for_lore_window
+            pick_sim_for_lore_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error picking sim for Lore UI", e)
+
+    @Command("synapse.save_lore", command_type=CommandType.Live)
+    def _cmd_synapse_save_lore(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        sim_id_str = str(args[0])
+        hex_lore = str(args[1]) if len(args) > 1 else ""
+        hex_race = str(args[2]) if len(args) > 2 else ""
+        try:
+            from ai_thought_reader.lore_ui import save_sim_lore_from_ui
+            save_sim_lore_from_ui(sim_id_str, hex_lore, hex_race=hex_race, _connection=_connection)
+        except Exception as e:
+            log_exception("Error saving lore from UI", e)
+
+    @Command("synapse.clear_lore", command_type=CommandType.Live)
+    def _cmd_synapse_clear_lore(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        sim_id_str = str(args[0])
+        try:
+            from ai_thought_reader.lore_ui import clear_sim_lore_from_ui
+            clear_sim_lore_from_ui(sim_id_str, _connection=_connection)
+        except Exception as e:
+            log_exception("Error clearing lore from UI", e)
+
+    @Command("synapse.pick_memory_sim", command_type=CommandType.Live)
+    def _cmd_synapse_pick_memory_sim(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import pick_sim_for_memory_window
+            pick_sim_for_memory_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error picking sim for Memory UI", e)
+
+    @Command("synapse.create_custom_memory", command_type=CommandType.Live)
+    def _cmd_synapse_create_custom_memory(*args, _connection=None, **kwargs):
+        if not args or len(args) < 3:
+            return
+        sim_id_str = str(args[0])
+        days_str = str(args[1])
+        hex_summary = str(args[2])
+        try:
+            from ai_thought_reader.lore_ui import decode_hex, _dispatch_ui_cmd, get_client_id
+            from ai_social_pc.memory_manager import add_personal_memory, commit_memories_to_disk
+            sim_id = int(sim_id_str)
+            days = int(days_str) if str(days_str).isdigit() else 0
+            summary = decode_hex(hex_summary)
+            if summary.strip():
+                add_personal_memory(
+                    sim_id=sim_id,
+                    summary=summary.strip(),
+                    duration_days=days,
+                    event_type="player_custom"
+                )
+                commit_memories_to_disk()
+                cid = get_client_id(_connection)
+                _dispatch_ui_cmd("ui.synapse_settings memory_created", cid)
+                cheat_print(_connection, f"[SYNAPSE MEMORY] Created memory for Sim {sim_id} (days={days}): {summary.strip()}")
+        except Exception as e:
+            log_exception("Error creating custom memory from UI", e)
+
+    @Command("synapse.context", "synapse.open_context", "ai.context_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_context(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import open_context_window
+            open_context_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error opening Context UI", e)
+
+    @Command("synapse.autonomy", "synapse.open_autonomy", "ai.autonomy_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_autonomy(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import open_autonomy_window
+            open_autonomy_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error opening Autonomy UI", e)
+
+    @Command("synapse.set_autonomy_enabled", command_type=CommandType.Live)
+    def _cmd_synapse_set_autonomy_enabled(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.config import set_autonomy_enabled
+            from ai_thought_reader.autonomy import update_autonomy_alarm
+            enabled = str(args[0]).strip().lower() in ("1", "true", "yes", "on")
+            set_autonomy_enabled(enabled)
+            update_autonomy_alarm()
+            log(f"[AUTONOMY_CMD] Autonomy enabled set to {enabled}")
+        except Exception as e:
+            log_exception("Error setting autonomy enabled from UI", e)
+
+    @Command("synapse.set_autonomy_interval", command_type=CommandType.Live)
+    def _cmd_synapse_set_autonomy_interval(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.config import set_autonomy_interval
+            from ai_thought_reader.autonomy import update_autonomy_alarm
+            mins = int(float(str(args[0]).strip()))
+            if mins > 0:
+                set_autonomy_interval(mins)
+                update_autonomy_alarm()
+                log(f"[AUTONOMY_CMD] Autonomy interval set to {mins} sim minutes")
+        except Exception as e:
+            log_exception("Error setting autonomy interval from UI", e)
+
+    @Command("synapse.trigger_autonomy", command_type=CommandType.Live)
+    def _cmd_synapse_trigger_autonomy(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.autonomy import trigger_autonomy_now
+            trigger_autonomy_now()
+            log("[AUTONOMY_CMD] Triggered autonomy test tick")
+        except Exception as e:
+            log_exception("Error triggering autonomy test tick", e)
+
+    @Command("synapse.set_context_flag", command_type=CommandType.Live)
+    def _cmd_synapse_set_context_flag(*args, _connection=None, **kwargs):
+        if len(args) < 3:
+            return
+        try:
+            from ai_thought_reader.lore_ui import update_context_flag_from_ui
+            update_context_flag_from_ui(str(args[0]), str(args[1]), str(args[2]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting context flag from UI", e)
+
+    @Command("synapse.bulk_context_flags", command_type=CommandType.Live)
+    def _cmd_synapse_bulk_context_flags(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import bulk_update_context_flags_from_ui
+            bulk_update_context_flags_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error bulk updating context flags from UI", e)
+
+    @Command("synapse.genealogy", "synapse.open_genealogy", "ai.genealogy_ui", "synapse.relatives", command_type=CommandType.Live)
+    def _cmd_synapse_open_genealogy(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import open_genealogy_window
+            open_genealogy_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error opening Genealogy UI", e)
+
+    @Command("synapse.set_genealogy_flag", command_type=CommandType.Live)
+    def _cmd_synapse_set_genealogy_flag(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import update_genealogy_flag_from_ui
+            update_genealogy_flag_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting genealogy flag from UI", e)
+
+    @Command("synapse.set_genealogy_depth", command_type=CommandType.Live)
+    def _cmd_synapse_set_genealogy_depth(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_genealogy_depth_from_ui
+            set_genealogy_depth_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting genealogy depth from UI", e)
+
+    @Command("synapse.bulk_genealogy_flags", command_type=CommandType.Live)
+    def _cmd_synapse_bulk_genealogy_flags(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import bulk_update_genealogy_flags_from_ui
+            bulk_update_genealogy_flags_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error bulk updating genealogy flags from UI", e)
+
+    @Command("synapse.set_event_memory", command_type=CommandType.Live)
+    def _cmd_synapse_set_event_memory(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_event_memory_from_ui
+            set_event_memory_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting event memory from UI", e)
+
+    @Command("synapse.set_dialogue_hours", command_type=CommandType.Live)
+    def _cmd_synapse_set_dialogue_hours(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_dialogue_memory_hours_from_ui
+            set_dialogue_memory_hours_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting dialogue memory hours from UI", e)
+
+    @Command("synapse.clear_dialogue_log", command_type=CommandType.Live)
+    def _cmd_synapse_clear_dialogue_log(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import clear_dialogue_log_from_ui
+            clear_dialogue_log_from_ui(_connection=_connection)
+        except Exception as e:
+            log_exception("Error clearing dialogue log from UI", e)
+
+    @Command("synapse.clear_longterm_memory", command_type=CommandType.Live)
+    def _cmd_synapse_clear_longterm_memory(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import clear_longterm_memory_from_ui
+            clear_longterm_memory_from_ui(_connection=_connection)
+        except Exception as e:
+            log_exception("Error clearing long-term memory from UI", e)
+
+    @Command("synapse.memory", "synapse.open_memory", "ai.memory_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_memory(*args, _connection=None, **kwargs):
+        target_sim_id = None
+        if args:
+            try:
+                target_sim_id = int(args[0])
+            except (ValueError, TypeError):
+                pass
+        try:
+            from ai_thought_reader.lore_ui import open_memory_window
+            open_memory_window(target_sim_id=target_sim_id, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening memory window from command", e)
+
+    @Command("synapse.mods", "synapse.open_mods", "ai.mods_ui", "synapse.integrations", command_type=CommandType.Live)
+    def _cmd_synapse_open_mods(*args, _connection=None, **kwargs):
+        target_sim_id = None
+        if args:
+            try:
+                target_sim_id = int(args[0])
+            except (ValueError, TypeError):
+                pass
+        try:
+            from ai_thought_reader.lore_ui import open_mods_window
+            open_mods_window(target_sim_id=target_sim_id, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening mods window from command", e)
+
+    @Command("synapse.display", "synapse.open_display", "ai.display_ui", "synapse.balloons_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_display(*args, _connection=None, **kwargs):
+        target_sim_id = None
+        if args:
+            try:
+                target_sim_id = int(args[0])
+            except (ValueError, TypeError):
+                pass
+        try:
+            from ai_thought_reader.lore_ui import open_display_window
+            open_display_window(target_sim_id=target_sim_id, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening display window from command", e)
+
+    @Command("synapse.experimental", "synapse.open_experimental", "ai.experimental_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_experimental(*args, _connection=None, **kwargs):
+        target_sim_id = None
+        if args:
+            try:
+                target_sim_id = int(args[0])
+            except (ValueError, TypeError):
+                pass
+        try:
+            from ai_thought_reader.lore_ui import open_experimental_window
+            open_experimental_window(target_sim_id=target_sim_id, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening experimental window from command", e)
+
+    @Command("synapse.set_experimental_flag", command_type=CommandType.Live)
+    def _cmd_synapse_set_experimental_flag(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_experimental_flag_from_ui
+            set_experimental_flag_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting experimental flag from UI", e)
+
+    @Command("synapse.director", "synapse.open_director", command_type=CommandType.Live)
+    def _cmd_synapse_director(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import open_director_window
+            open_director_window(_connection=_connection)
+        except Exception as e:
+            log_exception("Error in synapse.director command", e)
+
+    @Command("synapse.worlds", "synapse.open_worlds", "ai.worlds_ui", command_type=CommandType.Live)
+    def _cmd_synapse_open_worlds(*args, _connection=None, **kwargs):
+        target_sim_id = None
+        if args:
+            try:
+                target_sim_id = int(args[0])
+            except (ValueError, TypeError):
+                pass
+        try:
+            from ai_thought_reader.lore_ui import open_worlds_window
+            open_worlds_window(target_sim_id=target_sim_id, _connection=_connection)
+        except Exception as e:
+            log_exception("Error opening worlds window from command", e)
+
+    @Command("synapse.set_world_lore", command_type=CommandType.Live)
+    def _cmd_synapse_set_world_lore(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_world_lore_from_ui
+            w_key = str(args[0])
+            w_name = str(args[1]) if len(args) > 1 else "00"
+            w_desc = str(args[2]) if len(args) > 2 else "00"
+            set_world_lore_from_ui(w_key, w_name, w_desc, _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_world_lore command", e)
+
+    @Command("synapse.delete_world_lore", command_type=CommandType.Live)
+    def _cmd_synapse_delete_world_lore(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import delete_world_lore_from_ui
+            w_key = str(args[0])
+            delete_world_lore_from_ui(w_key, _connection=_connection)
+        except Exception as e:
+            log_exception("Error in delete_world_lore command", e)
+
+    @Command("synapse.set_display_flag", command_type=CommandType.Live)
+    def _cmd_synapse_set_display_flag(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_display_flag_from_ui
+            set_display_flag_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting display flag from UI", e)
+
+    @Command("synapse.set_ww_sex_mode", command_type=CommandType.Live)
+    def _cmd_synapse_set_ww_sex_mode(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_ww_sex_mode_from_ui
+            set_ww_sex_mode_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error setting ww_sex_mode from UI", e)
+
+    @Command("synapse.update_chat_flag", "synapse.set_chat_flag", command_type=CommandType.Live)
+    def _cmd_synapse_update_chat_flag(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.config import set_chat_context_flag
+            flag_name = str(args[0]).strip()
+            enabled = str(args[1]).strip().lower() in ("1", "true", "yes", "on")
+            set_chat_context_flag(flag_name, enabled)
+        except Exception as e:
+            log_exception("Error updating chat flag from UI", e)
+
+    @Command("synapse.set_director_master", command_type=CommandType.Live)
+    def _cmd_synapse_set_director_master(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_director_master_from_ui
+            set_director_master_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_director_master command", e)
+
+    @Command("synapse.set_director_trigger", command_type=CommandType.Live)
+    def _cmd_synapse_set_director_trigger(*args, _connection=None, **kwargs):
+        if len(args) < 3:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_director_trigger_from_ui
+            set_director_trigger_from_ui(str(args[0]), str(args[1]), str(args[2]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_director_trigger command", e)
+
+    @Command("synapse.bulk_director_state", command_type=CommandType.Live)
+    def _cmd_synapse_bulk_director_state(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import bulk_director_state_from_ui
+            bulk_director_state_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in bulk_director_state command", e)
+
+    @Command("synapse.set_simplified_master", command_type=CommandType.Live)
+    def _cmd_synapse_set_simplified_master(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_simplified_master_from_ui
+            set_simplified_master_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_simplified_master command", e)
+
+    @Command("synapse.set_simplified_timers", command_type=CommandType.Live)
+    def _cmd_synapse_set_simplified_timers(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_simplified_timers_from_ui
+            set_simplified_timers_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_simplified_timers command", e)
+
+    @Command("synapse.set_simplified_display", command_type=CommandType.Live)
+    def _cmd_synapse_set_simplified_display(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_simplified_display_from_ui
+            set_simplified_display_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_simplified_display command", e)
+
+    @Command("synapse.set_director_timers", command_type=CommandType.Live)
+    def _cmd_synapse_set_director_timers(*args, _connection=None, **kwargs):
+        if len(args) < 3:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_director_timers_from_ui
+            set_director_timers_from_ui(str(args[0]), str(args[1]), str(args[2]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_director_timers command", e)
+
+    @Command("synapse.set_director_trigger_meta", command_type=CommandType.Live)
+    def _cmd_synapse_set_director_trigger_meta(*args, _connection=None, **kwargs):
+        if len(args) < 6:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_director_trigger_meta_from_ui
+            set_director_trigger_meta_from_ui(str(args[0]), str(args[1]), str(args[2]), str(args[3]), str(args[4]), str(args[5]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_director_trigger_meta command", e)
+
+    @Command("synapse.reset_director_trigger_meta", command_type=CommandType.Live)
+    def _cmd_synapse_reset_director_trigger_meta(*args, _connection=None, **kwargs):
+        if not args:
+            return
+        try:
+            from ai_thought_reader.lore_ui import reset_director_trigger_meta_from_ui
+            reset_director_trigger_meta_from_ui(str(args[0]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in reset_director_trigger_meta command", e)
+
+    @Command("synapse.set_multisim_rule", command_type=CommandType.Live)
+    def _cmd_synapse_set_multisim_rule(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.lore_ui import set_multisim_rule_from_ui
+            set_multisim_rule_from_ui(str(args[0]), str(args[1]), _connection=_connection)
+        except Exception as e:
+            log_exception("Error in set_multisim_rule command", e)
+
+    @Command("synapse.reset_multisim_rules", command_type=CommandType.Live)
+    def _cmd_synapse_reset_multisim_rules(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import reset_multisim_rules_from_ui
+            arg0 = str(args[0]) if args else None
+            reset_multisim_rules_from_ui(arg0, _connection=_connection)
+        except Exception as e:
+            log_exception("Error in reset_multisim_rules command", e)
+
+    @Command("synapse.get_multisim_rules", command_type=CommandType.Live)
+    def _cmd_synapse_get_multisim_rules(*args, _connection=None, **kwargs):
+        try:
+            from ai_thought_reader.lore_ui import sync_multisim_rules_to_ui
+            sync_multisim_rules_to_ui(_connection=_connection)
+        except Exception as e:
+            log_exception("Error in get_multisim_rules command", e)
+
+    @Command("synapse.ui_closed", command_type=CommandType.Live)
+    def _cmd_synapse_ui_closed(*args, _connection=None, **kwargs):
+        pass
+
+    @Command("synapse.save_setting", command_type=CommandType.Live)
+    def _cmd_synapse_save_setting(*args, _connection=None, **kwargs):
+        if len(args) < 2:
+            return
+        try:
+            from ai_thought_reader.config import load_config, save_config
+            cfg = load_config()
+            cfg[str(args[0])] = str(args[1])
+            save_config(cfg)
+        except Exception as e:
+            log_exception("Error in save_setting command", e)
+
 
     @Command("ai.lore", command_type=CommandType.Live)
     def _cmd_dot_lore(*args, _connection=None, **kwargs):
@@ -852,7 +1410,15 @@ if sims4 is not None and hasattr(sims4, "commands"):
         elif sub in ("timer", "next", "next_thought", "autonomy", "alarm", "time"):
             execute_timer(arg1, _connection)
         elif sub in ("lore", "bio", "backstory"):
-            execute_lore(arg1, _connection)
+            if arg1:
+                execute_lore(arg1, _connection)
+            else:
+                try:
+                    from ai_thought_reader.lore_ui import open_lore_window
+                    if not open_lore_window(None, _connection=_connection):
+                        execute_lore(None, _connection)
+                except Exception:
+                    execute_lore(None, _connection)
         elif sub in ("status", "info", "stat"):
             execute_status(_connection)
         elif sub in ("test", "ping"):
@@ -871,6 +1437,40 @@ if sims4 is not None and hasattr(sims4, "commands"):
             execute_dump_context(arg1, _connection=_connection, is_ww=False)
         elif sub in ("context_ww", "dump_ww", "ww_context"):
             execute_dump_context(arg1, _connection=_connection, is_ww=True)
+        elif sub in ("simplified_scan", "simp_scan", "scan"):
+            _cmd_synapse_simplified_scan(*args, _connection=_connection, **kwargs)
+        elif sub in ("simplified_candidates", "simp_candidates", "candidates"):
+            _cmd_synapse_simplified_candidates(*args, _connection=_connection, **kwargs)
+        elif sub in ("simplified_status", "simp_status"):
+            _cmd_synapse_simplified_status(*args, _connection=_connection, **kwargs)
+        elif sub in ("run_simplified", "run_simp", "run"):
+            _cmd_synapse_run_simplified(*args, _connection=_connection, **kwargs)
+        elif sub in ("simplified_reset", "simp_reset"):
+            _cmd_synapse_simplified_reset(*args, _connection=_connection, **kwargs)
+        elif sub == "set_simplified_master":
+            _cmd_synapse_set_simplified_master(*args, _connection=_connection, **kwargs)
+        elif sub == "set_simplified_timers":
+            _cmd_synapse_set_simplified_timers(*args, _connection=_connection, **kwargs)
+        elif sub == "set_simplified_display":
+            _cmd_synapse_set_simplified_display(*args, _connection=_connection, **kwargs)
+        elif sub == "set_director_timers":
+            _cmd_synapse_set_director_timers(*args, _connection=_connection, **kwargs)
+        elif sub in ("director", "open_director"):
+            _cmd_synapse_director(*args, _connection=_connection, **kwargs)
+        elif sub in ("context", "open_context"):
+            _cmd_synapse_open_context(*args, _connection=_connection, **kwargs)
+        elif sub in ("autonomy", "open_autonomy"):
+            _cmd_synapse_open_autonomy(*args, _connection=_connection, **kwargs)
+        elif sub in ("genealogy", "open_genealogy"):
+            _cmd_synapse_open_genealogy(*args, _connection=_connection, **kwargs)
+        elif sub in ("memory", "open_memory"):
+            _cmd_synapse_open_memory(*args, _connection=_connection, **kwargs)
+        elif sub in ("mods", "open_mods"):
+            _cmd_synapse_open_mods(*args, _connection=_connection, **kwargs)
+        elif sub in ("display", "open_display"):
+            _cmd_synapse_open_display(*args, _connection=_connection, **kwargs)
+        elif sub in ("worlds", "open_worlds"):
+            _cmd_synapse_open_worlds(*args, _connection=_connection, **kwargs)
         elif sub in ("help", "?"):
             execute_help(_connection)
         else:

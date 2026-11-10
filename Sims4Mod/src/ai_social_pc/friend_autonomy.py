@@ -325,6 +325,18 @@ def _worker_friend_chat(actor_sim_info, friend_sim_info, rel_title: str):
             "messages": formatted_messages,
         }
 
+        try:
+            from ai_social_pc.dossier_manager import build_third_party_dossier
+            # Check last message in conversation history if any
+            last_msg = ""
+            if formatted_messages and isinstance(formatted_messages, list):
+                last_msg = formatted_messages[-1].get("text", "")
+            dossier_text = build_third_party_dossier(last_msg, [actor_info, friend_info], is_en=_is_en())
+            if dossier_text:
+                payload["third_party_dossier"] = dossier_text
+        except Exception:
+            pass
+
         conn = http.client.HTTPConnection(BRIDGE_HOST, BRIDGE_PORT, timeout=120)
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {

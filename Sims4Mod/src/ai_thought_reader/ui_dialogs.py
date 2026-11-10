@@ -1,6 +1,10 @@
 import re
 from ai_thought_reader.logger import log, log_exception
 from ai_thought_reader.config import (
+    get_direct_dialogue_flag,
+    toggle_direct_dialogue_flag,
+    get_intimate_dialogue_flag,
+    toggle_intimate_dialogue_flag,
     get_context_flag,
     toggle_context_flag,
     get_chat_context_flag,
@@ -388,6 +392,18 @@ def show_main_menu(sim_info):
             False,
         ),
         (
+            _t("MENU_DIRECT_FLAGS", "[+] Компоненты контекста [диалог]"),
+            _t("MENU_DIRECT_FLAGS_DESC", "Включение и отключение контекста для прямого живого общения симов"),
+            "direct_flags",
+            False,
+        ),
+        (
+            _t("MENU_INTIMATE_FLAGS", "[+] Компоненты контекста [интим WW]"),
+            _t("MENU_INTIMATE_FLAGS_DESC", "Включение и отключение контекста интимного общения WickedWhims"),
+            "intimate_flags",
+            False,
+        ),
+        (
             _t("MENU_GENEALOGY", "[+] Настройка генеалогии"),
             _t("MENU_GENEALOGY_DESC", "Лимит длины списка родни и выбор категорий родственников для контекста ИИ"),
             "genealogy",
@@ -430,7 +446,7 @@ def show_main_menu(sim_info):
             False,
         ),
         (
-            _t("MENU_LANGUAGE", "🌐 Язык интерфейса и контекста / Language"),
+            _t("MENU_LANGUAGE", "[LANG] Язык интерфейса и контекста / Language"),
             f"{_t('MENU_LANGUAGE_DESC', 'Переключить язык мода и контекста')} [{get_language()}]",
             "language",
             False,
@@ -444,6 +460,10 @@ def show_main_menu(sim_info):
             show_context_flags_menu(sim_info)
         elif tag == "chat_flags":
             show_chat_context_flags_menu(sim_info)
+        elif tag == "direct_flags":
+            show_direct_context_flags_menu(sim_info)
+        elif tag == "intimate_flags":
+            show_intimate_context_flags_menu(sim_info)
         elif tag == "traits_filter":
             show_traits_filter_menu(sim_info)
         elif tag == "genealogy":
@@ -759,42 +779,65 @@ def _is_en() -> bool:
 
 
 CONTEXT_FLAG_DEFINITIONS_EN = [
-    ("fame", "Celebrity Status & Reputation", "Star status, celebrity level, paparazzi, and public reputation"),
-    ("pregnancy", "Pregnancy & Parenthood", "Pregnancy trimesters, contractions, and expecting a baby"),
-    ("family", "Family, Partner & Relatives", "Parents, children, spouse, boyfriend/girlfriend, lovers, siblings"),
-    ("roommates", "Household Roommates", "Non-related Sims living in the same home (roommates/friends)"),
-    ("nearby", "Surrounding Sims Nearby", "Who is currently nearby or in the same room"),
-    ("social", "Conversation & Interlocutor", "Current conversation partner, dialogue tone and relationship"),
-    ("clothing", "Clothing & Undress State", "Current outfit, clothing style, and level of undress/nudity"),
-    ("weather", "Weather & Seasons", "Temperature, rain, snow, and current active season"),
-    ("world_time", "In-Game Time & Holidays", "Days of the week, in-game time, and active holidays"),
-    ("location", "Location & Rooms", "Lot name, world neighborhood, and current room type"),
-    ("career", "Career & Profession", "Job title, company, work performance, and career level"),
-    ("aspiration", "Sim Aspiration", "Currently active lifetime aspiration"),
+    ("age_gender", "Age & Gender", "Age category and biological gender of the Sim"),
+    ("occult", "Race & Occult", "Human, vampire, werewolf, mermaid, spellcaster, alien, ghost"),
+    ("world_time", "In-Game Time", "Day of the week, time of day, and clock hour"),
+    ("weather", "Weather & Season", "Temperature, precipitation, season, and weather conditions"),
+    ("events", "Events & Holidays", "Calendar holidays, parties, weddings, birthdays, dates"),
+    ("emergencies", "Emergencies & Hazards", "Fire on lot, burning Sims, contractions, active childbirth"),
+    ("clothing", "Clothing & Nudity", "Current outfit, footwear, and degree of undress/nudity"),
+    ("activity", "Current Activity & Objects", "What the Sim is doing, posture, held objects, intimacy"),
+    ("social", "Conversation & Partner", "Conversation partners, dialogue tone, style, and relationship scores"),
+    ("nearby", "Surrounding Sims Nearby", "Who is currently nearby in the room or on the lot"),
+    ("family", "Family & Relatives", "Parents, children, spouses, siblings, and romantic partners"),
+    ("roommates", "Household Roommates", "Non-relative Sims living together in the household"),
+    ("livein_staff", "Live-in Domestic Staff", "Live-in butler, nanny, maid residing in the house"),
+    ("pets", "Household Pets", "Dogs, cats, and pets living in the family"),
+    ("mood", "Mood & Dominant Buff", "Current emotion and dominant buff reason"),
+    ("location", "Location & Rooms", "Lot name, world, and room context (indoors/outdoors)"),
+    ("needs", "Needs & Motives (On-Lot)", "Hunger, energy, fun, hygiene for Sims physically on lot"),
+    ("traits", "Personality Traits", "Personality traits and character quirks"),
+    ("lore", "Custom Sim Lore", "Custom backstory and biography set by player"),
+    ("pregnancy", "Pregnancy & Parenthood", "Pregnancy stage, trimester, and expecting a baby"),
+    ("fame", "Celebrity Status & Reputation", "Fame tier, paparazzi attention, and public reputation"),
+    ("career", "Career & Education", "Job title, profession, university degree, and lot role"),
+    ("aspiration", "Aspiration & Life Goal", "Currently active lifetime aspiration"),
     ("funds", "Household Budget", "Total household Simoleons count"),
-    ("pets", "Household Pets", "Household dogs, cats, and pets"),
-    ("incest", "Forbidden Romance / Taboo Tags", "Marks [TABOO/INCEST] and psychological reactions to romance between relatives"),
+    ("clubs", "Club Memberships", "Club memberships and leader status"),
+    ("memory", "Past Events & Memories", "Memories of past milestones, arguments, dates, and secrets"),
+    ("recent_dialogs", "Recent Dialogues & Messages", "Log of recent spoken dialogue turns and messenger history"),
+    ("incest", "Taboo Romance / Incest Tags", "Tagging and psychological reactions to romance between relatives"),
 ]
 
 CHAT_CONTEXT_FLAG_DEFINITIONS_EN = [
-    ("chat_age_gender", "Age & Gender", "Age category and gender of characters"),
-    ("chat_occult", "Occult & Race", "Human, Vampire, Spellcaster, Werewolf, Mermaid, Alien"),
-    ("chat_traits", "Personality Traits", "Personal character traits"),
-    ("chat_mood", "Current Mood", "Current mood and moodlet causes"),
-    ("chat_location", "Current Location", "Sim's current location (room or world lot)"),
-    ("chat_lore", "Personal Biography / Lore", "Custom facts and backstory from character settings"),
-    ("chat_career", "Career & Profession", "Job title, work position, and career status"),
-    ("chat_aspiration", "Sim Aspiration", "Active lifetime aspiration"),
-    ("chat_family", "Family & Relatives", "Parents, children, spouse, partner, siblings"),
-    ("chat_roommates", "Household Roommates", "Non-related housemates and roommates"),
-    ("chat_pets", "Household Pets", "Family dogs and cats"),
-    ("chat_pregnancy", "Pregnancy", "Pregnancy progress and expecting a baby"),
-    ("chat_fame", "Fame & Reputation", "Celebrity level and reputation"),
-    ("chat_funds", "Household Budget", "Family funds in Simoleons"),
-    ("chat_relationship", "Relationship Between Sims", "Who the Sims are to each other (friends, couple, enemies)"),
-    ("chat_incest", "Taboo / Incest Tags", "Mark [incest] in romance between relatives"),
-    ("chat_history", "Chat History", "Last sent messages of current conversation"),
-    ("chat_memory", "Dialogue Memories", "Episodic memory about meaningful moments, plans, and secrets"),
+    ("age_gender", "Age & Gender", "Age category and biological gender of the Sim"),
+    ("occult", "Race & Occult", "Human, vampire, werewolf, mermaid, spellcaster, alien, ghost"),
+    ("world_time", "In-Game Time", "Day of the week, time of day, and clock hour"),
+    ("weather", "Weather & Season", "Temperature, precipitation, season, and weather conditions"),
+    ("events", "Events & Holidays", "Calendar holidays, parties, weddings, birthdays, dates"),
+    ("emergencies", "Emergencies & Hazards", "Fire on lot, burning Sims, contractions, active childbirth"),
+    ("clothing", "Clothing & Nudity", "Current outfit, footwear, and degree of undress/nudity"),
+    ("activity", "Current Activity & Objects", "What the Sim is doing, posture, held objects, intimacy"),
+    ("social", "Conversation & Partner", "Conversation partners, dialogue tone, style, and relationship scores"),
+    ("nearby", "Surrounding Sims Nearby", "Who is currently nearby in the room or on the lot"),
+    ("family", "Family & Relatives", "Parents, children, spouses, siblings, and romantic partners"),
+    ("roommates", "Household Roommates", "Non-relative Sims living together in the household"),
+    ("livein_staff", "Live-in Domestic Staff", "Live-in butler, nanny, maid residing in the house"),
+    ("pets", "Household Pets", "Dogs, cats, and pets living in the family"),
+    ("mood", "Mood & Dominant Buff", "Current emotion and dominant buff reason"),
+    ("location", "Location & Rooms", "Lot name, world, and room context (indoors/outdoors)"),
+    ("needs", "Needs & Motives (On-Lot)", "Hunger, energy, fun, hygiene for Sims physically on lot"),
+    ("traits", "Personality Traits", "Personality traits and character quirks"),
+    ("lore", "Custom Sim Lore", "Custom backstory and biography set by player"),
+    ("pregnancy", "Pregnancy & Parenthood", "Pregnancy stage, trimester, and expecting a baby"),
+    ("fame", "Celebrity Status & Reputation", "Fame tier, paparazzi attention, and public reputation"),
+    ("career", "Career & Education", "Job title, profession, university degree, and lot role"),
+    ("aspiration", "Aspiration & Life Goal", "Currently active lifetime aspiration"),
+    ("funds", "Household Budget", "Total household Simoleons count"),
+    ("clubs", "Club Memberships", "Club memberships and leader status"),
+    ("memory", "Past Events & Memories", "Memories of past milestones, arguments, dates, and secrets"),
+    ("recent_dialogs", "Recent Dialogues & Messages", "Log of recent spoken dialogue turns and messenger history"),
+    ("incest", "Taboo Romance / Incest Tags", "Tagging and psychological reactions to romance between relatives"),
 ]
 
 TRAIT_FILTER_FLAG_DEFINITIONS_EN = [
@@ -808,6 +851,8 @@ TRAIT_FILTER_FLAG_DEFINITIONS_EN = [
 
 GENEALOGY_TYPE_DEFINITIONS_EN = [
     ("spouses", "Spouses & Committed Partners", "Husband, wife, fiancé, fiancée, boyfriend, girlfriend, lovers"),
+    ("ex_partners", "Ex-Partners", "Ex-spouses, ex-fiancés, broken up partners, widowed"),
+    ("ex_in_laws", "Ex-Partner's Relatives", "Parents, siblings, and relatives of ex-spouses and ex-partners"),
     ("children", "Children", "Sons, daughters, stepsons, stepdaughters"),
     ("parents", "Parents", "Father, mother, stepfather, stepmother"),
     ("siblings", "Siblings", "Full, half, and step brothers and sisters"),
@@ -823,6 +868,11 @@ GENEALOGY_TYPE_DEFINITIONS_EN = [
 
 EXPERIMENTAL_FLAG_DEFINITIONS_EN = [
     (
+        "direct_dialogue_multisim_join",
+        "Multi-Sim Group & Bystander Dialogue Joining",
+        "Allows group participants and nearby bystanders to chime into living dialogue and intimacy via /// separator",
+    ),
+    (
         "direct_dialogue_pause",
         "Pause and Waiting Dialog in Live Speech",
         "Pauses the game and holds a waiting modal dialog while the AI generates a reply so Sims do not walk away",
@@ -830,21 +880,34 @@ EXPERIMENTAL_FLAG_DEFINITIONS_EN = [
 ]
 
 CONTEXT_FLAG_DEFINITIONS = [
-    ("fame", "Слава и репутация", "Статус звезды, уровень славы, папарацци и репутация"),
-    ("pregnancy", "Беременность и родительство", "Сроки беременности, схватки, ожидание ребенка"),
-    ("family", "Семья, пара и родственники", "Родители, дети, супруги, пара (девушка/парень), любовницы, братья/сестры"),
-    ("roommates", "Соседи по дому", "Неродственные персонажи, проживающие в одном доме (сожители/друзья)"),
-    ("nearby", "Окружающие персонажи", "Кто находится поблизости или в одной комнате"),
-    ("social", "Диалоги и стиль общения", "Текущий собеседник, тон разговора и отношения"),
-    ("clothing", "Одежда и уровень раздевания", "Текущий наряд, стиль одежды и степень наготы"),
-    ("weather", "Погода и время года", "Температура, дождь, снег, текущий сезон"),
-    ("world_time", "Время и праздники", "Дни недели, игровое время и активные праздники"),
-    ("location", "Локация и комнаты", "Название участка, район и текущая комната"),
-    ("career", "Профессия и карьера", "Работа, должность и карьерный статус"),
-    ("aspiration", "Жизненная цель", "Текущая жизненная цель сима"),
-    ("funds", "Бюджет семьи", "Количество симолеонов на счете семьи"),
-    ("pets", "Питомцы в семье", "Домашние животные (кошки, собаки)"),
-    ("incest", "Теги запретной связи / инцеста", "Пометки [ИНЦЕСТ] и психологическая реакция на романтику/интим между родственниками"),
+    ("age_gender", "Возраст и пол", "Возрастная категория и биологический пол персонажа"),
+    ("occult", "Раса и оккультизм", "Человек, вампир, оборотень, русалка, чародей, пришелец, призрак"),
+    ("world_time", "Игровое время", "День недели, время суток и час"),
+    ("weather", "Погода и время года", "Температура, осадки, сезон и погодные условия"),
+    ("events", "Мероприятия и праздники", "Праздники календаря, вечеринки, свадьбы, дни рождения, свидания"),
+    ("emergencies", "Чрезвычайные ситуации", "Пожар на лоте, горящие персонажи, схватки и роды"),
+    ("clothing", "Одежда и нагота", "Тип наряда, обувь, степень раздетости и наготы"),
+    ("activity", "Текущее занятие и предметы", "Что делает сим, поза, предметы в руках, интимная близость"),
+    ("social", "Живой разговор и собеседник", "С кем говорит, тон, стиль беседы и шкалы отношений"),
+    ("nearby", "Окружающие персонажи", "Кто находится рядом в комнате или поблизости на лоте"),
+    ("family", "Семья и родственники", "Родители, дети, супруги, братья, сестры и партнеры"),
+    ("roommates", "Соседи по дому", "Не являющиеся родственниками жильцы одного дома"),
+    ("livein_staff", "Домашняя прислуга", "Живущий в доме дворецкий, няня, горничная"),
+    ("pets", "Домашние питомцы", "Собаки, кошки и другие домашние животные семьи"),
+    ("mood", "Настроение и эмоции", "Текущая эмоция и причина преобладающего мудлета"),
+    ("location", "Локация и комнаты", "Название лота, город, комната (внутри/снаружи)"),
+    ("needs", "Потребности (на лоте)", "Голод, бодрость, досуг и естественная нужда симов на участке"),
+    ("traits", "Черты характера", "Личностные черты характера и особенности поведения"),
+    ("lore", "Биография и лор (Custom Lore)", "Личная биография сима, заданная игроком"),
+    ("pregnancy", "Беременность", "Сроки беременности, триместры, ожидание ребенка"),
+    ("fame", "Слава и репутация", "Звездный уровень, папарацци и общественная репутация"),
+    ("career", "Карьера и образование", "Профессия, должность, диплом вуза и роль на лоте"),
+    ("aspiration", "Жизненная цель", "Текущая жизненная цель и стремление персонажа"),
+    ("funds", "Бюджет семьи", "Количество симолеонов в семейном бюджете"),
+    ("clubs", "Клубы", "Членство в клубах и статус лидера"),
+    ("memory", "Память о прошлых событиях", "Важные происшествия, свидания, ссоры и секреты"),
+    ("recent_dialogs", "Недавние разговоры и переписка", "История последних фраз и сообщений"),
+    ("incest", "Метки запретной связи [ИНЦЕСТ]", "Фиксация романтики и близости между родственниками"),
 ]
 
 
@@ -964,6 +1027,160 @@ def show_chat_context_flags_menu(sim_info):
             toggle_chat_context_flag(tag)
             # Re-render submenu with updated state immediately
             show_chat_context_flags_menu(sim_info)
+
+    show_picker_dialog(sim_info, title, text, rows, _on_select)
+
+
+# =====================================================================
+# 2b-2. DIRECT DIALOGUE CONTEXT COMPONENT TOGGLES
+# =====================================================================
+
+DIRECT_CONTEXT_FLAG_DEFINITIONS = [
+    ("dd_witnesses", "Окружающие свидетели", "Кто находится рядом и слышит живой диалог"),
+    ("dd_events", "События и праздники", "Праздники, вечеринки и недавние происшествия"),
+    ("dd_weather_time", "Погода и время суток", "Время дня, температура, осадки и сезон"),
+    ("dd_location", "Локация и обстановка", "Комната, участок, предметы мебели и заведение"),
+    ("dd_relationship", "Отношения участников", "Шкалы дружбы, романтики и динамика общения"),
+    ("dd_memories", "Совместные воспоминания", "Память о прошлых разговорах и моментах"),
+    ("dd_business", "Бизнес и карьера", "Рабочие темы, проекты и карьерный статус"),
+    ("dd_taboo", "Личные границы", "Запретные темы, чувствительные вопросы и табу"),
+]
+
+DIRECT_CONTEXT_FLAG_DEFINITIONS_EN = [
+    ("dd_witnesses", "Surrounding Witnesses", "Who is nearby and listening to the dialogue"),
+    ("dd_events", "Events & Holidays", "Holidays, parties, and recent occurrences"),
+    ("dd_weather_time", "Weather & Time of Day", "Time of day, temperature, weather, and season"),
+    ("dd_location", "Location & Venue Context", "Room, lot, nearby furniture, and venue type"),
+    ("dd_relationship", "Participant Relationships", "Friendship, romance tracks, and dynamic"),
+    ("dd_memories", "Shared Memories", "Memories of past conversations and milestones"),
+    ("dd_business", "Business & Career", "Work topics, projects, and career status"),
+    ("dd_taboo", "Personal Boundaries", "Taboo topics, sensitive questions, and boundaries"),
+]
+
+
+def show_direct_context_flags_menu(sim_info):
+    """Submenu for toggling individual direct dialogue prompt context sections on or off."""
+    is_en = _is_en()
+    title = "Context Components [Dialogue]" if is_en else "Компоненты контекста [диалог]"
+    text = (
+        "Click any item to instantly toggle [ON] / [OFF].\n"
+        "Disabled components are excluded from live dialogue context:"
+        if is_en else
+        "Нажмите на любой пункт для мгновенного переключения [ВКЛ] / [ВЫКЛ].\n"
+        "Отключенные разделы исключаются из контекста живого диалога:"
+    )
+
+    defs = DIRECT_CONTEXT_FLAG_DEFINITIONS_EN if is_en else DIRECT_CONTEXT_FLAG_DEFINITIONS
+    rows = []
+    for flag_key, flag_name, flag_desc in defs:
+        enabled = get_direct_dialogue_flag(flag_key)
+        if is_en:
+            if enabled:
+                row_title = f"[ON] {flag_name}"
+                row_desc = f"{flag_desc}. (Click to turn OFF)"
+            else:
+                row_title = f"[OFF] {flag_name}"
+                row_desc = f"{flag_desc}. (Click to turn ON)"
+        else:
+            if enabled:
+                row_title = f"[ВКЛ] {flag_name}"
+                row_desc = f"{flag_desc}. (Нажмите, чтобы ВЫКЛЮЧИТЬ)"
+            else:
+                row_title = f"[ВЫКЛ] {flag_name}"
+                row_desc = f"{flag_desc}. (Нажмите, чтобы ВКЛЮЧИТЬ)"
+        rows.append((row_title, row_desc, flag_key, False))
+
+    back_lbl = "<< Back to Main Menu" if is_en else "<< Назад в главное меню"
+    back_dsc = "Return to previous menu" if is_en else "Вернуться в главное меню настроек"
+    rows.append((back_lbl, back_dsc, "back", False))
+
+    def _on_select(tag):
+        if tag == "back":
+            show_main_menu(sim_info)
+        else:
+            toggle_direct_dialogue_flag(tag)
+            show_direct_context_flags_menu(sim_info)
+
+    show_picker_dialog(sim_info, title, text, rows, _on_select)
+
+
+# =====================================================================
+# 2b-3. INTIMATE DIALOGUE CONTEXT COMPONENT TOGGLES
+# =====================================================================
+
+INTIMATE_CONTEXT_FLAG_DEFINITIONS = [
+    ("id_pose", "Поза и анимация", "Текущее положение и тип физического взаимодействия"),
+    ("id_partners", "Участники контакта", "Личности партнеров, их роли и динамика близости"),
+    ("id_privacy", "Уединенность места", "Закрытая комната, спальня или риск быть увиденным"),
+    ("id_observers", "Присутствие свидетелей", "Спят ли рядом симы или кто-то может зайти"),
+    ("id_attire", "Состояние одежды", "Степень открытости и наряды партнеров"),
+    ("id_relationship", "Глубина близости", "Страсть, любовь, мимолетная связь или брак"),
+    ("id_traits", "Черты характера", "Темперамент, раскованность или робость партнеров"),
+    ("id_tone", "Тон и атмосфера", "Нежность, доминирование, игривость или страсть"),
+    ("id_taboo", "Табу и границы", "Чего персонажи избегают или стесняются в сексе"),
+    ("id_pregnancy", "Риск беременности", "Учитывать возможность зачатия ребенка"),
+    ("id_venue", "Обстановка локации", "Домашняя кровать, клуб, сауна или джакузи"),
+    ("id_memories", "Интимная память", "История близости и впечатления от прошлых встреч"),
+]
+
+INTIMATE_CONTEXT_FLAG_DEFINITIONS_EN = [
+    ("id_pose", "Pose & Physical Animation", "Current physical position and intimacy animation"),
+    ("id_partners", "Contact Participants", "Partner identities, roles, and intimate dynamic"),
+    ("id_privacy", "Privacy & Seclusion", "Private room, bedroom, or risk of exposure"),
+    ("id_observers", "Presence of Observers", "Sleeping Sims nearby or risk of walk-ins"),
+    ("id_attire", "Attire & Nudity State", "Level of undress and partner clothing"),
+    ("id_relationship", "Depth of Intimacy", "Passion, love, casual encounter, or marriage"),
+    ("id_traits", "Personality in Intimacy", "Temperament, boldness, shyness, or traits"),
+    ("id_tone", "Tone & Atmosphere", "Tenderness, dominance, playfulness, or heat"),
+    ("id_taboo", "Taboos & Boundaries", "What the Sims avoid or feel shy about in sex"),
+    ("id_pregnancy", "Pregnancy Risk", "Risk of conception and pregnancy awareness"),
+    ("id_venue", "Venue Atmosphere", "Home bed, club, sauna, hot tub, or outdoor spot"),
+    ("id_memories", "Intimate Memories", "History of intimacy and impressions of past encounters"),
+]
+
+
+def show_intimate_context_flags_menu(sim_info):
+    """Submenu for toggling individual intimate dialogue prompt context sections on or off."""
+    is_en = _is_en()
+    title = "Context Components [Intimate WW]" if is_en else "Компоненты контекста [интим WW]"
+    text = (
+        "Click any item to instantly toggle [ON] / [OFF].\n"
+        "Disabled components are excluded from intimate WickedWhims context:"
+        if is_en else
+        "Нажмите на любой пункт для мгновенного переключения [ВКЛ] / [ВЫКЛ].\n"
+        "Отключенные разделы исключаются из контекста интимного общения WickedWhims:"
+    )
+
+    defs = INTIMATE_CONTEXT_FLAG_DEFINITIONS_EN if is_en else INTIMATE_CONTEXT_FLAG_DEFINITIONS
+    rows = []
+    for flag_key, flag_name, flag_desc in defs:
+        enabled = get_intimate_dialogue_flag(flag_key)
+        if is_en:
+            if enabled:
+                row_title = f"[ON] {flag_name}"
+                row_desc = f"{flag_desc}. (Click to turn OFF)"
+            else:
+                row_title = f"[OFF] {flag_name}"
+                row_desc = f"{flag_desc}. (Click to turn ON)"
+        else:
+            if enabled:
+                row_title = f"[ВКЛ] {flag_name}"
+                row_desc = f"{flag_desc}. (Нажмите, чтобы ВЫКЛЮЧИТЬ)"
+            else:
+                row_title = f"[ВЫКЛ] {flag_name}"
+                row_desc = f"{flag_desc}. (Нажмите, чтобы ВКЛЮЧИТЬ)"
+        rows.append((row_title, row_desc, flag_key, False))
+
+    back_lbl = "<< Back to Main Menu" if is_en else "<< Назад в главное меню"
+    back_dsc = "Return to previous menu" if is_en else "Вернуться в главное меню настроек"
+    rows.append((back_lbl, back_dsc, "back", False))
+
+    def _on_select(tag):
+        if tag == "back":
+            show_main_menu(sim_info)
+        else:
+            toggle_intimate_dialogue_flag(tag)
+            show_intimate_context_flags_menu(sim_info)
 
     show_picker_dialog(sim_info, title, text, rows, _on_select)
 
@@ -1139,6 +1356,8 @@ def show_summarization_menu(sim_info):
 
 GENEALOGY_TYPE_DEFINITIONS = [
     ("spouses", "Супруги и постоянная пара", "Муж, жена, жених, невеста, парень, девушка, любовники"),
+    ("ex_partners", "Бывшие партнеры", "Бывшие мужья, жены, женихи, невесты, бывшие пары"),
+    ("ex_in_laws", "Родственники бывших партнеров", "Родители, братья/сестры и родня бывших супругов и партнеров"),
     ("children", "Дети", "Сыновья, дочери, пасынки, падчерицы"),
     ("parents", "Родители", "Отец, мать, отчим, мачеха"),
     ("siblings", "Братья и сестры", "Родные и сводные братья и сестры"),
@@ -1641,7 +1860,7 @@ def show_diagnostics_menu(sim_info):
                 else:
                     show_notification(
                         "Synapse",
-                        f"Config updated!\n• Provider: {p_name}\n• Model: {m_name}\n\n⚠️ AI Bridge is not running (127.0.0.1:8765).",
+                        f"Config updated!\n• Provider: {p_name}\n• Model: {m_name}\n\n[!] AI Bridge is not running (127.0.0.1:8765).",
                         sim_info=sim_info,
                     )
             else:
@@ -1654,7 +1873,7 @@ def show_diagnostics_menu(sim_info):
                 else:
                     show_notification(
                         "Synapse",
-                        f"Конфиг обновлен!\n• Провайдер: {p_name}\n• Модель: {m_name}\n\n⚠️ AI Bridge не запущен (127.0.0.1:8765).",
+                        f"Конфиг обновлен!\n• Провайдер: {p_name}\n• Модель: {m_name}\n\n[!] AI Bridge не запущен (127.0.0.1:8765).",
                         sim_info=sim_info,
                     )
             show_diagnostics_menu(sim_info)
@@ -1669,6 +1888,11 @@ def show_diagnostics_menu(sim_info):
 # =====================================================================
 
 EXPERIMENTAL_FLAG_DEFINITIONS = [
+    (
+        "direct_dialogue_multisim_join",
+        "Подключение к живому общению (Группа и свидетели)",
+        "Позволяет собеседникам группы и стоящим рядом свидетелям подхватывать живой разговор и интим через разделитель ///",
+    ),
     (
         "direct_dialogue_pause",
         "Пауза и окно ожидания в живом разговоре",

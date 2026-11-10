@@ -316,6 +316,65 @@ def add_group_message(
         data["messages"][gid] = data["messages"][gid][-15:]
 
     mark_groups_dirty()
+
+    try:
+        from ai_social_pc.conversation_log import record_conversation_exchange
+        all_groups = load_groups_data().get("groups", {})
+        if isinstance(all_groups, dict):
+            target_group = all_groups.get(str(gid)) or all_groups.get(gid)
+        elif isinstance(all_groups, list):
+            target_group = next((g for g in all_groups if isinstance(g, dict) and str(g.get("id")) == str(gid)), None)
+        else:
+            target_group = None
+
+        if target_group:
+            m_ids = target_group.get("member_ids") or target_group.get("members", [])
+            g_name = target_group.get("name", "")
+            record_conversation_exchange(
+                participant_sim_ids=m_ids,
+                speaker_id=int(sender_id),
+                speaker_name=final_sender,
+                text=clean_t,
+                channel="group_chat",
+                group_name=g_name,
+            )
+            try:
+                from ai_social_pc.conversation_log import record_overheard_exchange
+                sim_info_mgr = services.sim_info_manager() if services else None
+                if sim_info_mgr:
+                    excluded_ids = set(int(x) for x in m_ids if x)
+                    recorded_observer_ids = set()
+
+                    for member_id in m_ids:
+                        try:
+                            m_info = sim_info_mgr.get(int(member_id))
+                            if not m_info:
+                                continue
+                            inst = getattr(m_info, "get_sim_instance", lambda: None)()
+                            if not inst:
+                                continue
+
+                            member_name = f"{getattr(m_info, 'first_name', '')}".strip() or "Sim"
+                            cur_excluded = excluded_ids.union(recorded_observer_ids)
+                            new_observers = record_overheard_exchange(
+                                center_sim_or_pos=m_info,
+                                speaker_id=int(sender_id),
+                                speaker_name=final_sender,
+                                text=clean_t,
+                                channel="overheard_pc_group",
+                                pc_user_name=member_name,
+                                group_name=g_name,
+                                exclude_sim_ids=cur_excluded,
+                                max_distance=10.0,
+                            )
+                            if new_observers:
+                                recorded_observer_ids.update(new_observers)
+                        except Exception:
+                            continue
+            except Exception as ex_ov_g:
+                pass
+    except Exception as ex_clog:
+        log_exception("Failed to record group message in conversation log", ex_clog)
     log(f"[GROUP MSG] {sender_name} in {gid}: '{clean_t[:40]}'")
     return msg_obj
 

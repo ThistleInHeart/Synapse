@@ -1,3 +1,6 @@
+# Executables and binaries
+*.exe
+
 # Python byte code and caches
 __pycache__/
 *.py[cod]

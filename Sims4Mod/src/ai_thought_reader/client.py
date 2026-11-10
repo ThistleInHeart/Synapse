@@ -104,7 +104,7 @@ def _worker_request(prompt: str, sim_name: str, callback: Callable[[str, bool], 
 
     except ConnectionRefusedError as e:
         is_en = _is_en()
-        err_msg = "⏳ AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "⏳ AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
+        err_msg = "[...] AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "[...] AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
         log(f"AI Bridge offline (Connection refused). Triggering automatic console startup...", level="WARNING")
         try:
             from ai_thought_reader.bridge_autostart import ensure_bridge_running_async
@@ -115,7 +115,7 @@ def _worker_request(prompt: str, sim_name: str, callback: Callable[[str, bool], 
 
     except TimeoutError as e:
         is_en = _is_en()
-        err_msg = "⏳ AI response timed out (2 min). The server might be slow or overloaded." if is_en else "⏳ Время ожидания ответа от нейросети истекло (таймаут 2 мин). Возможно, медленный интернет или сервер ИИ перегружен."
+        err_msg = "[...] AI response timed out (2 min). The server might be slow or overloaded." if is_en else "[...] Время ожидания ответа от нейросети истекло (таймаут 2 мин). Возможно, медленный интернет или сервер ИИ перегружен."
         log(f"Timeout while waiting for AI Bridge response: {e}", level="WARNING")
         _safe_dispatch(callback, err_msg, False)
 
@@ -124,18 +124,18 @@ def _worker_request(prompt: str, sim_name: str, callback: Callable[[str, bool], 
         err_str = str(e).lower()
         is_en = _is_en()
         if win_err == 10061:
-            err_msg = "⏳ AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "⏳ AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
+            err_msg = "[...] AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "[...] AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
             try:
                 from ai_thought_reader.bridge_autostart import ensure_bridge_running_async
                 ensure_bridge_running_async()
             except Exception:
                 pass
         elif win_err == 10054:
-            err_msg = "⚠️ Connection to AI Bridge was interrupted. Please wait a moment and try again." if is_en else "⚠️ Соединение с AI Bridge было прервано. Подождите пару секунд и повторите попытку."
+            err_msg = "[!] Connection to AI Bridge was interrupted. Please wait a moment and try again." if is_en else "[!] Соединение с AI Bridge было прервано. Подождите пару секунд и повторите попытку."
         elif "timed out" in err_str:
-            err_msg = "⏳ AI response timed out (2 min). The server might be slow or overloaded." if is_en else "⏳ Время ожидания ответа от нейросети истекло (таймаут 2 мин). Возможно, медленный интернет или сервер ИИ перегружен."
+            err_msg = "[...] AI response timed out (2 min). The server might be slow or overloaded." if is_en else "[...] Время ожидания ответа от нейросети истекло (таймаут 2 мин). Возможно, медленный интернет или сервер ИИ перегружен."
         else:
-            err_msg = f"⚠️ Network error connecting to AI Bridge: {e}" if is_en else f"⚠️ Сетевая ошибка при связи с AI Bridge: {e}"
+            err_msg = f"[!] Network error connecting to AI Bridge: {e}" if is_en else f"[!] Сетевая ошибка при связи с AI Bridge: {e}"
         log(f"Could not connect to AI Bridge (127.0.0.1:{BRIDGE_PORT}): {e}", level="WARNING")
         _safe_dispatch(callback, err_msg, False)
 
@@ -197,7 +197,7 @@ def _worker_send_context(prompt: str, sim_name: str, callback: Callable[[str, bo
 
     except ConnectionRefusedError as e:
         is_en = _is_en()
-        err_msg = "⏳ AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "⏳ AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
+        err_msg = "[...] AI Bridge is launching in console... Please repeat in a few seconds." if is_en else "[...] AI Bridge запускается в отдельной консоли... Пожалуйста, повторите действие через несколько секунд."
         log(f"AI Bridge offline during context send. Triggering automatic console startup...", level="WARNING")
         try:
             from ai_thought_reader.bridge_autostart import ensure_bridge_running_async

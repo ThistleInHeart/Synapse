@@ -78,6 +78,14 @@ def _is_en() -> bool:
         return False
 
 
+def _t(key: str, default: str = "") -> str:
+    try:
+        from ai_social_pc.localization import _t as loc_t
+        return loc_t(key, default)
+    except Exception:
+        return default
+
+
 def _get_loc_text(text: str):
     if LocalizationHelperTuning is not None:
         try:
@@ -435,7 +443,7 @@ def get_available_contacts(actor_sim_info, include_strangers: bool = False) -> L
     return contacts
 
 
-def show_lonely_dialog(actor_sim_info):
+def show_lonely_dialog(actor_sim_info, on_close: Optional[Callable[[], None]] = None):
     """
     Displays a dialog informing the player that their Sim currently has no acquaintances (they are alone).
     """
@@ -465,16 +473,25 @@ def show_lonely_dialog(actor_sim_info):
                 text=lambda *_: loc_text,
                 title=lambda *_: loc_title,
             )
-            dialog.show_dialog()
+            def _on_lonely_response(dlg):
+                if callable(on_close):
+                    on_close()
+            dialog.show_dialog(on_response=_on_lonely_response)
             return
         except Exception as e:
             log_exception("Failed to show lonely UiDialogOk", e)
 
     # Fallback to in-game notification
     show_chat_notification(title, text, sim_info=actor_sim_info, is_error=False)
+    if callable(on_close):
+        on_close()
 
 
-def show_contact_picker(actor_sim_info, on_contact_selected: Callable[[Any], None]):
+def show_contact_picker(
+    actor_sim_info,
+    on_contact_selected: Callable[[Any], None],
+    on_cancel: Optional[Callable[[], None]] = None,
+):
     """
     Displays the native Sims 4 Sim Picker dialog (grid with 3D portraits,
     names, relationship bars, and category filter tabs), matching MCCC.
@@ -483,18 +500,25 @@ def show_contact_picker(actor_sim_info, on_contact_selected: Callable[[Any], Non
     """
     contacts = get_available_contacts(actor_sim_info, include_strangers=False)
     if not contacts:
-        show_lonely_dialog(actor_sim_info)
+        show_lonely_dialog(actor_sim_info, on_close=on_cancel)
         return
 
     if ChatSimPicker is not None and SimPickerRow is not None:
-        _render_sim_picker_dialog(actor_sim_info, on_contact_selected, contacts=contacts)
+        _render_sim_picker_dialog(actor_sim_info, on_contact_selected, contacts=contacts, on_cancel=on_cancel)
     elif ChatActionPicker is not None and BasePickerRow is not None:
-        _render_action_picker_fallback(actor_sim_info, on_contact_selected, contacts=contacts)
+        _render_action_picker_fallback(actor_sim_info, on_contact_selected, contacts=contacts, on_cancel=on_cancel)
     else:
         log("No picker available in this environment.", level="ERROR")
+        if callable(on_cancel):
+            on_cancel()
 
 
-def _render_sim_picker_dialog(actor_sim_info, on_contact_selected: Callable[[Any], None], contacts: Optional[List[Any]] = None):
+def _render_sim_picker_dialog(
+    actor_sim_info,
+    on_contact_selected: Callable[[Any], None],
+    contacts: Optional[List[Any]] = None,
+    on_cancel: Optional[Callable[[], None]] = None,
+):
     """
     Renders native UiSimPicker (3-column grid with avatars, relationship bars, and filter tabs).
     """
@@ -526,7 +550,7 @@ def _render_sim_picker_dialog(actor_sim_info, on_contact_selected: Callable[[Any
             contacts = get_available_contacts(actor_sim_info, include_strangers=False)
 
         if not contacts:
-            show_lonely_dialog(actor_sim_info)
+            show_lonely_dialog(actor_sim_info, on_close=on_cancel)
             return
 
         # Sort contacts: highest relationship first, then alphabetically by name
@@ -594,17 +618,30 @@ def _render_sim_picker_dialog(actor_sim_info, on_contact_selected: Callable[[Any
 
                     if selected_sim is not None and callable(on_contact_selected):
                         on_contact_selected(selected_sim)
+                    elif callable(on_cancel):
+                        on_cancel()
                 else:
                     log("User closed/canceled SimPicker dialog")
+                    if callable(on_cancel):
+                        on_cancel()
             except Exception as e:
                 log_exception("Error in SimPicker _on_response", e)
+                if callable(on_cancel):
+                    on_cancel()
 
         dialog.show_dialog(on_response=_on_response)
     except Exception as e:
         log_exception("Failed to render SimPicker dialog", e)
+        if callable(on_cancel):
+            on_cancel()
 
 
-def _render_action_picker_fallback(owner_sim_info, on_selected, contacts: Optional[List[Any]] = None):
+def _render_action_picker_fallback(
+    owner_sim_info,
+    on_selected,
+    contacts: Optional[List[Any]] = None,
+    on_cancel: Optional[Callable[[], None]] = None,
+):
     """Fallback text list picker if UiSimPicker is somehow unavailable."""
     try:
         is_en = _is_en()
@@ -630,7 +667,7 @@ def _render_action_picker_fallback(owner_sim_info, on_selected, contacts: Option
             contacts = get_available_contacts(owner_sim_info, include_strangers=False)
 
         if not contacts:
-            show_lonely_dialog(owner_sim_info)
+            show_lonely_dialog(owner_sim_info, on_close=on_cancel)
             return
 
         tag_by_option_id = {}
@@ -668,12 +705,21 @@ def _render_action_picker_fallback(owner_sim_info, on_selected, contacts: Option
 
                     if selected_tag is not None and callable(on_selected):
                         on_selected(selected_tag)
+                    elif callable(on_cancel):
+                        on_cancel()
+                else:
+                    if callable(on_cancel):
+                        on_cancel()
             except Exception as ex:
                 log_exception("Error in fallback picker response", ex)
+                if callable(on_cancel):
+                    on_cancel()
 
         dialog.show_dialog(on_response=_on_response)
     except Exception as e:
         log_exception("Failed to render fallback picker dialog", e)
+        if callable(on_cancel):
+            on_cancel()
 
 
 def _wrap_message_text(text: str, max_chars: int = 36) -> List[str]:
@@ -1303,6 +1349,238 @@ def show_messenger_root_menu(
         text=text,
         rows_data=rows,
         on_selected=_on_pick,
+    )
+
+
+def show_direct_messages_menu(
+    actor_sim_info,
+    on_chat: Callable[[], None],
+    on_delete: Callable[[], None],
+    on_autonomy: Callable[[], None],
+    on_back: Callable[[], None],
+):
+    """
+    Renders the direct messages launcher menu:
+    1. Начать или продолжить общение (Start or Continue Chat)
+    2. Удалить переписку (Delete Chat History)
+    3. Разрешить / Запретить писать первым (Allow / Disallow Messaging First)
+    4. << Назад в главное меню (<< Back to Main Menu)
+    """
+    is_en = _is_en()
+    title = _t("DM_MENU_TITLE", "Direct Messages" if is_en else "Личные сообщения")
+    text = _t("DM_MENU_DESC", "Select an action:" if is_en else "Выберите действие:")
+
+    rows = [
+        (
+            _t("DM_BTN_CHAT", "Start or Continue Chat" if is_en else "Начать или продолжить общение"),
+            _t("DM_BTN_CHAT_DESC", "Select a contact from your list to chat with" if is_en else "Выбрать собеседника из списка контактов"),
+            "chat",
+        ),
+        (
+            _t("DM_BTN_DELETE", "Delete Chat History" if is_en else "Удалить переписку"),
+            _t("DM_BTN_DELETE_DESC", "Clear message history with a selected contact" if is_en else "Очистить историю сообщений с выбранным собеседником"),
+            "delete",
+        ),
+        (
+            _t("DM_BTN_AUTONOMY", "Allow / Disallow Messaging First" if is_en else "Разрешить / Запретить писать первым"),
+            _t("DM_BTN_AUTONOMY_DESC", "Configure which contacts can message you spontaneously" if is_en else "Настроить, кто из собеседников может писать первым во время автономии"),
+            "autonomy",
+        ),
+        (
+            _t("DM_BTN_BACK_ROOT", "<< Back to Main Menu" if is_en else "<< Назад в главное меню"),
+            _t("DM_BTN_BACK_ROOT_DESC", "Return to main messenger menu" if is_en else "Вернуться в главное меню мессенджера"),
+            "back",
+        ),
+    ]
+
+    def _on_select(tag):
+        if tag == "chat" and callable(on_chat):
+            on_chat()
+        elif tag == "delete" and callable(on_delete):
+            on_delete()
+        elif tag == "autonomy" and callable(on_autonomy):
+            on_autonomy()
+        elif tag == "back" and callable(on_back):
+            on_back()
+
+    show_action_menu(
+        owner_sim_info=actor_sim_info,
+        title=title,
+        text=text,
+        rows_data=rows,
+        on_selected=_on_select,
+        on_cancel=on_back,
+    )
+
+
+def show_direct_messages_delete_menu(
+    actor_sim_info,
+    on_back: Callable[[], None],
+):
+    """
+    Submenu for selecting an existing 1-on-1 chat history to delete/clear.
+    """
+    from ai_social_pc.chat_manager import get_all_active_chat_partners, clear_session_history
+    is_en = _is_en()
+    actor_id = getattr(actor_sim_info, "sim_id", 0)
+    title = _t("DM_DELETE_TITLE", "Delete Chat" if is_en else "Удалить переписку")
+    partners = get_all_active_chat_partners(actor_id)
+
+    if not partners:
+        text = _t("DM_DELETE_EMPTY", "You don't have any active chats to delete yet." if is_en else "У вас пока нет активных переписок для удаления.")
+        rows = [
+            (
+                _t("DM_BTN_BACK", "<< Back" if is_en else "<< Назад"),
+                _t("DM_BTN_BACK_DESC", "Return to direct messages menu" if is_en else "Вернуться в меню личных сообщений"),
+                "back",
+            )
+        ]
+    else:
+        text = _t("DM_DELETE_DESC", "Select a conversation to clear history:" if is_en else "Выберите переписку для очистки истории:")
+        rows = []
+        sim_mgr = services.sim_info_manager() if services is not None else None
+        for partner_id, count in partners:
+            p_info = sim_mgr.get(partner_id) if sim_mgr else None
+            p_name = get_recipient_display_name(p_info) if p_info else (f"Sim_{partner_id}" if is_en else f"Сим_{partner_id}")
+            msg_count_str = _t("DM_DELETE_MSG_COUNT", "Messages in history: {count}" if is_en else "Сообщений в переписке: {count}").format(count=count)
+            rows.append((p_name, msg_count_str, ("delete", partner_id, p_name)))
+
+        rows.append((
+            _t("DM_BTN_BACK", "<< Back" if is_en else "<< Назад"),
+            _t("DM_BTN_BACK_DESC", "Return to direct messages menu" if is_en else "Вернуться в меню личных сообщений"),
+            "back",
+        ))
+
+    def _on_select(action):
+        if action == "back":
+            if callable(on_back):
+                on_back()
+        elif isinstance(action, tuple) and action[0] == "delete":
+            _, partner_id, p_name = action
+            clear_session_history(actor_id, partner_id)
+            c_title = _t("DM_DELETE_CONFIRM_TITLE", "Chat Deleted" if is_en else "Переписка удалена")
+            c_msg = _t("DM_DELETE_CONFIRM_TEXT", "Chat history with {name} has been cleared." if is_en else "История переписки с {name} успешно очищена.").format(name=p_name)
+            show_chat_notification(c_title, c_msg, sim_info=actor_sim_info)
+            show_direct_messages_delete_menu(actor_sim_info, on_back)
+
+    show_action_menu(
+        owner_sim_info=actor_sim_info,
+        title=title,
+        text=text,
+        rows_data=rows,
+        on_selected=_on_select,
+        on_cancel=on_back,
+    )
+
+
+def show_direct_messages_autonomy_menu(
+    actor_sim_info,
+    on_back: Callable[[], None],
+):
+    """
+    Submenu for configuring autonomous spontaneous incoming messages from friends.
+    Supports global toggle, per-sim allow/block toggles, and adding sims from contacts.
+    """
+    from ai_social_pc.friend_autonomy import is_friend_autonomy_enabled
+    from ai_social_pc.chat_manager import (
+        set_friend_autonomy_enabled,
+        get_all_active_chat_partners,
+        is_sim_autonomy_allowed,
+        set_sim_autonomy_allowed,
+        get_sim_autonomy_allowed_list,
+    )
+    is_en = _is_en()
+    actor_id = getattr(actor_sim_info, "sim_id", 0)
+    title = _t("DM_AUTONOMY_TITLE", "Spontaneous Messages" if is_en else "Разрешить / Запретить писать первым")
+    text = _t("DM_AUTONOMY_DESC", "Click a Sim to toggle autonomous incoming messages:" if is_en else "Нажмите на персонажа, чтобы переключить разрешение писать первым:")
+
+    global_enabled = is_friend_autonomy_enabled()
+    g_badge = _t("DM_AUTONOMY_ALLOWED_BADGE", "[ON]" if is_en else "[ВКЛ]") if global_enabled else _t("DM_AUTONOMY_BLOCKED_BADGE", "[OFF]" if is_en else "[ВЫКЛ]")
+    g_title = f"{g_badge} " + ("Global Friend Autonomy" if is_en else "Общая автономия друзей")
+    g_desc = (
+        ("Click to disable all spontaneous incoming messages from friends" if is_en else "Нажмите, чтобы отключить все входящие спонтанные сообщения от друзей")
+        if global_enabled else
+        ("Click to enable spontaneous incoming messages from friends" if is_en else "Нажмите, чтобы включить входящие спонтанные сообщения от друзей")
+    )
+
+    rows = [
+        (g_title, g_desc, "toggle_global"),
+        (
+            _t("DM_AUTONOMY_BTN_ADD", "Add from Contacts List" if is_en else "Добавить из списка контактов"),
+            _t("DM_AUTONOMY_BTN_ADD_DESC", "Allow a Sim from your acquaintances to message you first" if is_en else "Разрешить персонажу из списка знакомых писать вам первым"),
+            "add",
+        ),
+    ]
+
+    # Collect all candidates: sims in allowed list + sims with chat history
+    allowed_ids = set(get_sim_autonomy_allowed_list(actor_id))
+    chat_partners = [pid for pid, _ in get_all_active_chat_partners(actor_id)]
+    all_candidate_ids = list(allowed_ids.union(chat_partners))
+
+    sim_mgr = services.sim_info_manager() if services is not None else None
+    for cid in all_candidate_ids:
+        c_info = sim_mgr.get(cid) if sim_mgr else None
+        c_name = get_recipient_display_name(c_info) if c_info else (f"Sim_{cid}" if is_en else f"Сим_{cid}")
+        is_allowed = is_sim_autonomy_allowed(actor_id, cid)
+        badge = _t("DM_AUTONOMY_ALLOWED_BADGE", "[ON]" if is_en else "[ВКЛ]") if is_allowed else _t("DM_AUTONOMY_BLOCKED_BADGE", "[OFF]" if is_en else "[ВЫКЛ]")
+        desc = (
+            _t("DM_AUTONOMY_CLICK_TO_BLOCK", "Click to DISALLOW autonomous messages from this Sim" if is_en else "Нажмите, чтобы ЗАПРЕТИТЬ писать первым")
+            if is_allowed else
+            _t("DM_AUTONOMY_CLICK_TO_ALLOW", "Click to ALLOW autonomous messages from this Sim" if is_en else "Нажмите, чтобы РАЗРЕШИТЬ писать первым")
+        )
+        rows.append((f"{badge} {c_name}", desc, ("toggle_sim", cid, c_name, is_allowed)))
+
+    rows.append((
+        _t("DM_BTN_BACK", "<< Back" if is_en else "<< Назад"),
+        _t("DM_BTN_BACK_DESC", "Return to direct messages menu" if is_en else "Вернуться в меню личных сообщений"),
+        "back",
+    ))
+
+    def _on_select(action):
+        if action == "back":
+            if callable(on_back):
+                on_back()
+        elif action == "toggle_global":
+            new_global = not global_enabled
+            set_friend_autonomy_enabled(new_global)
+            status_lbl = _t("DM_AUTONOMY_STATUS_ON", "[ON] Allowed" if is_en else "[ВКЛ] Разрешено") if new_global else _t("DM_AUTONOMY_STATUS_OFF", "[OFF] Disallowed" if is_en else "[ВЫКЛ] Запрещено")
+            n_title = _t("DM_AUTONOMY_NOTICE_TITLE", "Autonomy Settings" if is_en else "Настройка автономии")
+            n_msg = ("Global friend messaging: " if is_en else "Общие спонтанные сообщения друзей: ") + status_lbl
+            show_chat_notification(n_title, n_msg, sim_info=actor_sim_info)
+            show_direct_messages_autonomy_menu(actor_sim_info, on_back)
+        elif action == "add":
+            def _on_add_picked(picked_sim):
+                p_id = getattr(picked_sim, "sim_id", 0)
+                p_name = get_recipient_display_name(picked_sim)
+                set_sim_autonomy_allowed(actor_id, p_id, True)
+                n_title = _t("DM_AUTONOMY_NOTICE_TITLE", "Autonomy Settings" if is_en else "Настройка автономии")
+                n_text = _t("DM_AUTONOMY_NOTICE_TEXT", "Spontaneous messages from {name}: {status}." if is_en else "Автономные сообщения от {name}: {status}.").format(
+                    name=p_name,
+                    status=_t("DM_AUTONOMY_STATUS_ON", "[ON] Allowed" if is_en else "[ВКЛ] Разрешено"),
+                )
+                show_chat_notification(n_title, n_text, sim_info=actor_sim_info)
+                show_direct_messages_autonomy_menu(actor_sim_info, on_back)
+            show_contact_picker(actor_sim_info, _on_add_picked, on_cancel=lambda: show_direct_messages_autonomy_menu(actor_sim_info, on_back))
+        elif isinstance(action, tuple) and action[0] == "toggle_sim":
+            _, sim_id, sim_name, cur_allowed = action
+            new_allowed = not cur_allowed
+            set_sim_autonomy_allowed(actor_id, sim_id, new_allowed)
+            status_lbl = _t("DM_AUTONOMY_STATUS_ON", "[ON] Allowed" if is_en else "[ВКЛ] Разрешено") if new_allowed else _t("DM_AUTONOMY_STATUS_OFF", "[OFF] Disallowed" if is_en else "[ВЫКЛ] Запрещено")
+            n_title = _t("DM_AUTONOMY_NOTICE_TITLE", "Autonomy Settings" if is_en else "Настройка автономии")
+            n_text = _t("DM_AUTONOMY_NOTICE_TEXT", "Spontaneous messages from {name}: {status}." if is_en else "Автономные сообщения от {name}: {status}.").format(
+                name=sim_name,
+                status=status_lbl,
+            )
+            show_chat_notification(n_title, n_text, sim_info=actor_sim_info)
+            show_direct_messages_autonomy_menu(actor_sim_info, on_back)
+
+    show_action_menu(
+        owner_sim_info=actor_sim_info,
+        title=title,
+        text=text,
+        rows_data=rows,
+        on_selected=_on_select,
+        on_cancel=on_back,
     )
 
 

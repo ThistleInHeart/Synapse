@@ -62,8 +62,8 @@ There are no pre-scripted lines or canned responses. Every thought, face-to-face
 ├── Synapse/                      # Standalone Bridge application & launcher
 │   ├── Synapse.exe               # Graphical configuration launcher (GUI)
 │   ├── ai_bridge.exe             # High-performance local bridge executable
-│   ├── ai_bridge.py              # Open-source bridge HTTP server (127.0.0.1:8765)
-│   ├── launcher.py               # Open-source CustomTkinter launcher interface
+│   ├── ai_bridge.py              # Standalone bridge HTTP server (127.0.0.1:8765)
+│   ├── launcher.py               # CustomTkinter graphical launcher interface
 │   ├── localization_manager.py   # Translation and locale loader
 │   ├── requirements.txt          # Python dependencies for pure-script execution
 │   └── languages/                # Application UI and system prompt localizations
@@ -79,7 +79,7 @@ There are no pre-scripted lines or canned responses. Every thought, face-to-face
 │       ├── mod_strings_en.json         # English in-game strings
 │       └── mod_strings_ru.json         # Russian in-game strings
 │
-├── LICENSE                       # Synapse License and Terms of Use (v0.3)
+├── LICENSE                       # Synapse License and Terms of Use (v0.4)
 └── README.md                     # Project documentation
 ```
 

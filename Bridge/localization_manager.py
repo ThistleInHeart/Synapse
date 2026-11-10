@@ -290,6 +290,8 @@ class LocalizationManager:
                     "is_custom_friend_chat_system_prompt": bool(cfg.get("is_custom_friend_chat_system_prompt", False)),
                     "direct_dialogue_system_prompt": cfg.get("direct_dialogue_system_prompt", ""),
                     "is_custom_direct_dialogue_system_prompt": bool(cfg.get("is_custom_direct_dialogue_system_prompt", False)),
+                    "autonomous_dialogue_system_prompt": cfg.get("autonomous_dialogue_system_prompt", ""),
+                    "is_custom_autonomous_dialogue_system_prompt": bool(cfg.get("is_custom_autonomous_dialogue_system_prompt", False)),
                     "sex_dialogue_system_prompt": cfg.get("sex_dialogue_system_prompt", ""),
                     "is_custom_sex_dialogue_system_prompt": bool(cfg.get("is_custom_sex_dialogue_system_prompt", False)),
                     "group_summarize_system_prompt": cfg.get("group_summarize_system_prompt", ""),
@@ -339,8 +341,12 @@ class LocalizationManager:
         cfg["is_custom_npc_chat_system_prompt"] = bool(lang_p.get("is_custom_npc_chat_system_prompt", False))
         cfg["friend_chat_system_prompt"] = lang_p.get("friend_chat_system_prompt", "")
         cfg["is_custom_friend_chat_system_prompt"] = bool(lang_p.get("is_custom_friend_chat_system_prompt", False))
-        cfg["direct_dialogue_system_prompt"] = lang_p.get("direct_dialogue_system_prompt", "")
-        cfg["is_custom_direct_dialogue_system_prompt"] = bool(lang_p.get("is_custom_direct_dialogue_system_prompt", False))
+        cfg["direct_dialogue_system_prompt"] = lang_p.get("direct_dialogue_system_prompt", "")
+        cfg["is_custom_direct_dialogue_system_prompt"] = bool(lang_p.get("is_custom_direct_dialogue_system_prompt", False))
+        cfg["simplified_dialogue_system_prompt"] = lang_p.get("simplified_dialogue_system_prompt", "")
+        cfg["is_custom_simplified_dialogue_system_prompt"] = bool(lang_p.get("is_custom_simplified_dialogue_system_prompt", False))
+        cfg["autonomous_dialogue_system_prompt"] = lang_p.get("autonomous_dialogue_system_prompt", "")
+        cfg["is_custom_autonomous_dialogue_system_prompt"] = bool(lang_p.get("is_custom_autonomous_dialogue_system_prompt", False))
         cfg["sex_dialogue_system_prompt"] = lang_p.get("sex_dialogue_system_prompt", "")
         cfg["is_custom_sex_dialogue_system_prompt"] = bool(lang_p.get("is_custom_sex_dialogue_system_prompt", False))
         cfg["group_summarize_system_prompt"] = lang_p.get("group_summarize_system_prompt", "")

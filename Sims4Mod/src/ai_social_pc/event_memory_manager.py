@@ -357,6 +357,12 @@ def record_event_memory(
     Constructs and persists an episodic memory from the catalog.
     Bilingual (RU and EN), with zero LLM queries.
     """
+    try:
+        from ai_thought_reader.config import get_event_memory_enabled
+        if not get_event_memory_enabled():
+            return False
+    except Exception:
+        pass
     if template_key not in EVENT_MEMORY_TEMPLATES or actor_sim_info is None:
         return False
 
@@ -456,13 +462,17 @@ def on_relationship_bit_added(sim_id_a: int, sim_id_b: int, bit_obj):
 
         # 1. Breakup / Divorce / Broken Engagement (14 days) - MUST BE CHECKED FIRST!
         # Prevents "romantic-broken_up_engaged" or "broken_engagement" from ever triggering proposal/wedding!
-        if any(k in b_name for k in ("broken", "divorce", "ex_spouse", "ex_partner", "breakup", "separated")):
+        is_breakup = (
+            any(k in b_name for k in ("divorce", "broken_up", "breakup", "broken_engagement", "ex_spouse", "ex_partner", "ex_boyfriend", "ex_girlfriend"))
+            or ("romantic" in b_name and "separated" in b_name)
+        )
+        if is_breakup:
             record_event_memory("breakup_divorce", info_a, target_sim_info=info_b)
             record_event_memory("breakup_divorce", info_b, target_sim_info=info_a)
             # Instantly purge conflicting romantic statuses between the pair
             try:
                 from ai_social_pc.memory_manager import remove_memories_by_types
-                conflicting = ["wedding_newlyweds", "proposal_accepted_proposer", "proposal_accepted_target", "romance_became_couple"]
+                conflicting = ["wedding_newlyweds", "proposal_accepted_proposer", "proposal_accepted_target", "romance_became_couple", "romance_first_kiss"]
                 remove_memories_by_types(sim_id_a, sim_id_b, conflicting)
                 remove_memories_by_types(sim_id_b, sim_id_a, conflicting)
             except Exception:
@@ -780,18 +790,23 @@ def _check_and_process_intimacy_events():
 
                 # 2. Check Infidelity for each participant (pair or group only)
                 if len(participants) >= 2:
+                    from ai_social_pc.autonomous_director import is_polyamorous_or_exempt_from_cheating
                     for part in participants:
                         partner = _get_partner_info(part)
                         if partner and partner not in participants:
-                            partner_name = _get_sim_name(partner)
-                            lovers = [_get_sim_name(o) for o in participants if o != part]
-                            lover_str = ", ".join(lovers)
-                            # Cheater's memory (neutral fact: had secret intimacy behind partner's back)
-                            record_event_memory(
-                                "intimacy_cheating",
-                                part,
-                                extra_context={"partner": partner_name, "lover": lover_str}
-                            )
+                            non_exempt_lovers = [
+                                _get_sim_name(o) for o in participants
+                                if o != part and not is_polyamorous_or_exempt_from_cheating(part, partner, o)
+                            ]
+                            if non_exempt_lovers:
+                                partner_name = _get_sim_name(partner)
+                                lover_str = ", ".join(non_exempt_lovers)
+                                # Cheater's memory (neutral fact: had secret intimacy behind partner's back)
+                                record_event_memory(
+                                    "intimacy_cheating",
+                                    part,
+                                    extra_context={"partner": partner_name, "lover": lover_str}
+                                )
 
             # 3. Check for Walk-ins / Witnesses in the SAME ROOM
             # (Allows catching them if someone enters the room mid-session, while recording each witness only once)
@@ -1060,10 +1075,18 @@ def _check_sex_witnesses(participants, p1, p2, p1_name, p2_name, session_key: st
             # B. CASE 2: Cheated Partner catches them in the act!
             caught_cheating = False
             if len(participants) >= 2:
+                from ai_social_pc.autonomous_director import is_polyamorous_or_exempt_from_cheating
                 for part in participants:
                     ptnr = _get_partner_info(part)
                     if ptnr and getattr(ptnr, "sim_id", 0) == getattr(info, "sim_id", 0):
                         # info is the spouse/partner who walked in!
+                        other_lovers = [
+                            _get_sim_name(o) for o in participants
+                            if o != part and not is_polyamorous_or_exempt_from_cheating(part, info, o)
+                        ]
+                        if not other_lovers:
+                            continue
+
                         has_jealous_reaction = _has_sex_witness_reaction(inst_sim, is_jealous_partner=True)
                         has_jealous_buff = _has_sex_witness_buff(info, is_jealous_partner=True)
 
@@ -1071,7 +1094,6 @@ def _check_sex_witnesses(participants, p1, p2, p1_name, p2_name, session_key: st
                             continue
 
                         _ACTIVE_SEX_WITNESSES.add((session_key, witness_id))
-                        other_lovers = [_get_sim_name(o) for o in participants if o != part]
                         partner_name = _get_sim_name(info)
                         cheater_name = _get_sim_name(part)
                         lover_str = ", ".join(other_lovers)
@@ -1211,7 +1233,7 @@ def _check_sex_witnesses(participants, p1, p2, p1_name, p2_name, session_key: st
 
 
 def _is_eligible_lover(cand_info, cheater_info, partner_info) -> bool:
-    """Returns True if cand_info is a valid adult third party (not cheater, not partner, not child, not pet)."""
+    """Returns True if cand_info is a valid adult third party (not cheater, not partner, not child, not pet, not polyamorous partner/exempt)."""
     if not cand_info or not cheater_info or not partner_info:
         return False
     c_id = getattr(cand_info, "sim_id", 0)
@@ -1228,6 +1250,9 @@ def _is_eligible_lover(cand_info, cheater_info, partner_info) -> bool:
         if _is_child_of(cand_info, cheater_info) or _is_child_of(cheater_info, cand_info):
             return False
         if _is_child_of(cand_info, partner_info) or _is_child_of(partner_info, cand_info):
+            return False
+        from ai_social_pc.autonomous_director import is_polyamorous_or_exempt_from_cheating
+        if is_polyamorous_or_exempt_from_cheating(cheater_info, partner_info, cand_info):
             return False
     except Exception:
         pass
@@ -1389,6 +1414,12 @@ def _trigger_cheating_caught(cheater, partner, lover):
     """Records event memories for both partner (caught spouse) and cheater (got caught)."""
     if not cheater or not partner:
         return
+    try:
+        from ai_social_pc.autonomous_director import is_polyamorous_or_exempt_from_cheating
+        if is_polyamorous_or_exempt_from_cheating(cheater, partner, lover):
+            return
+    except Exception:
+        pass
     partner_name = _get_sim_name(partner)
     cheater_name = _get_sim_name(cheater)
     lover_name = _get_sim_name(lover) if lover else "тайным возлюбленным"
@@ -1402,6 +1433,7 @@ def _trigger_cheating_caught(cheater, partner, lover):
             "lover": lover_name,
             "lover_ru": lover_name,
             "lover_en": lover_name_en,
+            "lover_sim_id": getattr(lover, "sim_id", 0) if lover else 0,
         }
     )
     record_event_memory(
@@ -1413,6 +1445,7 @@ def _trigger_cheating_caught(cheater, partner, lover):
             "lover": lover_name,
             "lover_ru": lover_name,
             "lover_en": lover_name_en,
+            "lover_sim_id": getattr(lover, "sim_id", 0) if lover else 0,
         }
     )
 
@@ -1775,6 +1808,13 @@ def process_event_memory_checks():
         return
 
     _LAST_PERIODIC_CHECK_TIME = now
+
+    try:
+        from ai_thought_reader.config import get_event_memory_enabled
+        if not get_event_memory_enabled():
+            return
+    except Exception:
+        pass
 
     try:
         # Check active sex, walk-ins, and intimacy

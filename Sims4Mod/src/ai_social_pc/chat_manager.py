@@ -20,6 +20,7 @@ try:
         get_sim_occult_info,
         get_sim_clothing_and_nudity_info,
         get_current_activity,
+        get_sim_current_activity_and_posture,
         get_nearby_sims_info,
         get_sim_family_info,
         get_household_pets_info,
@@ -36,15 +37,20 @@ try:
         get_sim_aspiration_info,
         get_household_funds_info,
         get_relationship_between_sims,
+        get_fire_hazard_context,
+        get_sim_labor_hazard_context,
     )
     from ai_thought_reader.config import get_chat_context_flag
     _HAS_THOUGHT_READER = True
 except Exception:
     _HAS_THOUGHT_READER = False
     get_chat_context_flag = lambda f: True
+    get_fire_hazard_context = None
+    get_sim_labor_hazard_context = None
     get_sim_occult_info = None
     get_sim_clothing_and_nudity_info = None
     get_current_activity = None
+    get_sim_current_activity_and_posture = None
     get_nearby_sims_info = None
     get_sim_family_info = None
     get_household_pets_info = None
@@ -238,6 +244,7 @@ CONTACTS_FILE_PATH = os.path.expanduser(r"~\Documents\Electronic Arts\The Sims 4
 
 # In-memory working state for active save slot: { "actor_id_str": [target_id1, target_id2, ...] }
 _WORKING_CONTACTS_CACHE: Optional[Dict[str, List[int]]] = None
+_WORKING_BLOCKED_CACHE: Optional[Dict[str, List[int]]] = None
 _ACTIVE_CONTACTS_SAVE_ID: Optional[str] = None
 _IS_CONTACTS_DIRTY: bool = False
 _CONTACTS_LOCK = threading.RLock()
@@ -260,7 +267,7 @@ def _read_contacts_disk_file() -> Dict[str, Any]:
 
 def load_contacts_data() -> Dict[str, List[int]]:
     """Loads contacted friends data for the current save slot."""
-    global _WORKING_CONTACTS_CACHE, _ACTIVE_CONTACTS_SAVE_ID, _IS_CONTACTS_DIRTY
+    global _WORKING_CONTACTS_CACHE, _WORKING_BLOCKED_CACHE, _ACTIVE_CONTACTS_SAVE_ID, _IS_CONTACTS_DIRTY
     with _CONTACTS_LOCK:
         from ai_social_pc.group_manager import get_current_save_id
         current_save = get_current_save_id()
@@ -279,12 +286,25 @@ def load_contacts_data() -> Dict[str, List[int]]:
             if isinstance(v, list):
                 _WORKING_CONTACTS_CACHE[str(k)] = [int(x) for x in v]
 
-        log(f"[CONTACTS] Loaded contacts cache for save '{current_save}': {len(_WORKING_CONTACTS_CACHE)} player entries")
+        raw_blocked = save_entry.get("blocked", {}) if isinstance(save_entry, dict) else {}
+        _WORKING_BLOCKED_CACHE = {}
+        for k, v in raw_blocked.items():
+            if isinstance(v, list):
+                _WORKING_BLOCKED_CACHE[str(k)] = [int(x) for x in v]
+
+        log(f"[CONTACTS] Loaded contacts cache for save '{current_save}': {len(_WORKING_CONTACTS_CACHE)} allowed, {len(_WORKING_BLOCKED_CACHE)} blocked entries")
         return _WORKING_CONTACTS_CACHE
 
 
+def load_blocked_data() -> Dict[str, List[int]]:
+    """Loads explicitly blocked friends data for the current save slot."""
+    load_contacts_data()
+    global _WORKING_BLOCKED_CACHE
+    return _WORKING_BLOCKED_CACHE if _WORKING_BLOCKED_CACHE is not None else {}
+
+
 def commit_contacts_to_disk():
-    """Commits contacted friends data to disk on game save."""
+    """Commits contacted and blocked friends data to disk on game save."""
     global _IS_CONTACTS_DIRTY
     with _CONTACTS_LOCK:
         from ai_social_pc.group_manager import get_current_save_id
@@ -296,6 +316,7 @@ def commit_contacts_to_disk():
             disk_data = _read_contacts_disk_file()
             disk_data["saves"][current_save] = {
                 "contacted": _WORKING_CONTACTS_CACHE,
+                "blocked": _WORKING_BLOCKED_CACHE or {},
                 "updated_at": int(time.time()),
             }
 
@@ -316,9 +337,10 @@ def commit_contacts_to_disk():
 
 def reset_contacts_cache():
     """Resets in-memory contacts cache on zone teardown."""
-    global _WORKING_CONTACTS_CACHE, _ACTIVE_CONTACTS_SAVE_ID, _IS_CONTACTS_DIRTY
+    global _WORKING_CONTACTS_CACHE, _WORKING_BLOCKED_CACHE, _ACTIVE_CONTACTS_SAVE_ID, _IS_CONTACTS_DIRTY
     with _CONTACTS_LOCK:
         _WORKING_CONTACTS_CACHE = None
+        _WORKING_BLOCKED_CACHE = None
         _ACTIVE_CONTACTS_SAVE_ID = None
         _IS_CONTACTS_DIRTY = False
 
@@ -340,22 +362,89 @@ def record_player_contacted(actor_id: int, target_id: int):
             log(f"[CONTACTS] Player ID {actor_id} messaged Sim ID {target_id} -> Unlocked incoming friend autonomy!")
 
 
-def has_player_ever_messaged(actor_id: int, target_id: int) -> bool:
-    """Checks whether the player has ever sent a message to target_id."""
+def is_sim_autonomy_allowed(actor_id: int, target_id: int) -> bool:
+    """Checks whether target_id is currently allowed to send autonomous messages to actor_id."""
     if not actor_id or not target_id or actor_id == target_id:
         return False
-
-    cache = load_contacts_data()
     a_key = str(actor_id)
     t_int = int(target_id)
 
-    # 1. Persistent record
-    if a_key in cache and t_int in cache[a_key]:
+    blocked_cache = load_blocked_data()
+    if a_key in blocked_cache and t_int in blocked_cache[a_key]:
+        return False
+
+    contacts_cache = load_contacts_data()
+    if a_key in contacts_cache and t_int in contacts_cache[a_key]:
         return True
 
-    # 2. Check active session history (in case player just typed in this session)
-    history = get_session_history(actor_id, target_id)
+    return False
 
+
+def set_sim_autonomy_allowed(actor_id: int, target_id: int, allowed: bool):
+    """Explicitly allows or blocks target_id from sending spontaneous messages to actor_id."""
+    if not actor_id or not target_id or actor_id == target_id:
+        return
+    a_key = str(actor_id)
+    t_int = int(target_id)
+
+    contacts_cache = load_contacts_data()
+    blocked_cache = load_blocked_data()
+
+    with _CONTACTS_LOCK:
+        global _IS_CONTACTS_DIRTY
+        if a_key not in contacts_cache:
+            contacts_cache[a_key] = []
+        if a_key not in blocked_cache:
+            blocked_cache[a_key] = []
+
+        if allowed:
+            if t_int in blocked_cache[a_key]:
+                blocked_cache[a_key].remove(t_int)
+            if t_int not in contacts_cache[a_key]:
+                contacts_cache[a_key].append(t_int)
+        else:
+            if t_int in contacts_cache[a_key]:
+                contacts_cache[a_key].remove(t_int)
+            if t_int not in blocked_cache[a_key]:
+                blocked_cache[a_key].append(t_int)
+
+        _IS_CONTACTS_DIRTY = True
+        commit_contacts_to_disk()
+        log(f"[CONTACTS] Autonomy for partner {target_id} -> allowed={allowed} for actor {actor_id}")
+
+
+def get_sim_autonomy_allowed_list(actor_id: int) -> List[int]:
+    """Returns list of target sim_ids allowed to message actor_id spontaneously."""
+    if not actor_id:
+        return []
+    contacts_cache = load_contacts_data()
+    blocked_cache = load_blocked_data()
+    a_key = str(actor_id)
+    allowed = contacts_cache.get(a_key, [])
+    blocked = set(blocked_cache.get(a_key, []))
+    return [x for x in allowed if x not in blocked]
+
+
+def has_player_ever_messaged(actor_id: int, target_id: int) -> bool:
+    """Checks whether the player has ever sent a message to target_id (and is not blocked)."""
+    if not actor_id or not target_id or actor_id == target_id:
+        return False
+
+    a_key = str(actor_id)
+    t_int = int(target_id)
+
+    # 1. Check explicit block
+    blocked_cache = load_blocked_data()
+    if a_key in blocked_cache and t_int in blocked_cache[a_key]:
+        return False
+
+    # 2. Check persistent allowed list
+    contacts_cache = load_contacts_data()
+    if a_key in contacts_cache and t_int in contacts_cache[a_key]:
+        return True
+
+    # 3. Check active session history (in case player just typed in this session)
+    history = get_session_history(actor_id, target_id)
     for msg in history:
         sender = msg.get("sender", "")
         s_id = msg.get("sender_id", 0)
@@ -365,6 +454,46 @@ def has_player_ever_messaged(actor_id: int, target_id: int) -> bool:
             return True
 
     return False
+
+
+def get_all_active_chat_partners(actor_id: int) -> List[Tuple[int, int]]:
+    """Returns list of (partner_sim_id, message_count) for all active 1-on-1 chats involving actor_id."""
+    chats = load_chats_data()
+    results = []
+    actor_id_int = int(actor_id)
+    for key, msgs in chats.items():
+        if not isinstance(msgs, list) or len(msgs) == 0:
+            continue
+        other_id = None
+        if isinstance(key, tuple) and len(key) == 2:
+            p1, p2 = key[0], key[1]
+            if p1 == actor_id_int:
+                other_id = p2
+            elif p2 == actor_id_int:
+                other_id = p1
+        elif isinstance(key, str):
+            parts = key.split("_")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                p1, p2 = int(parts[0]), int(parts[1])
+                if p1 == actor_id_int:
+                    other_id = p2
+                elif p2 == actor_id_int:
+                    other_id = p1
+        if other_id is not None and other_id != actor_id_int:
+            results.append((other_id, len(msgs)))
+    return results
+
+
+def set_friend_autonomy_enabled(enabled: bool):
+    """Sets global friend autonomy toggle in mod config."""
+    try:
+        from ai_thought_reader.config import load_config, save_config
+        cfg = load_config()
+        cfg["friend_autonomy_enabled"] = bool(enabled)
+        save_config(cfg)
+        log(f"[FRIEND AUTONOMY] Global friend autonomy set to: {enabled}")
+    except Exception as e:
+        log_exception("Failed to save friend_autonomy_enabled", e)
 
 
 
@@ -569,6 +698,60 @@ def add_session_message(
     mark_chats_dirty()
     _CHAT_SESSIONS[key] = chats[key]
 
+    try:
+        from ai_social_pc.conversation_log import record_conversation_exchange
+        record_conversation_exchange(
+            [actor_id, target_id],
+            speaker_id=real_sender_id,
+            speaker_name=sender,
+            text=clean_t,
+            channel="direct_message",
+        )
+        try:
+            from ai_social_pc.conversation_log import record_overheard_exchange
+            sim_info_mgr = services.sim_info_manager() if services else None
+            actor_info = sim_info_mgr.get(int(actor_id)) if sim_info_mgr else None
+            actor_name = f"{getattr(actor_info, 'first_name', '')}".strip() if actor_info else "Sim"
+
+            partner_info = sim_info_mgr.get(int(target_id)) if sim_info_mgr else None
+            partner_name = f"{getattr(partner_info, 'first_name', '')}".strip() if partner_info else "Sim"
+
+            recorded_sim_ids = set()
+
+            # 1. Any Sim standing near actor (who is typing or viewing this message)
+            if actor_info:
+                rec1 = record_overheard_exchange(
+                    center_sim_or_pos=actor_info,
+                    speaker_id=real_sender_id,
+                    speaker_name=sender,
+                    text=clean_t,
+                    channel="overheard_pc_direct",
+                    target_name=partner_name if real_sender_id == int(actor_id) else actor_name,
+                    pc_user_name=actor_name,
+                    exclude_sim_ids={int(actor_id), int(target_id)},
+                    max_distance=10.0,
+                )
+                if rec1:
+                    recorded_sim_ids.update(rec1)
+
+            # 2. Any Sim standing near the recipient (whose device/screen received this message)
+            if partner_info and int(actor_id) != int(target_id):
+                record_overheard_exchange(
+                    center_sim_or_pos=partner_info,
+                    speaker_id=real_sender_id,
+                    speaker_name=sender,
+                    text=clean_t,
+                    channel="overheard_pc_direct",
+                    target_name=actor_name if real_sender_id == int(target_id) else partner_name,
+                    pc_user_name=partner_name,
+                    exclude_sim_ids={int(actor_id), int(target_id)}.union(recorded_sim_ids),
+                    max_distance=10.0,
+                )
+        except Exception as ex_ov_pc:
+            pass
+    except Exception as ex_clog:
+        log_exception("Failed to record direct message in conversation log", ex_clog)
+
     # If the player sent this message, unlock spontaneous friend autonomy for this target
     s_is_player = (sender in ("Вы", "You") or str(sender).lower() in ("вы", "you") or real_sender_id == int(actor_id))
     if s_is_player:
@@ -577,7 +760,233 @@ def add_session_message(
     return msg_obj
 
 
-def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
+def _get_direct_dialogue_location(sim_info, is_en: bool = False) -> str:
+    """
+    Returns accurate location for live face-to-face dialogue,
+    guaranteeing explicit indoors/outdoors designation and never saying 'on another lot'.
+    """
+    loc_desc = ""
+    try:
+        from ai_thought_reader.context import get_current_location
+        loc_desc = get_current_location(sim_info)
+    except Exception:
+        loc_desc = ""
+
+    # Never allow "on another lot" in face-to-face dialogue
+    if not loc_desc or "другом участке" in loc_desc.lower() or "another lot" in loc_desc.lower():
+        loc_desc = "Рядом с собеседником"
+
+    is_outside = False
+    try:
+        from ai_thought_reader.context import is_sim_physically_outside
+        is_outside = is_sim_physically_outside(sim_info)
+    except Exception:
+        is_outside = False
+
+    env_ru = "Снаружи / на улице" if is_outside else "Внутри / в помещении"
+    env_en = "Outdoors" if is_outside else "Indoors"
+
+    if is_en:
+        try:
+            from ai_thought_reader.context_en import translate_location_en
+            loc_en = translate_location_en(loc_desc)
+        except Exception:
+            loc_en = loc_desc
+
+        low = loc_en.lower()
+        if "outdoors" in low or "indoors" in low or "inside" in low or "outside" in low:
+            return loc_en
+        return f"{loc_en} [{env_en}]"
+    else:
+        low = loc_desc.lower()
+        if "снаружи" in low or "внутри" in low:
+            return loc_desc
+        if "(на свежем воздухе)" in loc_desc:
+            return loc_desc.replace("(на свежем воздухе)", "(на свежем воздухе / снаружи)")
+        if "(в помещении)" in loc_desc:
+            return loc_desc.replace("(в помещении)", "(в помещении / внутри)")
+        if "(внутри здания)" in loc_desc:
+            return loc_desc.replace("(внутри здания)", "(внутри здания / внутри)")
+        return f"{loc_desc} [{env_ru}]"
+
+
+def _get_direct_dialogue_clothing_and_nudity(sim_info, is_en: bool = False) -> tuple:
+    """
+    Retrieves clothing category and degree of nudity for a Sim,
+    properly localized for both Russian and English.
+    Returns: (clothing_str, nudity_str)
+    """
+    clothing_str = ""
+    nudity_str = ""
+    try:
+        from ai_thought_reader.context import get_sim_clothing_and_nudity_info
+        c_ru, n_ru = get_sim_clothing_and_nudity_info(sim_info)
+        if is_en:
+            try:
+                from ai_thought_reader.context_en import translate_phrase, CLOTHING_MAP_EN, NUDITY_MAP_EN
+                clothing_str = translate_phrase(c_ru, CLOTHING_MAP_EN) if c_ru else ""
+                nudity_str = translate_phrase(n_ru, NUDITY_MAP_EN) if n_ru else ""
+            except Exception:
+                clothing_str = c_ru or ""
+                nudity_str = n_ru or ""
+        else:
+            clothing_str = c_ru or ""
+            nudity_str = n_ru or ""
+    except Exception as ex:
+        log_exception("Error fetching clothing & nudity for direct dialogue", ex)
+    return clothing_str, nudity_str
+
+
+def _build_compact_sim_profile_summary(sim_info, is_en: bool = False, other_sim_info: Any = None) -> str:
+    """Fast, lightweight summary for bystanders and secondary participants (avoids heavy lot scans and deep tree traversal)."""
+    if sim_info is None:
+        return "Unknown Sim" if is_en else "Неизвестный персонаж"
+    if isinstance(sim_info, dict):
+        return sim_info.get("summary", "Virtual Contact" if is_en else "Виртуальный контакт")
+
+    f_name = getattr(sim_info, "first_name", "") or ""
+    l_name = getattr(sim_info, "last_name", "") or ""
+    full_name = f"{f_name} {l_name}".strip() or ("Sim" if is_en else "Сим")
+
+    gender_raw = getattr(getattr(sim_info, "gender", None), "name", "").upper()
+    age_raw = getattr(getattr(sim_info, "age", None), "name", "").upper()
+
+    lines = [f"- Name: {full_name}" if is_en else f"- Имя: {full_name}"]
+
+    # Age and Gender
+    if is_en:
+        gender_map = {"MALE": "Male", "FEMALE": "Female"}
+        age_map = {
+            "BABY": "Newborn",
+            "INFANT": "Infant",
+            "TODDLER": "Toddler",
+            "CHILD": "Child",
+            "TEEN": "Teen",
+            "YOUNGADULT": "Young Adult",
+            "ADULT": "Adult",
+            "ELDER": "Elder",
+        }
+        g_str = gender_map.get(gender_raw, gender_raw)
+        a_str = age_map.get(age_raw, age_raw)
+        if g_str and a_str:
+            lines.append(f"- Age and Gender: {a_str}, {g_str}")
+        elif g_str:
+            lines.append(f"- Gender: {g_str}")
+        elif a_str:
+            lines.append(f"- Age: {a_str}")
+    else:
+        gender_map = {"MALE": "Мужской", "FEMALE": "Женский"}
+        age_map = {
+            "BABY": "Младенец",
+            "INFANT": "Грудничок",
+            "TODDLER": "Малыш",
+            "CHILD": "Ребёнок",
+            "TEEN": "Подросток",
+            "YOUNGADULT": "Молодой(ая)",
+            "ADULT": "Взрослый(ая)",
+            "ELDER": "Пожилой(ая)",
+        }
+        g_str = gender_map.get(gender_raw, gender_raw)
+        a_str = age_map.get(age_raw, age_raw)
+        if g_str and a_str:
+            lines.append(f"- Возраст и пол: {a_str}, {g_str}")
+        elif g_str:
+            lines.append(f"- Пол: {g_str}")
+        elif a_str:
+            lines.append(f"- Возраст: {a_str}")
+
+    # Occult / Race
+    if _HAS_THOUGHT_READER and get_sim_occult_info:
+        try:
+            race = get_sim_occult_info(sim_info, is_en=is_en)
+            if race:
+                if is_en:
+                    try:
+                        from ai_thought_reader.context_en import translate_occult_en
+                        race = translate_occult_en(race)
+                    except Exception:
+                        pass
+                lines.append(f"- Race: {race}" if is_en else f"- Раса: {race}")
+        except Exception:
+            pass
+
+    # Mood
+    mood_str = None
+    if _HAS_THOUGHT_READER and get_sim_mood_info:
+        try:
+            mood_str = get_sim_mood_info(sim_info, include_reason=False)
+        except Exception:
+            pass
+    if not mood_str:
+        try:
+            if hasattr(sim_info, "get_mood"):
+                m = sim_info.get_mood()
+                if m:
+                    raw_m = getattr(m, "__name__", getattr(m, "name", str(m)))
+                    if "Mood_" in raw_m:
+                        raw_m = raw_m.split("Mood_")[-1]
+                    raw_m = raw_m.replace("'", "").replace("<class ", "").replace(">", "").strip().lower()
+                    from ai_thought_reader.context import MOOD_TRANSLATIONS
+                    mood_str = MOOD_TRANSLATIONS.get(raw_m, raw_m.capitalize())
+        except Exception:
+            pass
+    if mood_str:
+        if is_en:
+            try:
+                from ai_thought_reader.context_en import translate_mood_en
+                mood_str = translate_mood_en(mood_str)
+            except Exception:
+                pass
+        lines.append(f"- Current Mood: {mood_str}" if is_en else f"- Текущее настроение: {mood_str}")
+
+    # Activity
+    if _HAS_THOUGHT_READER and get_current_activity:
+        try:
+            act = get_current_activity(sim_info)
+            if act:
+                if is_en:
+                    try:
+                        from ai_thought_reader.context_en import translate_activity_en
+                        act = translate_activity_en(act)
+                    except Exception:
+                        pass
+                lines.append(f"- Current Activity: {act}" if is_en else f"- Текущее занятие: {act}")
+        except Exception:
+            pass
+
+    # Key traits (top 3)
+    if _HAS_THOUGHT_READER and get_sim_traits_info:
+        try:
+            tr = get_sim_traits_info(sim_info)
+            if tr:
+                if isinstance(tr, list):
+                    tr_slice = tr[:3]
+                else:
+                    tr_slice = [t.strip() for t in str(tr).split(",")[:3]]
+                if is_en:
+                    try:
+                        from ai_thought_reader.context_en import translate_traits_en
+                        tr_slice = [translate_traits_en(t) for t in tr_slice]
+                    except Exception:
+                        pass
+                lines.append(f"- Key Traits: {', '.join(tr_slice)}" if is_en else f"- Черты характера: {', '.join(tr_slice)}")
+        except Exception:
+            pass
+
+    # Clothing and Nudity
+    try:
+        c_desc, n_desc = _get_direct_dialogue_clothing_and_nudity(sim_info, is_en=is_en)
+        if c_desc:
+            lines.append(f"- Clothing: {c_desc}" if is_en else f"- Одежда: {c_desc}")
+        if n_desc:
+            lines.append(f"- Nudity State: {n_desc}" if is_en else f"- Степень наготы: {n_desc}")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def _build_sim_profile_summary(sim_info, is_actor: bool = False, is_direct_dialogue: bool = False, other_sim_info: Any = None) -> str:
     """Builds a complete, rich profile of a Sim for chat roleplay matching the full AI Read specification."""
     try:
         from ai_social_pc.localization import get_game_language
@@ -599,7 +1008,13 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
     age_raw = getattr(getattr(sim_info, "age", None), "name", "").upper()
 
     if is_en:
-        lines = [f"- Name: {full_name}"]
+        trapped_tag = ""
+        try:
+            from ai_thought_reader.trapped_detector import get_sim_trapped_status
+            trapped_tag = get_sim_trapped_status(sim_info, is_en=True)
+        except Exception:
+            pass
+        lines = [f"- Name: {full_name}{trapped_tag}"]
         gender_map_en = {"MALE": "Male", "FEMALE": "Female"}
         age_map_en = {
             "BABY": "Newborn",
@@ -689,30 +1104,52 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
             except Exception:
                 pass
 
+        try:
+            from ai_thought_reader.context import get_sim_clubs_info
+            clubs_en = get_sim_clubs_info(sim_info, is_en=True)
+            if clubs_en:
+                lines.append(f"- Club Memberships: {clubs_en}")
+        except Exception:
+            pass
+
         if get_chat_context_flag("chat_mood"):
+            mood_str = None
             if _HAS_THOUGHT_READER and get_sim_mood_info:
                 try:
-                    mood_str = get_sim_mood_info(sim_info, include_reason=is_on_active_lot)
-                    if mood_str:
-                        try:
-                            from ai_thought_reader.context_en import translate_mood_en
-                            mood_str = translate_mood_en(mood_str)
-                        except Exception:
-                            pass
-                        lines.append(f"- Current Mood: {mood_str}")
+                    mood_str = get_sim_mood_info(sim_info, include_reason=(sim_instance is not None))
                 except Exception:
                     pass
+            if not mood_str:
+                try:
+                    from ai_thought_reader import context as _tr_ctx
+                    _mood_fn = _tr_ctx.get_sim_mood_info
+                    mood_str = _mood_fn(sim_info, include_reason=(sim_instance is not None))
+                except Exception:
+                    pass
+            if mood_str:
+                try:
+                    from ai_thought_reader.context_en import translate_mood_en
+                    mood_str = translate_mood_en(mood_str)
+                except Exception:
+                    pass
+                lines.append(f"- Current Mood: {mood_str}")
             else:
                 try:
                     if hasattr(sim_info, "get_mood"):
                         m = sim_info.get_mood()
                         if m:
-                            lines.append(f"- Current Mood: {getattr(m, 'name', str(m))}")
+                            raw_m = getattr(m, "__name__", getattr(m, "name", str(m)))
+                            if "Mood_" in raw_m:
+                                raw_m = raw_m.split("Mood_")[-1]
+                            raw_m = raw_m.replace("'", "").replace("<class ", "").replace(">", "").strip()
+                            lines.append(f"- Current Mood: {raw_m.capitalize()}")
                 except Exception:
                     pass
 
         if get_chat_context_flag("chat_location"):
-            if is_on_active_lot:
+            if is_direct_dialogue:
+                lines.append(f"- Current Location: {_get_direct_dialogue_location(sim_info, is_en=True)}")
+            elif is_on_active_lot:
                 if _HAS_THOUGHT_READER and get_current_location:
                     try:
                         loc = get_current_location(sim_info)
@@ -747,25 +1184,122 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                         pass
                 lines.append(f"- Current Location: {loc}")
 
+        if get_chat_context_flag("needs") and (sim_instance is not None):
+            try:
+                from ai_thought_reader.context import get_sim_motives_summary
+                motives = get_sim_motives_summary(sim_info)
+                if motives:
+                    from ai_thought_reader.context_en import translate_motives_en
+                    lines.append(f"- Needs & Motives: {translate_motives_en('; '.join(motives))}")
+                else:
+                    lines.append("- Needs & Motives: All needs are satisfied (well-fed, rested, and comfortable)")
+            except Exception:
+                pass
+
+        if get_chat_context_flag("emergencies") and _HAS_THOUGHT_READER and get_fire_hazard_context:
+            try:
+                f_ctx = get_fire_hazard_context(sim_info, other_sim_info=other_sim_info, is_en=True)
+                if f_ctx:
+                    lines.append(f"- Emergency (FIRE): {f_ctx['summary']}")
+            except Exception:
+                pass
+
+        if get_chat_context_flag("emergencies") and _HAS_THOUGHT_READER and get_sim_labor_hazard_context:
+            try:
+                l_ctx = get_sim_labor_hazard_context(sim_info, other_sim_info=other_sim_info, is_en=True)
+                if l_ctx:
+                    lines.append(f"- Emergency (LABOR & CHILDBIRTH): {l_ctx['summary_en']}")
+            except Exception:
+                pass
+
+        # Clothing & Nudity (for live face-to-face dialogue or if chat_clothing enabled)
+        if is_direct_dialogue or get_chat_context_flag("chat_clothing"):
+            c_en, n_en = _get_direct_dialogue_clothing_and_nudity(sim_info, is_en=True)
+            if c_en:
+                lines.append(f"- Outfit: {c_en}")
+            if n_en:
+                try:
+                    from ai_social_pc.child_safety import should_hide_nudity_level
+                    hide_n = should_hide_nudity_level(sim_info)
+                except Exception:
+                    hide_n = False
+                if not hide_n:
+                    lines.append(f"- Degree of Nudity: {n_en}")
+
+        # Current Activity & Posture (for live face-to-face dialogue or if chat_activity enabled)
+        if is_direct_dialogue or get_chat_context_flag("chat_activity"):
+            if _HAS_THOUGHT_READER:
+                try:
+                    from ai_thought_reader.context import get_current_activity, get_sim_held_object_name
+                    from ai_thought_reader.context_en import translate_activity_en
+                    act_ru = get_current_activity(sim_info)
+                    if act_ru:
+                        act_en = translate_activity_en(act_ru)
+                        held_en = get_sim_held_object_name(sim_info, is_en=True)
+                        if held_en and "holding in hands" not in act_en.lower():
+                            act_en = f"{act_en.rstrip('.')}. Holding in hands: {held_en}"
+                        lines.append(f"- Current Action: {act_en}")
+                except Exception as ex_act:
+                    log_exception("Error getting sim activity & posture for profile", ex_act)
+
+        # Nearby Sims block (for live face-to-face dialogue or if chat_nearby enabled)
+        if is_direct_dialogue or get_chat_context_flag("chat_nearby"):
+            exclude_ids = set()
+            s_id = getattr(sim_info, "sim_id", 0)
+            if s_id:
+                exclude_ids.add(int(s_id))
+            if other_sim_info:
+                o_id = getattr(other_sim_info, "sim_id", 0)
+                if o_id:
+                    exclude_ids.add(int(o_id))
+            nearby_entries = []
+            if _HAS_THOUGHT_READER:
+                try:
+                    from ai_thought_reader.context import get_nearby_sims_info
+                    nearby_entries = get_nearby_sims_info(sim_info, max_sims=5, exclude_sim_ids=exclude_ids)
+                except Exception as ex_nb:
+                    log_exception("Error getting nearby sims for profile", ex_nb)
+            if nearby_entries:
+                lines.append("- Nearby Sims (Present in the room / nearby):")
+                for n_sim in nearby_entries:
+                    try:
+                        from ai_thought_reader.context_en import translate_nearby_sim_en
+                        lines.append(f"  • {translate_nearby_sim_en(n_sim)}")
+                    except Exception:
+                        lines.append(f"  • {n_sim}")
+            else:
+                lines.append("- Nearby Sims: No one nearby (talking in private)")
+
         if get_chat_context_flag("chat_traits"):
+            traits = None
             if _HAS_THOUGHT_READER and get_sim_traits_info:
                 try:
                     traits = get_sim_traits_info(sim_info)
-                    if traits:
-                        t_str = ", ".join(traits)
-                        try:
-                            from ai_thought_reader.context_en import translate_traits_en
-                            t_str = translate_traits_en(t_str)
-                        except Exception:
-                            pass
-                        lines.append(f"- Character Traits: {t_str}")
                 except Exception:
                     pass
+            if not traits:
+                try:
+                    from ai_thought_reader import context as _tr_ctx
+                    _traits_fn = _tr_ctx.get_sim_traits_info
+                    traits = _traits_fn(sim_info)
+                except Exception:
+                    pass
+            if traits:
+                t_str = ", ".join(traits)
+                try:
+                    from ai_thought_reader.context_en import translate_traits_en
+                    t_str = translate_traits_en(t_str)
+                except Exception:
+                    pass
+                lines.append(f"- Character Traits: {t_str}")
             else:
                 try:
                     trait_tracker = getattr(sim_info, "trait_tracker", None)
                     if trait_tracker is not None:
-                        t_names = [getattr(t, "__name__", str(t)) for t in trait_tracker.personality_traits]
+                        t_names = []
+                        for t in getattr(trait_tracker, "personality_traits", ()):
+                            t_raw = getattr(t, "__name__", str(t)).replace("trait_", "").replace("Trait_", "").strip()
+                            t_names.append(t_raw.capitalize())
                         if t_names:
                             lines.append(f"- Character Traits: {', '.join(t_names)}")
                 except Exception:
@@ -804,7 +1338,7 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                 except Exception:
                     pass
 
-        if get_chat_context_flag("chat_pregnancy") and _HAS_THOUGHT_READER and get_sim_pregnancy_info:
+        if (is_direct_dialogue or get_chat_context_flag("chat_pregnancy")) and _HAS_THOUGHT_READER and get_sim_pregnancy_info:
             try:
                 preg = get_sim_pregnancy_info(sim_info)
                 if preg:
@@ -840,8 +1374,23 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                     except Exception:
                         pass
                     lines.append(f"- Career & Profession: {career}")
+                    try:
+                        from ai_thought_reader.context import get_sim_education_info
+                        edu_en = get_sim_education_info(sim_info, is_en=True)
+                        if edu_en:
+                            lines.append(f"- Higher Education & Degree: {edu_en}")
+                    except Exception:
+                        pass
             except Exception:
                 pass
+
+        try:
+            from ai_thought_reader.context import get_sim_active_lot_role
+            active_role_en = get_sim_active_lot_role(sim_info, sim_instance, is_en=True)
+            if active_role_en:
+                lines.append(f"- Active Lot Role / Service Duty: {active_role_en} (currently on duty on this lot)")
+        except Exception:
+            pass
 
         if get_chat_context_flag("chat_aspiration") and _HAS_THOUGHT_READER and get_sim_aspiration_info:
             try:
@@ -869,6 +1418,25 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
             except Exception:
                 pass
 
+        if get_chat_context_flag("chat_clubs"):
+            if _HAS_THOUGHT_READER:
+                try:
+                    from ai_thought_reader.context import get_sim_clubs_info
+                    clubs_en = get_sim_clubs_info(sim_info, is_en=True)
+                    if clubs_en:
+                        lines.append(f"- Clubs: {'; '.join(clubs_en)}")
+                except Exception:
+                    pass
+
+        if get_chat_context_flag("recent_dialogs"):
+            try:
+                from ai_social_pc.conversation_log import format_recent_conversations_for_prompt
+                conv_log_en = format_recent_conversations_for_prompt(sim_info, is_en=True)
+                if conv_log_en:
+                    lines.append(conv_log_en)
+            except Exception:
+                pass
+
         clean_lines = []
         for line in lines:
             if line.startswith("- Additional Lore (Personal Backstory):"):
@@ -881,10 +1449,23 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                     clean_lines.append(line)
             else:
                 clean_lines.append(line)
+        try:
+            from ai_thought_reader.last_thought_tracker import get_sim_last_thought_context
+            lt_en = get_sim_last_thought_context(sim_info, is_en=True)
+            if lt_en:
+                clean_lines.append(lt_en)
+        except Exception:
+            pass
         return "\n".join(clean_lines)
 
     lines = []
-    lines.append(f"- Имя: {full_name}")
+    trapped_tag = ""
+    try:
+        from ai_thought_reader.trapped_detector import get_sim_trapped_status
+        trapped_tag = get_sim_trapped_status(sim_info, is_en=False)
+    except Exception:
+        pass
+    lines.append(f"- Имя: {full_name}{trapped_tag}")
     gender_map = {"MALE": "Мужской", "FEMALE": "Женский"}
     age_map = {
         "BABY": "Новорожденный",
@@ -955,6 +1536,20 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
         except Exception:
             pass
 
+    # Live-in Household Staff (Domestic servants: Butler, Live-in Nanny, Maid, Gardener)
+    if (get_chat_context_flag("chat_roommates") or get_chat_context_flag("chat_livein_staff")) and _HAS_THOUGHT_READER:
+        try:
+            from ai_thought_reader.context import get_household_livein_staff_info
+            livein_staff = get_household_livein_staff_info(sim_info, is_en=False)
+            if livein_staff:
+                lines.append("- Живущая прислуга в доме (дворецкий, няня, горничная):")
+                for staff_entry in livein_staff:
+                    lines.append(f"  • {staff_entry}")
+            else:
+                lines.append("- Живущая прислуга в доме: Нет постоянной прислуги")
+        except Exception:
+            pass
+
     # Household Pets
     if get_chat_context_flag("chat_pets") and _HAS_THOUGHT_READER and get_household_pets_info:
         try:
@@ -968,33 +1563,62 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
         except Exception:
             pass
 
+    try:
+        from ai_thought_reader.context import get_sim_clubs_info
+        clubs_ru = get_sim_clubs_info(sim_info, is_en=False)
+        if not clubs_ru:
+            lines.append("- Членство в клубах: Не состоит в клубах")
+        elif len(clubs_ru) == 1:
+            lines.append(f"- Членство в клубах: {clubs_ru[0]}")
+        else:
+            lines.append(f"- Членство в клубах (всего {len(clubs_ru)}):")
+            for c_str in clubs_ru:
+                lines.append(f"  • {c_str}")
+    except Exception:
+        lines.append("- Членство в клубах: Не состоит в клубах")
+
     # Mood:
     # Crucial user requirement:
     # If on active lot -> full mood with dominant buff reason (e.g. "Счастливое (Причина: Отличная еда)")
     # If on another lot -> basic mood WITHOUT buff reason (e.g. "Счастливое")
     if get_chat_context_flag("chat_mood"):
+        mood_str = None
         if _HAS_THOUGHT_READER and get_sim_mood_info:
             try:
-                mood_str = get_sim_mood_info(sim_info, include_reason=is_on_active_lot)
-                if mood_str:
-                    lines.append(f"- Текущее настроение: {mood_str}")
+                mood_str = get_sim_mood_info(sim_info, include_reason=(sim_instance is not None))
             except Exception:
                 pass
-        else:
+        if not mood_str:
+            try:
+                from ai_thought_reader import context as _tr_ctx
+                _mood_fn = _tr_ctx.get_sim_mood_info
+                mood_str = _mood_fn(sim_info, include_reason=(sim_instance is not None))
+            except Exception:
+                pass
+        if not mood_str:
             try:
                 if hasattr(sim_info, "get_mood"):
                     m = sim_info.get_mood()
                     if m:
-                        lines.append(f"- Текущее настроение: {getattr(m, 'name', str(m))}")
+                        raw_m = getattr(m, "__name__", getattr(m, "name", str(m)))
+                        if "Mood_" in raw_m:
+                            raw_m = raw_m.split("Mood_")[-1]
+                        raw_m = raw_m.replace("'", "").replace("<class ", "").replace(">", "").strip().lower()
+                        from ai_thought_reader.context import MOOD_TRANSLATIONS
+                        mood_str = MOOD_TRANSLATIONS.get(raw_m, raw_m.capitalize())
             except Exception:
                 pass
+        if mood_str:
+            lines.append(f"- Текущее настроение: {mood_str}")
 
     # Location:
     # Crucial user requirement:
     # If on active lot -> full location with inside/outside/world
     # If on another lot -> "Находится на другом участке" (without inside/outside and without claiming they are on the player's active lot)
     if get_chat_context_flag("chat_location"):
-        if is_on_active_lot:
+        if is_direct_dialogue:
+            lines.append(f"- Текущая локация: {_get_direct_dialogue_location(sim_info, is_en=False)}")
+        elif is_on_active_lot:
             if _HAS_THOUGHT_READER and get_current_location:
                 try:
                     loc = get_current_location(sim_info)
@@ -1023,21 +1647,111 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                     pass
             lines.append(f"- Текущая локация: {loc}")
 
+    if get_chat_context_flag("needs") and (sim_instance is not None):
+        try:
+            from ai_thought_reader.context import get_sim_motives_summary
+            motives = get_sim_motives_summary(sim_info)
+            if motives:
+                lines.append(f"- Состояние потребностей: {'; '.join(motives)}")
+            else:
+                lines.append("- Состояние потребностей: Все потребности в норме (персонаж сыт, полон сил и не испытывает нужды)")
+        except Exception:
+            pass
+
+    if get_chat_context_flag("emergencies") and _HAS_THOUGHT_READER and get_fire_hazard_context:
+        try:
+            f_ctx = get_fire_hazard_context(sim_info, other_sim_info=other_sim_info, is_en=False)
+            if f_ctx:
+                lines.append(f"- Чрезвычайная ситуация (ПОЖАР): {f_ctx['summary']}")
+        except Exception:
+            pass
+
+    if get_chat_context_flag("emergencies") and _HAS_THOUGHT_READER and get_sim_labor_hazard_context:
+        try:
+            l_ctx = get_sim_labor_hazard_context(sim_info, other_sim_info=other_sim_info, is_en=False)
+            if l_ctx:
+                lines.append(f"- Чрезвычайная ситуация (СХВАТКИ И РОДЫ): {l_ctx['summary']}")
+        except Exception:
+            pass
+
+    # Clothing & Nudity (for live face-to-face dialogue or if chat_clothing enabled)
+    if is_direct_dialogue or get_chat_context_flag("chat_clothing"):
+        c_ru, n_ru = _get_direct_dialogue_clothing_and_nudity(sim_info, is_en=False)
+        if c_ru:
+            lines.append(f"- Одежда: {c_ru}")
+        if n_ru:
+            try:
+                from ai_social_pc.child_safety import should_hide_nudity_level
+                hide_n = should_hide_nudity_level(sim_info)
+            except Exception:
+                hide_n = False
+            if not hide_n:
+                lines.append(f"- Степень наготы: {n_ru}")
+
+    # Current Activity & Posture (for live face-to-face dialogue or if chat_activity enabled)
+    if is_direct_dialogue or get_chat_context_flag("chat_activity"):
+        if _HAS_THOUGHT_READER:
+            try:
+                from ai_thought_reader.context import get_current_activity, get_sim_held_object_name
+                act_ru = get_current_activity(sim_info)
+                if act_ru:
+                    held_ru = get_sim_held_object_name(sim_info, is_en=False)
+                    if held_ru and "в руках" not in act_ru.lower():
+                        act_ru = f"{act_ru.rstrip('.')}. В руках держит: {held_ru}"
+                    lines.append(f"- Текущее занятие: {act_ru}")
+            except Exception as ex_act:
+                log_exception("Error getting sim activity & posture for profile", ex_act)
+
+    # Nearby Sims block (for live face-to-face dialogue or if chat_nearby enabled)
+    if is_direct_dialogue or get_chat_context_flag("chat_nearby"):
+        exclude_ids = set()
+        s_id = getattr(sim_info, "sim_id", 0)
+        if s_id:
+            exclude_ids.add(int(s_id))
+        if other_sim_info:
+            o_id = getattr(other_sim_info, "sim_id", 0)
+            if o_id:
+                exclude_ids.add(int(o_id))
+        nearby_entries = []
+        if _HAS_THOUGHT_READER:
+            try:
+                from ai_thought_reader.context import get_nearby_sims_info
+                nearby_entries = get_nearby_sims_info(sim_info, max_sims=5, exclude_sim_ids=exclude_ids)
+            except Exception as ex_nb:
+                log_exception("Error getting nearby sims for profile", ex_nb)
+        if nearby_entries:
+            lines.append("- Кто находится рядом (в комнате / поблизости):")
+            for n_sim in nearby_entries:
+                lines.append(f"  • {n_sim}")
+        else:
+            lines.append("- Кто находится рядом: Поблизости никого нет (разговаривают наедине)")
+
 
     # Traits
     if get_chat_context_flag("chat_traits"):
+        traits = None
         if _HAS_THOUGHT_READER and get_sim_traits_info:
             try:
                 traits = get_sim_traits_info(sim_info)
-                if traits:
-                    lines.append(f"- Черты характера: {', '.join(traits)}")
             except Exception:
                 pass
+        if not traits:
+            try:
+                from ai_thought_reader import context as _tr_ctx
+                _traits_fn = _tr_ctx.get_sim_traits_info
+                traits = _traits_fn(sim_info)
+            except Exception:
+                pass
+        if traits:
+            lines.append(f"- Черты характера: {', '.join(traits)}")
         else:
             try:
                 trait_tracker = getattr(sim_info, "trait_tracker", None)
                 if trait_tracker is not None:
-                    t_names = [getattr(t, "__name__", str(t)) for t in trait_tracker.personality_traits]
+                    t_names = []
+                    for t in getattr(trait_tracker, "personality_traits", ()):
+                        t_raw = getattr(t, "__name__", str(t)).lower().replace("trait_", "").strip()
+                        t_names.append(t_raw.capitalize())
                     if t_names:
                         lines.append(f"- Черты характера: {', '.join(t_names)}")
             except Exception:
@@ -1078,7 +1792,7 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
                 pass
 
     # Pregnancy
-    if get_chat_context_flag("chat_pregnancy") and _HAS_THOUGHT_READER and get_sim_pregnancy_info:
+    if (is_direct_dialogue or get_chat_context_flag("chat_pregnancy")) and _HAS_THOUGHT_READER and get_sim_pregnancy_info:
         try:
             preg = get_sim_pregnancy_info(sim_info)
             if preg:
@@ -1101,8 +1815,22 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
             career = get_sim_career_info(sim_info)
             if career:
                 lines.append(f"- Профессия и должность: {career}")
+                try:
+                    from ai_thought_reader.context import get_sim_education_info
+                    edu_ru = get_sim_education_info(sim_info, is_en=False)
+                    lines.append(f"- Высшее образование / Диплом: {edu_ru if edu_ru else 'Нет высшего образования'}")
+                except Exception:
+                    lines.append("- Высшее образование / Диплом: Нет высшего образования")
         except Exception:
             pass
+
+    try:
+        from ai_thought_reader.context import get_sim_active_lot_role
+        active_role_ru = get_sim_active_lot_role(sim_info, sim_instance, is_en=False)
+        if active_role_ru:
+            lines.append(f"- Временная роль / служба на участке: {active_role_ru} (сейчас выполняет обязанности на лоте)")
+    except Exception:
+        pass
 
     # Aspiration
     if get_chat_context_flag("chat_aspiration") and _HAS_THOUGHT_READER and get_sim_aspiration_info:
@@ -1122,13 +1850,43 @@ def _build_sim_profile_summary(sim_info, is_actor: bool = False) -> str:
         except Exception:
             pass
 
+    # Active Memories (Personal & pair events)
+    if get_chat_context_flag("chat_memory"):
+        s_id = getattr(sim_info, "sim_id", None)
+        o_id = getattr(other_sim_info, "sim_id", 0) if other_sim_info else 0
+        if s_id:
+            try:
+                from ai_social_pc.memory_manager import format_memories_for_prompt
+                m_txt = format_memories_for_prompt(s_id, o_id)
+                if m_txt:
+                    lines.append(f"- Важные события и память персонажа:\n{m_txt}")
+            except Exception as e_mem:
+                log_exception("Error attaching memories to sim profile in chat_manager", e_mem)
+
+    if get_chat_context_flag("recent_dialogs"):
+        try:
+            from ai_social_pc.conversation_log import format_recent_conversations_for_prompt
+            conv_log_ru = format_recent_conversations_for_prompt(sim_info, is_en=False)
+            if conv_log_ru:
+                lines.append(conv_log_ru)
+        except Exception:
+            pass
+
+    try:
+        from ai_thought_reader.last_thought_tracker import get_sim_last_thought_context
+        lt_ru = get_sim_last_thought_context(sim_info, is_en=False)
+        if lt_ru:
+            lines.append(lt_ru)
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
 def _get_relationship_description(actor_info, recipient_info) -> str:
     """
     Gets relationship string describing who actor_info (sender) is to recipient_info (responder).
-    E.g. If actor is brother, returns 'Знакомый, Брат' or 'Жена, Сестра [инцест]'.
+    E.g. If actor is brother, returns 'Знакомый, Брат (Дружба: +45, Романтика: 0)' or 'Жена, Сестра [инцест]'.
     """
     is_en = False
     try:
@@ -1173,6 +1931,63 @@ def _get_relationship_description(actor_info, recipient_info) -> str:
                 pass
     except Exception:
         pass
+
+    # Append real numeric relationship score tracks (Friendship & Romance) and special bits
+    try:
+        actor_id = getattr(actor_info, "sim_id", 0)
+        target_id = getattr(recipient_info, "sim_id", 0)
+        if actor_id and target_id and actor_id != target_id:
+            rel_tracker = getattr(actor_info, "relationship_tracker", None) or getattr(recipient_info, "relationship_tracker", None)
+            if rel_tracker is not None:
+                fr_track = _get_friendship_track()
+                rom_track = _get_romance_track()
+                scores_info = []
+
+                if fr_track and hasattr(rel_tracker, "get_relationship_score"):
+                    try:
+                        fr_val = int(rel_tracker.get_relationship_score(target_id, fr_track))
+                        fr_lbl = "Friendship" if is_en else "Дружба"
+                        scores_info.append(f"{fr_lbl}: {fr_val:+d}")
+                    except Exception:
+                        pass
+
+                if rom_track and hasattr(rel_tracker, "get_relationship_score"):
+                    try:
+                        rom_val = int(rel_tracker.get_relationship_score(target_id, rom_track))
+                        if rom_val != 0:
+                            rom_lbl = "Romance" if is_en else "Романтика"
+                            scores_info.append(f"{rom_lbl}: {rom_val:+d}")
+                    except Exception:
+                        pass
+
+                # Check special bits from profile (Ex-partner, Enemies, Despised)
+                special_bits = []
+                if hasattr(rel_tracker, "get_relationship_bits"):
+                    try:
+                        bits = rel_tracker.get_relationship_bits(target_id)
+                        for b in bits:
+                            b_str = getattr(b, "__name__", str(b)).lower()
+                            if any(k in b_str for k in ("ex_spouse", "divorced")):
+                                special_bits.append("Ex-Spouses" if is_en else "Бывшие супруги")
+                            elif any(k in b_str for k in ("ex_boyfriend", "ex_girlfriend", "broken_up")):
+                                special_bits.append("Ex-Partners" if is_en else "Бывшие партнеры")
+                            elif any(k in b_str for k in ("despised", "nemesis")):
+                                special_bits.append("Despised / Enemies" if is_en else "Заклятые враги / Презрение")
+                            elif any(k in b_str for k in ("enemy", "enemies")) and "despised" not in b_str:
+                                special_bits.append("Enemies" if is_en else "Враги")
+                    except Exception:
+                        pass
+
+                extra_desc = []
+                if scores_info:
+                    extra_desc.append(", ".join(scores_info))
+                if special_bits:
+                    extra_desc.append(", ".join(list(dict.fromkeys(special_bits))))
+
+                if extra_desc:
+                    rel = f"{rel} ({'; '.join(extra_desc)})"
+    except Exception as ex_sc:
+        log_exception("Error appending numeric scores to relationship description", ex_sc)
 
     return rel
 
@@ -1410,7 +2225,24 @@ def apply_chat_relationship_impact(actor_sim_info, recipient_sim_info, delta_fr:
 
         rel_service = services.relationship_service() if services is not None else None
 
-        if delta_fr != 0 and hasattr(rel_tracker, "add_relationship_score"):
+        # Scale positive deltas to prevent relationships instantly maxing (+5..+15 -> +1..+3)
+        # Negative consequences remain full force for realistic drama and conflict
+        def _scale_delta(raw_delta: int) -> float:
+            if raw_delta <= 0:
+                return float(raw_delta)
+            return float(max(1.0, min(3.0, round(raw_delta * 0.22))))
+
+        try:
+            from ai_social_pc.child_safety import can_apply_romance
+            if not can_apply_romance(actor_sim_info, recipient_sim_info):
+                delta_rom = 0
+        except Exception:
+            pass
+
+        eff_delta_fr = _scale_delta(delta_fr) if delta_fr != 0 else 0.0
+        eff_delta_rom = _scale_delta(delta_rom) if delta_rom != 0 else 0.0
+
+        if eff_delta_fr != 0 and hasattr(rel_tracker, "add_relationship_score"):
             fr_track = _get_friendship_track()
             old_fr = None
             if hasattr(rel_tracker, "get_relationship_score"):
@@ -1420,9 +2252,9 @@ def apply_chat_relationship_impact(actor_sim_info, recipient_sim_info, delta_fr:
                     pass
 
             if fr_track is not None:
-                rel_tracker.add_relationship_score(target_id, float(delta_fr), fr_track)
+                rel_tracker.add_relationship_score(target_id, eff_delta_fr, fr_track)
             else:
-                rel_tracker.add_relationship_score(target_id, float(delta_fr))
+                rel_tracker.add_relationship_score(target_id, eff_delta_fr)
 
             new_fr = None
             if hasattr(rel_tracker, "get_relationship_score"):
@@ -1433,9 +2265,9 @@ def apply_chat_relationship_impact(actor_sim_info, recipient_sim_info, delta_fr:
 
             old_s = f"{old_fr:.1f}" if old_fr is not None else "?"
             new_s = f"{new_fr:.1f}" if new_fr is not None else "?"
-            log(f"[RELATIONSHIP] Friendship between {actor_name} and {target_name}: {old_s} -> {new_s} (delta: {delta_fr:+d})")
+            log(f"[RELATIONSHIP] Friendship between {actor_name} and {target_name}: {old_s} -> {new_s} (delta: {eff_delta_fr:+.1f}, raw: {delta_fr:+d})")
 
-        if delta_rom != 0 and hasattr(rel_tracker, "add_relationship_score"):
+        if eff_delta_rom != 0 and hasattr(rel_tracker, "add_relationship_score"):
             rom_track = _get_romance_track()
             if rom_track is not None:
                 # Ensure romance track is instantiated in relationship tracker if not present yet
@@ -1454,7 +2286,7 @@ def apply_chat_relationship_impact(actor_sim_info, recipient_sim_info, delta_fr:
                     except Exception:
                         pass
 
-                rel_tracker.add_relationship_score(target_id, float(delta_rom), rom_track)
+                rel_tracker.add_relationship_score(target_id, eff_delta_rom, rom_track)
 
                 new_rom = None
                 if hasattr(rel_tracker, "get_relationship_score"):
@@ -1473,7 +2305,7 @@ def apply_chat_relationship_impact(actor_sim_info, recipient_sim_info, delta_fr:
 
                 old_s = f"{old_rom:.1f}" if old_rom is not None else "?"
                 new_s = f"{new_rom:.1f}" if new_rom is not None else "?"
-                log(f"[RELATIONSHIP] Romance between {actor_name} and {target_name}: {old_s} -> {new_s} (delta: {delta_rom:+d})")
+                log(f"[RELATIONSHIP] Romance between {actor_name} and {target_name}: {old_s} -> {new_s} (delta: {eff_delta_rom:+.1f}, raw: {delta_rom:+d})")
             else:
                 log(f"[RELATIONSHIP] Romance track not found, skipping romance delta {delta_rom:+d}", level="WARNING")
 
@@ -1597,13 +2429,32 @@ def _worker_chat_request(
         "message": message_text,
         "messages": formatted_messages,
     }
+    if get_chat_context_flag("memory"):
+        try:
+            # Only add to payload['memories'] if not already embedded in recipient_info profile
+            if "Важные события и память" not in recipient_info and "PAST EVENTS & MEMORIES" not in recipient_info:
+                from ai_social_pc.memory_manager import format_memories_for_prompt
+                mem_text = format_memories_for_prompt(actor_id, recipient_id)
+                if mem_text:
+                    payload["memories"] = mem_text
+        except Exception as _mem_e:
+            log_exception("Failed to attach memories to payload", _mem_e)
+
     try:
-        from ai_social_pc.memory_manager import format_memories_for_prompt
-        mem_text = format_memories_for_prompt(actor_id, recipient_id)
-        if mem_text:
-            payload["memories"] = mem_text
-    except Exception as _mem_e:
-        log_exception("Failed to attach memories to payload", _mem_e)
+        from ai_social_pc.dossier_manager import build_third_party_dossier
+        sim_info_mgr = services.sim_info_manager() if services else None
+        p_infos = []
+        if sim_info_mgr:
+            for sid_check in (actor_id, recipient_id):
+                si = sim_info_mgr.get(int(sid_check))
+                if si:
+                    p_infos.append(si)
+        if p_infos:
+            dossier_text = build_third_party_dossier(message_text, p_infos, is_en=_is_en())
+            if dossier_text:
+                payload["third_party_dossier"] = dossier_text
+    except Exception as e_dos:
+        log_exception("Failed to attach dossier to chat payload", e_dos)
 
     if extra_context:
         payload["extra_context"] = str(extra_context)
@@ -1636,6 +2487,13 @@ def _worker_chat_request(
 
             delta_rom = resp_json.get("delta_romance")
             delta_rom = int(delta_rom) if delta_rom is not None else local_rom
+            try:
+                from ai_social_pc.child_safety import can_apply_romance
+                if not can_apply_romance(actor_sim_info, recipient_sim_info):
+                    delta_rom = 0
+                    local_rom = 0
+            except Exception:
+                pass
 
             log(f"Received reply from {recipient_name}: '{clean_reply}' (FR={delta_fr:+d}, ROM={delta_rom:+d})")
 
@@ -1802,17 +2660,48 @@ def _worker_group_chat_request(
                     "formatted_line": f"- {prefix}{s}: {t}",
                 })
 
+        sender_info = _build_sim_profile_summary(actor_sim_info, is_actor=True)
+
         payload = {
             "type": "group_chat",
             "sender_name": sender_name,
+            "sender_info": sender_info,
+            "actor_info": sender_info,
             "group_name": group_name,
             "group_topic": group_topic,
             "message": message_text,
             "participants": participants,
             "messages": formatted_messages,
         }
+        full_extra = []
+        if sender_info:
+            full_extra.append(
+                f"ПРОФИЛЬ АВТОРА СООБЩЕНИЯ ({sender_name}):\n{sender_info}"
+                if not _is_en()
+                else f"MESSAGE SENDER PROFILE ({sender_name}):\n{sender_info}"
+            )
         if extra_context:
-            payload["extra_context"] = str(extra_context)
+            full_extra.append(str(extra_context))
+        try:
+            from ai_social_pc.dossier_manager import build_third_party_dossier
+            sim_info_mgr = services.sim_info_manager() if services else None
+            p_infos = []
+            if sim_info_mgr:
+                for p_obj in participants:
+                    pid = p_obj.get("sim_id") or p_obj.get("id")
+                    if pid:
+                        si = sim_info_mgr.get(int(pid))
+                        if si:
+                            p_infos.append(si)
+            if p_infos:
+                dossier_text = build_third_party_dossier(message_text, p_infos, is_en=_is_en())
+                if dossier_text:
+                    payload["third_party_dossier"] = dossier_text
+        except Exception as e_dos:
+            log_exception("Failed to attach dossier to group payload", e_dos)
+
+        if full_extra:
+            payload["extra_context"] = "\n\n".join(full_extra)
 
         conn = http.client.HTTPConnection(BRIDGE_HOST, BRIDGE_PORT, timeout=120)
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")

@@ -1,3 +1,4 @@
+from typing import Optional, List, Dict, Any, Tuple
 import re
 from ai_thought_reader.logger import log, log_exception
 
@@ -31,6 +32,7 @@ try:
         get_context_flag,
         get_custom_sim_lore,
         get_genealogy_max_relatives,
+        get_genealogy_max_depth,
         get_genealogy_type_flag,
         get_experimental_flag,
     )
@@ -38,6 +40,7 @@ except Exception:
     get_context_flag = lambda f: True
     get_custom_sim_lore = lambda s: ""
     get_genealogy_max_relatives = lambda: 100
+    get_genealogy_max_depth = lambda: 10
     get_genealogy_type_flag = lambda t: True
     get_experimental_flag = lambda f: True
 
@@ -264,6 +267,169 @@ def is_human_readable_text(s: str) -> bool:
     if any(bad in s_clean.lower() for bad in ["hash:", "tokens", "text_string", "{", "}", "0x", "<", "0b", "key:"]):
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# LOCALIZED STRING RESOLVER (STBL hash -> real Russian text)
+# _loc_text() does NOT convert a LocalizedString to
+# text (it only wraps it), so official game strings were never readable. The
+# table ru_strings.json (built from the game's own Strings_RUS_RU packages)
+# maps STBL hashes to the real text shown in the game UI.
+# ---------------------------------------------------------------------------
+_RU_STRINGS_TABLE = None
+_EN_STRINGS_TABLE = None
+
+
+def _load_strings_table(is_en: bool = False):
+    global _RU_STRINGS_TABLE, _EN_STRINGS_TABLE
+    if is_en:
+        if _EN_STRINGS_TABLE is not None:
+            return _EN_STRINGS_TABLE
+    else:
+        if _RU_STRINGS_TABLE is not None:
+            return _RU_STRINGS_TABLE
+    table = {}
+    tbl_name = "en_strings.json" if is_en else "ru_strings.json"
+    try:
+        import json as _json
+        import os as _os
+        data = None
+        here = _os.path.abspath(__file__)
+        low = here.lower()
+        idx = low.find(".ts4script")
+        if idx >= 0:
+            import zipfile as _zipfile
+            zpath = here[:idx + len(".ts4script")]
+            with _zipfile.ZipFile(zpath) as zf:
+                data = zf.read("ai_thought_reader/" + tbl_name)
+        else:
+            fpath = _os.path.join(_os.path.dirname(here), tbl_name)
+            if _os.path.exists(fpath):
+                with open(fpath, "rb") as fh:
+                    data = fh.read()
+        if data:
+            table = _json.loads(data.decode("utf-8"))
+    except Exception as e_tbl:
+        try:
+            log_exception("Failed to load " + tbl_name + " table", e_tbl)
+        except Exception:
+            pass
+    if is_en:
+        _EN_STRINGS_TABLE = table
+    else:
+        _RU_STRINGS_TABLE = table
+    return table
+
+
+def _load_ru_strings_table():
+    return _load_strings_table(is_en=False)
+
+
+def _load_en_strings_table():
+    return _load_strings_table(is_en=True)
+
+
+def _stbl_lookup(h, is_en: bool = None) -> str:
+    try:
+        if not h:
+            return ""
+        if is_en is None:
+            try:
+                from ai_thought_reader.localization import is_english
+                is_en = is_english()
+            except Exception:
+                is_en = False
+        k = "%08X" % (int(h) & 0xFFFFFFFF)
+        res = _load_strings_table(is_en).get(k, "")
+        if not res:
+            res = _load_strings_table(not is_en).get(k, "")
+        return res
+    except Exception:
+        return ""
+
+
+def _ru_lookup(h) -> str:
+    return _stbl_lookup(h, is_en=False)
+
+
+def _loc_text(loc, depth: int = 0, is_en: bool = None) -> str:
+    """Resolves ANY LocalizedString (official STBL, nested tokens, raw text) or str to real text."""
+    if loc is None or depth > 5:
+        return ""
+    if isinstance(loc, str):
+        return loc
+    try:
+        tokens = list(getattr(loc, "tokens", []) or [])
+    except Exception:
+        tokens = []
+    tok_texts = []
+    for t in tokens:
+        txt = ""
+        try:
+            raw = getattr(t, "raw_text", "")
+            if raw:
+                txt = str(raw)
+        except Exception:
+            pass
+        if not txt:
+            try:
+                has_nested = False
+                try:
+                    has_nested = t.HasField("text_string")
+                except Exception:
+                    has_nested = bool(getattr(t, "text_string", None))
+                if has_nested:
+                    txt = _loc_text(getattr(t, "text_string"), depth + 1)
+            except Exception:
+                pass
+        if not txt:
+            try:
+                num = getattr(t, "number", None)
+                if num:
+                    txt = str(num)
+            except Exception:
+                pass
+        tok_texts.append(txt)
+    try:
+        h = getattr(loc, "hash", 0)
+    except Exception:
+        h = 0
+    tmpl = _stbl_lookup(h, is_en=is_en)
+    if tmpl:
+        def _sub(m):
+            i = int(m.group(1))
+            return tok_texts[i] if i < len(tok_texts) else ""
+        try:
+            tmpl = re.sub(r"\{(\d+)\.[^}]*\}", _sub, tmpl)
+            tmpl = re.sub(r"\{(\d+)\}", _sub, tmpl)
+        except Exception:
+            pass
+        return tmpl.strip()
+    # no template known: user-entered / custom content raw text
+    joined = " ".join(x for x in tok_texts if x).strip()
+    if joined:
+        return joined
+    try:
+        s = extract_clean_localized_string(loc)
+        if s:
+            return s
+    except Exception:
+        pass
+    return ""
+
+
+def _humanize_tuning_name(name: str) -> str:
+    """Last resort for custom content and English fallback: 'recipe_Food_Homestyle_ChocolateCake-Single' -> 'Chocolate Cake'."""
+    if not name:
+        return ""
+    s = str(name).strip()
+    s = re.sub(r"^(?:object_|custom_)?(?:recipe_food_|recipe_drink_|recipe_craft_|recipe_|food_|drink_)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:plate_|bowl_|glass_|cup_|mug_|serving_|serving_large_|serving_small_)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:homestyle_|gourmet_|baking_|grandmeal_|canning_)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[-_](?:single|family|party|group|serving|large|medium|small|standard)$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[-_]", " ", s)
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    return s.strip().title()
 
 
 GHOST_DEATH_TRANSLATIONS = {
@@ -568,7 +734,7 @@ def _detect_ghost_death_cause(sim_info, is_en: bool = False) -> str:
                 if callable(dn):
                     dn = dn(sim_info)
                 if LocalizationHelperTuning is not None:
-                    raw_dn = LocalizationHelperTuning.get_raw_text(dn)
+                    raw_dn = _loc_text(dn)
                     if raw_dn and is_human_readable_text(str(raw_dn)):
                         raw_s = str(raw_dn).strip()
                         cleaned = re.sub(r'^(?:смерть\s+от|погиб\s+от|death\s+by|died\s+of)\s+', '', raw_s, flags=re.IGNORECASE).strip()
@@ -583,6 +749,14 @@ def _detect_ghost_death_cause(sim_info, is_en: bool = False) -> str:
 
 def get_sim_occult_info(sim_info, is_en: bool = False) -> str:
     """Accurately identifies the Sim's species / occult race with live form and death details."""
+    try:
+        sid = getattr(sim_info, "sim_id", 0)
+        from ai_thought_reader.lore_manager import get_custom_sim_race
+        custom_race = get_custom_sim_race(sid)
+        if custom_race and custom_race.strip():
+            return custom_race.strip()
+    except Exception:
+        pass
     base_race = "Человек"
     try:
         # 1. Check Ghost first
@@ -9913,6 +10087,67 @@ def get_vintage_glamour_action_details(sim_info, sim_instance, interactions_list
         ]):
             return "Чинно приветствует гостей у дверей особняка с безупречной выправкой дворецкого"
 
+        # Проверка чистоты комнат и пыли (Butler Check Dust)
+        if any(k in joined for k in [
+            "checkdust", "dustcheck", "inspectdust", "butlercheck", "проверкапыли", "проверитьпыль", "пыльнастене", "пыльнаполке"
+        ]):
+            return "Придирчиво проверяет чистоту комнат, проводя пальцем по поверхностям в поисках пыли"
+
+        # Звон в обеденный гонг (Butler Dinner Gong)
+        if any(k in joined for k in [
+            "ringgong", "dinnerbell", "butlerringgong", "звонитьвгонг", "обеденныйгонг", "созватькобеду"
+        ]):
+            return "Торжественно звонит в старинный бронзовый гонг, созывая семью к трапезе"
+
+        # Подача напитков и еды на подносе (Butler Tray Service)
+        if any(k in joined for k in [
+            "servetray", "carrytray", "butlerservedrink", "butlerservemeal", "butlerservefood", "подноснапитков", "податьнаподносе"
+        ]):
+            return "Подносит освежающие напитки и закуски на сияющем серебряном подносе"
+
+        # Стойка смирно / Ожидание распоряжений хозяев (Butler Stand at Attention)
+        if any(k in joined for k in [
+            "standattention", "waitfororders", "butlerautonomouswait", "стойкасмирно", "ожидаераспоряжений"
+        ]):
+            return "Стоит по стойке смирно с безупречной выправкой, ожидая распоряжений хозяев дома"
+
+        # Чистка серебра и полировка (Butler Polish Silverware)
+        if any(k in joined for k in [
+            "cleansilver", "butlerpolish", "полироватьсеребро", "чиститьсеребро", "натиратьбокалы"
+        ]):
+            return "Тщательно полирует антикварное серебро и натирает хрустальные бокалы до сияющего блеска"
+
+        # Массаж от дворецкого (Butler Massage)
+        if any(k in joined for k in [
+            "butlermassage", "butlergivemassage", "массаждворецкого"
+        ]):
+            return f"Делает расслабляющий профессиональный массаж плеч {target_name}" if target_name else "Делает расслабляющий профессиональный массаж плеч хозяину дома"
+
+        # Уход за садом особняка (Butler Garden)
+        if any(k in joined for k in [
+            "butlergarden", "саддворецкий"
+        ]):
+            return "Ухаживает за оранжереей и цветочными клумбами особняка по поручению хозяев"
+
+        # Ремонт и устранение поломок дворецким (Butler Repair)
+        if any(k in joined for k in [
+            "butlerrepair", "ремонтдворецкий"
+        ]):
+            return "Устраняет поломку и чинит домашнюю технику с невозмутимым достоинством дворецкого"
+
+        # Специфические обязанности, когда активный сим — дворецкий семьи
+        is_butler_sim = False
+        try:
+            is_butler_sim = bool("дворецк" in get_sim_domestic_staff_role(sim_info, is_en=False).lower())
+        except Exception:
+            pass
+
+        if is_butler_sim:
+            if any(k in joined for k in ["tendbar", "barmake", "mixdrink", "makecocktail", "pourdrink", "налитьнапиток", "бар"]):
+                return "Готовит изысканный коктейль за барной стойкой с профессиональным мастерством дворецкого"
+            if any(k in joined for k in ["cleantable", "cleanfloor", "tidy", "cleandish", "уборка", "прибирать"]):
+                return "Наводит безупречный порядок в комнатах особняка, прибирая и наводя лоск"
+
         # -------------------------------------------------------------
         # 2. ТУАЛЕТНЫЙ СТОЛИК (Vanity Table)
         # -------------------------------------------------------------
@@ -11642,7 +11877,7 @@ def get_sim_mood_info(sim_info, include_reason: bool = True) -> str:
                     loc_name = None
                     if hasattr(mood, "display_name") and LocalizationHelperTuning is not None:
                         try:
-                            raw_t = LocalizationHelperTuning.get_raw_text(mood.display_name)
+                            raw_t = _loc_text(mood.display_name)
                             if raw_t and is_human_readable_text(raw_t):
                                 loc_name = raw_t
                         except Exception:
@@ -11828,7 +12063,7 @@ WORLD_NAMES_RU = {
 # Enhanced World & Town Descriptions (for AI immersion & atmospheric context)
 # =========================================================================
 WORLD_DESCRIPTIONS_RU = {
-    "Виллоу Крик": "классический пригород американского Юга: тенистые аллеи, плакучие ивы, особняки в новоорлеанском колониальном стиле, магнолии, реки и болотистые протоки (байу)",
+    "Виллоу Крик": "уютный цветущий пригород: тенистые аллеи, плакучие ивы, парки, магнолии и традиционные жилые кварталы с красивыми особняками",
     "Оазис Спрингс": "солнечный пустынный оазис в стиле юго-запада США: пальмы, кактусы, каньоны из красного песчаника, ретро-модерн застройка середины века (Mid-century modern) и сухой знойный климат",
     "Ньюкрест": "просторный тихий пригород с аккуратными лужайками, городским парком и видом на современный скайлайн вдалеке",
     "Магнолия Променейд": "оживленная торговая набережная у залива: бутики, магазины, кирпичные мостовые и уютные прибрежные скверы",
@@ -11898,7 +12133,7 @@ def get_current_world_name() -> str:
                     if loc_name:
                         from sims4.localization import LocalizationHelperTuning
                         if LocalizationHelperTuning is not None:
-                            raw_t = LocalizationHelperTuning.get_raw_text(loc_name)
+                            raw_t = _loc_text(loc_name)
                             if raw_t:
                                 return str(raw_t)
             except Exception:
@@ -11967,7 +12202,7 @@ def get_current_world_name() -> str:
                                 if loc_name:
                                     from sims4.localization import LocalizationHelperTuning
                                     if LocalizationHelperTuning is not None:
-                                        raw_t = LocalizationHelperTuning.get_raw_text(loc_name)
+                                        raw_t = _loc_text(loc_name)
                                         if raw_t:
                                             return str(raw_t)
                 except Exception:
@@ -12115,11 +12350,13 @@ def get_current_location(sim_info) -> str:
             home_world = get_sim_home_world_name(sim_info)
             if home_world:
                 from ai_thought_reader.config import get_experimental_flag
+                from ai_thought_reader import world_lore_manager
+                eff_home = world_lore_manager.get_effective_world_name(home_world)
                 if get_experimental_flag("enhanced_world_descriptions"):
-                    desc = WORLD_DESCRIPTIONS_RU.get(home_world, "")
+                    desc = world_lore_manager.get_effective_world_desc(home_world)
                     if desc:
-                        return f"Находится на другом участке (г. {home_world} — {desc})"
-                return f"Находится на другом участке (г. {home_world})"
+                        return f"Находится на другом участке (г. {eff_home} — {desc})"
+                return f"Находится на другом участке (г. {eff_home})"
             return "Находится на другом участке"
 
         loc_desc = "У себя дома"
@@ -12227,11 +12464,13 @@ def get_current_location(sim_info) -> str:
         city_name = get_current_world_name()
         if city_name:
             from ai_thought_reader.config import get_experimental_flag
+            from ai_thought_reader import world_lore_manager
+            eff_city = world_lore_manager.get_effective_world_name(city_name)
             if get_experimental_flag("enhanced_world_descriptions"):
-                desc = WORLD_DESCRIPTIONS_RU.get(city_name, "")
+                desc = world_lore_manager.get_effective_world_desc(city_name)
                 if desc:
-                    return f"{loc_desc} (г. {city_name} — {desc})"
-            return f"{loc_desc} (г. {city_name})"
+                    return f"{loc_desc} (г. {eff_city} — {desc})"
+            return f"{loc_desc} (г. {eff_city})"
         return loc_desc
     except Exception as e:
         log_exception("Error getting current location", e)
@@ -12239,8 +12478,4160 @@ def get_current_location(sim_info) -> str:
     return "Находится на другом участке"
 
 
+
+def is_sim_on_active_lot(sim_info) -> bool:
+    """Returns True if the Sim is physically spawned and present on the active lot."""
+    try:
+        if not sim_info:
+            return False
+        sim_inst = sim_info.get_sim_instance() if hasattr(sim_info, "get_sim_instance") else None
+        if sim_inst is None:
+            return False
+        if hasattr(sim_inst, "is_on_active_lot"):
+            return bool(sim_inst.is_on_active_lot())
+        return True
+    except Exception:
+        return False
+
+
+
+
+
+# === RESTORED CONSTANTS & HELPER FUNCTIONS ===
+FEMALE_AGE_TRANSLATIONS = {'ADULT': 'Взрослая',
+ 'BABY': 'Новорожденная',
+ 'CHILD': 'Девочка',
+ 'ELDER': 'Пожилая',
+ 'INFANT': 'Младенец (девочка)',
+ 'TEEN': 'Подросток',
+ 'TODDLER': 'Малышка',
+ 'YOUNGADULT': 'Молодая'}
+
+MALE_AGE_TRANSLATIONS = {'ADULT': 'Взрослый',
+ 'BABY': 'Новорожденный',
+ 'CHILD': 'Мальчик',
+ 'ELDER': 'Пожилой',
+ 'INFANT': 'Младенец (мальчик)',
+ 'TEEN': 'Подросток',
+ 'TODDLER': 'Малыш',
+ 'YOUNGADULT': 'Молодой'}
+
+CRAFT_ITEMS_CATALOG = [(['onigiri', 'онигири'], 'Онигири'),
+ (['nigiri', 'нигири'], 'Нигири'),
+ (['maki', 'маки'], 'Маки-роллы'),
+ (['sushi', 'суши'], 'Суши'),
+ (['ramen', 'рамен'], 'Рамен'),
+ (['dango', 'данго'], 'Данго'),
+ (['yakitori', 'якитори'], 'Якитори'),
+ (['soba', 'соба'], 'Лапша соба'),
+ (['udon', 'удон'], 'Лапша удон'),
+ (['pho', 'фо-бо', 'фобо'], 'Фо-бо'),
+ (['dumpling', 'dimsum', 'пельмен', 'димсам', 'gyoza', 'гёдза'], 'Пельмени / Димсамы'),
+ (['curry', 'карри'], 'Карри'),
+ (['lumpia', 'люмпия'], 'Люмпия'),
+ (['banhmi', 'баньми'], 'Бань ми'),
+ (['bao', 'бао', 'porkbun'], 'Булочки бао'),
+ (['mapotofu', 'tofu', 'тофу'], 'Тофу'),
+ (['gardensalad', 'осенний салат', 'садовый салат'], 'Осенний салат'),
+ (['caprese', 'капрезе'], 'Салат капрезе'),
+ (['caesar', 'цезарь'], 'Салат Цезарь'),
+ (['salad', 'салат'], 'Салат'),
+ (['grilledcheese', 'жареный сыр'], 'Горячий бутерброд с сыром'),
+ (['macandcheese', 'macaroni', 'макароны с сыром'], 'Макароны с сыром'),
+ (['spaghetti', 'спагетти'], 'Спагетти'),
+ (['bolognese', 'болоньезе'], 'Спагетти Болоньезе'),
+ (['carbonara', 'карбонара'], 'Паста Карбонара'),
+ (['lasagna', 'лазань'], 'Лазанья'),
+ (['pasta', 'паста', 'ravioli', 'равиоли'], 'Паста'),
+ (['pancake', 'pancakes', 'блинчик', 'блины'], 'Блинчики'),
+ (['waffle', 'waffles', 'вафл'], 'Вафли'),
+ (['frenchtoast', 'французские тосты'], 'Французские тосты'),
+ (['eggsandtoast', 'яичница с тостами'], 'Яичница с тостами'),
+ (['scrambledeggs', 'яичница', 'яичниц'], 'Яичница'),
+ (['omelet', 'omlet', 'омлет'], 'Омлет'),
+ (['toast', 'тост'], 'Тосты'),
+ (['cereal', 'хлопья'], 'Хлопья с молоком'),
+ (['oatmeal', 'овсянк'], 'Овсяная каша'),
+ (['cheeseburger', 'чизбургер'], 'Чизбургер'),
+ (['hamburger', 'burger', 'гамбургер', 'бургер'], 'Бургер'),
+ (['hotdog', 'frankfurter', 'хот-дог', 'хотдог'], 'Хот-доги'),
+ (['sandwich', 'panini', 'blt', 'сэндвич', 'бутерброд'], 'Сэндвич'),
+ (['chili', 'чили'], 'Чили'),
+ (['clamchowder', 'chowder', 'чаудер'], 'Суп из морепродуктов'),
+ (['tomatosoup', 'томатный суп'], 'Томатный суп'),
+ (['butternutsquash', 'тыквенный суп'], 'Тыквенный суп'),
+ (['chickennoodle', 'куриный суп'], 'Куриный суп с лапшой'),
+ (['minestrone', 'минестроне'], 'Минестроне'),
+ (['soup', 'broth', 'stew', 'суп', 'рагу', 'похлебк', 'борщ'], 'Суп'),
+ (['steak', 'ribeye', 'filet', 'tritip', 'стейк'], 'Стейк'),
+ (['porkchop', 'отбивн', 'свинин'], 'Свиные отбивные'),
+ (['roast', 'beef', 'жаркое', 'говядин'], 'Мясное жаркое'),
+ (['ribs', 'ребрышк'], 'Ребрышки барбекю'),
+ (['meatloaf', 'мясной рулет'], 'Мясной рулет'),
+ (['chicken', 'turkey', 'куриц', 'индейк'], 'Курица / Индейка'),
+ (['salmon', 'лосось', 'семг'], 'Лосось'),
+ (['fishandchips', 'рыба с картофелем'], 'Рыба с жареным картофелем'),
+ (['fish', 'trout', 'tilapia', 'рыб', 'форель'], 'Рыбное блюдо'),
+ (['taco', 'tacos', 'тако'], 'Тако'),
+ (['burrito', 'буррито'], 'Буррито'),
+ (['quesadilla', 'кесадиль'], 'Кесадилья'),
+ (['fajita', 'фахитас'], 'Фахитас'),
+ (['enchilada', 'энчилад'], 'Энчилада'),
+ (['pizza', 'пицц'], 'Пицца'),
+ (['casserole', 'запеканк'], 'Запеканка'),
+ (['potpie', 'shepherdspie', 'мясной пирог'], 'Мясной пирог'),
+ (['frittata', 'quiche', 'киш', 'фриттата'], 'Киш / Фриттата'),
+ (['lobster', 'thermidor', 'лобстер'], 'Лобстер «Термидор»'),
+ (['crabcake', 'крабов'], 'Крабовые котлетки'),
+ (['cioppino', 'чоппино'], 'Чоппино (рыбное рагу)'),
+ (['salmonsalt', 'лосось в соляной корке'], 'Лосось в соляной корке'),
+ (['prosciutto', 'прошутто'], 'Спаржа в прошутто'),
+ (['asparagus', 'спарж'], 'Спаржа'),
+ (['truffle', 'трюфел'], 'Блюдо с трюфелями'),
+ (['tortellini', 'тортеллини'], 'Тортеллини'),
+ (['duck', 'утка'], 'Утка конфи'),
+ (['rackoflamb', 'lamb', 'ягненок', 'каре ягненка'], 'Каре ягненка'),
+ (['beefwellington', 'веллингтон'], 'Говядина «Веллингтон»'),
+ (['chocolatecake', 'шоколадный торт'], 'Шоколадный торт'),
+ (['whitecake', 'белый торт'], 'Белый торт'),
+ (['strawberrycake', 'клубничный торт'], 'Клубничный торт'),
+ (['weddingcake', 'свадебный торт'], 'Свадебный торт'),
+ (['cheesecake', 'чизкейк'], 'Чизкейк'),
+ (['cake', 'торт'], 'Торт'),
+ (['applepie', 'яблочный пирог'], 'Яблочный пирог'),
+ (['pumpkinpie', 'тыквенный пирог'], 'Тыквенный пирог'),
+ (['pie', 'пирог', 'тарт', 'tart'], 'Пирог'),
+ (['cupcake', 'cupcakes', 'капкейк', 'кекс'], 'Капкейки'),
+ (['muffin', 'muffins', 'маффин'], 'Маффины'),
+ (['chocolatechip', 'печенье с шоколадом'], 'Печенье с шоколадной крошкой'),
+ (['cookie', 'cookies', 'печенье'], 'Печенье'),
+ (['brownie', 'brownies', 'брауни'], 'Брауни'),
+ (['croissant', 'круассан'], 'Круассаны'),
+ (['donut', 'doughnut', 'пончик'], 'Пончики'),
+ (['bagel', 'бейгл'], 'Бейглы'),
+ (['souffle', 'суфле'], 'Суфле'),
+ (['bakedalaska', 'торт аляска'], 'Торт «Аляска»'),
+ (['cannoli', 'канноли'], 'Канноли'),
+ (['tiramisu', 'тирамису'], 'Тирамису'),
+ (['eclair', 'эклер'], 'Эклеры'),
+ (['scone', 'scones', 'скон'], 'Сконы'),
+ (['cinnamonroll', 'булочки с корицей'], 'Булочки с корицей'),
+ (['bread', 'baguette', 'sourdough', 'хлеб', 'багет'], 'Свежий хлеб'),
+ (['mojito', 'мохито'], 'Пылающий мохито'),
+ (['margarita', 'маргарита'], 'Маргарита'),
+ (['martini', 'мартини'], 'Мартини'),
+ (['cosmopolitan', 'космополитен'], 'Космополитен'),
+ (['whiskeysour', 'sour', 'сауэр'], 'Виски Сауэр'),
+ (['bloodymary', 'кровавая мэри'], 'Кровавая Мэри'),
+ (['pinacolada', 'пина колада'], 'Пина Колада'),
+ (['maitai', 'май тай'], 'Май Тай'),
+ (['sexonthebeach', 'секс на пляже'], 'Секс на пляже'),
+ (['longisland', 'лонг-айленд'], 'Лонг-Айленд'),
+ (['mimosa', 'мимоза'], 'Мимоза'),
+ (['bellini', 'беллини'], 'Беллини'),
+ (['daquiri', 'daiquiri', 'дайкири'], 'Дайкири'),
+ (['screwdriver', 'отвертк'], 'Коктейль «Отвертка»'),
+ (['simsoda', 'fizz', 'шипучк'], 'Шипучка'),
+ (['craftbeer', 'beerbrewing', 'homebrew', 'craft_beer', 'пивоварен', 'крафтовоепиво'],
+  'Крафтовое пиво'),
+ (['lager', 'лагер'], 'Лагер'),
+ (['ale', 'эль'], 'Эль'),
+ (['stout', 'стаут'], 'Стаут'),
+ (['ipa', 'ипа'], 'IPA'),
+ (['pilsner', 'пилснер'], 'Пилснер'),
+ (['potion', 'зелье'], 'Волшебное зелье'),
+ (['nectar', 'нектар'], 'Бутылка нектара'),
+ (['coffee', 'espresso', 'latte', 'cappuccino', 'кофе', 'эспрессо', 'латте'], 'Кофе'),
+ (['tea', 'чай'], 'Чай'),
+ (['boba', 'bubbletea', 'бабл'], 'Бабл-ти'),
+ (['elephant', 'слон'], 'Скульптура слона'),
+ (['horse', 'лошад'], 'Скульптура лошади'),
+ (['dragon', 'дракон'], 'Скульптура дракона'),
+ (['bear', 'медвед'], 'Скульптура медведя'),
+ (['rabbit', 'bunny', 'кролик', 'заяц'], 'Скульптура кролика'),
+ (['chair', 'diningchair', 'стул'], 'Деревянный стул'),
+ (['table', 'diningtable', 'стол'], 'Деревянный стол'),
+ (['bench', 'лавочк', 'скамь'], 'Садовая лавочка'),
+ (['planter', 'кашпо', 'клумб'], 'Кашпо для растений'),
+ (['bathtub', 'ванна'], 'Деревянная ванна'),
+ (['toilet', 'унитаз'], 'Деревянный унитаз'),
+ (['violin', 'скрипк'], 'Скрипка'),
+ (['guitar', 'гитар'], 'Гитара'),
+ (['sweater', 'свитер'], 'Уютный свитер'),
+ (['beanie', 'шапк'], 'Вязаная шапка'),
+ (['socks', 'носк'], 'Вязаные носки'),
+ (['scarf', 'шарф'], 'Вязаный шарф'),
+ (['plushie', 'игрушк'], 'Вязаная игрушка'),
+ (['rug', 'коврик'], 'Вязаный коврик'),
+ (['pouf', 'пуф'], 'Вязаный пуф'),
+ (['pattern', 'crossstitch', 'узор', 'вышивк'], 'Цветочный узор'),
+ (['ring', 'кольцо'], 'Кольцо с драгоценным камнем'),
+ (['necklace', 'ожерелье'], 'Ожерелье'),
+ (['bracelet', 'браслет'], 'Браслет'),
+ (['earrings', 'серьги'], 'Серьги'),
+ (['skull', 'череп'], 'Череп из кристалла'),
+ (['emerald', 'изумруд'], 'Изумрудный шар'),
+ (['ruby', 'рубин'], 'Ограненный рубин'),
+ (['diamond', 'алмаз'], 'Ограненный алмаз'),
+ (['sapphire', 'сапфир'], 'Ограненный сапфир'),
+ (['rose', 'роз'], 'Букет роз'),
+ (['tulip', 'тюльпан'], 'Букет тюльпанов'),
+ (['lily', 'лили'], 'Букет лилий'),
+ (['orchid', 'орхиде'], 'Букет орхидей'),
+ (['sunflower', 'подсолнух'], 'Букет подсолнухов'),
+ (['daisy', 'ромашк'], 'Букет ромашек'),
+ (['bouquet', 'букет'], 'Цветочный букет'),
+ (['flirty', 'кокетлив'], 'Кокетливая картина'),
+ (['angry', 'сердит', 'гневн'], 'Сердитая картина'),
+ (['sad', 'грустн', 'печальн'], 'Грустная картина'),
+ (['playful', 'игрив'], 'Игривая картина'),
+ (['confident', 'уверенн'], 'Уверенная картина'),
+ (['focused', 'внимательн', 'математическ', 'diagram'], 'Внимательная картина'),
+ (['landscape', 'пейзаж'], 'Пейзаж'),
+ (['portrait', 'портрет'], 'Портрет'),
+ (['popart', 'поп-арт', 'попарт'], 'Поп-арт'),
+ (['surrealism', 'surreal', 'сюрреализм'], 'Сюрреализм'),
+ (['abstract', 'абстракц'], 'Абстракция'),
+ (['realism', 'realist', 'реализм'], 'Реализм'),
+ (['classic', 'классик'], 'Классика'),
+ (['impressionism', 'impressionist', 'импрессионизм'], 'Импрессионизм'),
+ (['figure', 'фигуративн'], 'Фигуративная живопись'),
+ (['reference', 'paintbyref', 'по образцу'], 'Рисунок по образцу'),
+ (['stilllife', 'натюрморт'], 'Натюрморт')]
+
+DAYS_SHORT_RU = {0: 'Вс', 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб'}
+
+DAYS_FULL_RU = {0: 'Воскресенье',
+ 1: 'Понедельник',
+ 2: 'Вторник',
+ 3: 'Среда',
+ 4: 'Четверг',
+ 5: 'Пятница',
+ 6: 'Суббота'}
+
+SCHOOL_GRADE_TITLES = {1: 'Оценка: 1 (Двоечник)',
+ 2: 'Оценка: 2 (Двоечник)',
+ 3: 'Оценка: 3 (Троечник)',
+ 4: 'Оценка: 4 (Хорошист)',
+ 5: 'Оценка: 5 (Отличник)'}
+
+HOLIDAY_TRADITIONS_TRANSLATIONS = {'airhorn': ('Праздничный рожок', 'Blow Airhorn'),
+ 'appreciateobjects': ('Ценить искусство', 'Appreciate Art'),
+ 'attendservice': ('Посетить службу', 'Attend Holiday Service'),
+ 'bake': ('Выпечка', 'Baking'),
+ 'baking': ('Выпечка', 'Baking'),
+ 'barbecue': ('Барбекю', 'Barbecue'),
+ 'bbq': ('Барбекю', 'Barbecue'),
+ 'bethankful': ('Праздничное настроение', 'Be Thankful'),
+ 'clean': ('Уборка', 'Cleaning'),
+ 'cleaning': ('Уборка', 'Cleaning'),
+ 'costume': ('Костюмы', 'Wear Costumes'),
+ 'costumes': ('Костюмы', 'Wear Costumes'),
+ 'countdown': ('Обратный отсчет', 'Countdown'),
+ 'countdowntomidnight': ('Обратный отсчет до полуночи', 'Countdown to Midnight'),
+ 'crafting': ('Мастерить поделки', 'Crafting'),
+ 'decorate': ('Украшать дом', 'Decorate'),
+ 'donate': ('Пожертвования', 'Donate'),
+ 'drink': ('Пить напитки', 'Drinking'),
+ 'drinking': ('Пить напитки', 'Drinking'),
+ 'egghunt': ('Охота за яйцами', 'Egg Hunt'),
+ 'exercise': ('Спорт и упражнения', 'Exercise'),
+ 'fast': ('Поститься', 'Fast'),
+ 'fasting': ('Поститься', 'Fast'),
+ 'fatherwinter': ('Дед Мороз', 'Father Winter'),
+ 'festivelighting': ('Праздничное освещение', 'Festive Lighting'),
+ 'fight': ('Драка', 'Fighting'),
+ 'fighting': ('Драка', 'Fighting'),
+ 'fireworks': ('Фейерверки', 'Fireworks'),
+ 'flowerbunny': ('Цветочный кролик', 'Flower Bunny'),
+ 'garden': ('Садоводство', 'Gardening'),
+ 'gardening': ('Садоводство', 'Gardening'),
+ 'ghost': ('Призраки', 'Ghosts'),
+ 'giveflowers': ('Дарить цветы', 'Give Flowers'),
+ 'givegifts': ('Дарить подарки', 'Give Gifts'),
+ 'gostreaking': ('Бегать нагишом', 'Streaking'),
+ 'grandmeal': ('Грандиозный ужин', 'Grand Meal'),
+ 'holidaytree': ('Праздничная елка', 'Holiday Tree'),
+ 'inviteguests': ('Пригласить гостей', 'Invite Guests'),
+ 'makeresolutions': ('Давать обещания', 'Make Resolutions'),
+ 'mischief': ('Пакости', 'Mischief'),
+ 'nude': ('Нагота', 'Nudity'),
+ 'nudity': ('Нагота', 'Nudity'),
+ 'opengifts': ('Открывать подарки', 'Open Gifts'),
+ 'party': ('Вечеринка', 'Party'),
+ 'playgames': ('Играть в игры', 'Play Games'),
+ 'polarbearplunge': ('Купание «белых медведей»', 'Polar Bear Plunge'),
+ 'rememberance': ('День памяти', 'Remembrance'),
+ 'resolutions': ('Давать обещания', 'Make Resolutions'),
+ 'romanticspirit': ('Романтическое настроение', 'Romantic Spirit'),
+ 'spookyspirit': ('Жуткое настроение', 'Spooky Spirit'),
+ 'streak': ('Бегать нагишом', 'Streaking'),
+ 'tellstories': ('Рассказывать истории', 'Tell Stories'),
+ 'thankful': ('Праздничное настроение', 'Be Thankful'),
+ 'trickortreat': ('Сладость или гадость', 'Trick or Treat'),
+ 'watchsports': ('Смотреть спорт', 'Watch Sports'),
+ 'watchtv': ('Смотреть телевизор', 'Watch TV'),
+ 'waterfun': ('Водные забавы', 'Water Fun'),
+ 'wearcostume': ('Надеть костюм', 'Wear Costume')}
+
+EVENT_TYPE_TRANSLATIONS = {'baby_shower': ('Праздник в честь будущего ребенка', 'Baby Shower'),
+ 'babyshower': ('Праздник в честь будущего ребенка', 'Baby Shower'),
+ 'bachelor': ('Мальчишник', 'Bachelor Party'),
+ 'bachelorette': ('Девичник', 'Bachelorette Party'),
+ 'birthday': ('День рождения', 'Birthday Party'),
+ 'black_and_white': ('Черно-белая вечеринка', 'Black and White Party'),
+ 'blackandwhite': ('Черно-белая вечеринка', 'Black and White Party'),
+ 'charity_gala': ('Благотворительный вечер', 'Charity Gala'),
+ 'costume': ('Костюмированная вечеринка', 'Costume Party'),
+ 'dance_party': ('Танцевальная вечеринка', 'Dance Party'),
+ 'danceparty': ('Танцевальная вечеринка', 'Dance Party'),
+ 'date': ('Свидание', 'Date'),
+ 'dinner_party': ('Званый ужин', 'Dinner Party'),
+ 'dinnerparty': ('Званый ужин', 'Dinner Party'),
+ 'family_reunion': ('Семейный сбор', 'Family Reunion'),
+ 'familyreunion': ('Семейный сбор', 'Family Reunion'),
+ 'fan_meet': ('Встреча фанатов', 'Fan Meetup'),
+ 'fanmeet': ('Встреча фанатов', 'Fan Meetup'),
+ 'funeral': ('Похороны / Поминки', 'Funeral'),
+ 'house_party': ('Домашняя вечеринка', 'House Party'),
+ 'houseparty': ('Домашняя вечеринка', 'House Party'),
+ 'kava': ('Посиделки с кавой', 'Kava Party'),
+ 'keg': ('Вечеринка у бочки', 'Keg Party'),
+ 'meet_and_greet': ('Встреча со знаменитостью', 'Meet and Greet'),
+ 'meetandgreet': ('Встреча со знаменитостью', 'Meet and Greet'),
+ 'pool_party': ('Вечеринка у бассейна', 'Pool Party'),
+ 'poolparty': ('Вечеринка у бассейна', 'Pool Party'),
+ 'slumber': ('Пижамная вечеринка', 'Slumber Party'),
+ 'spooky': ('Жуткая вечеринка', 'Spooky Party'),
+ 'stay_over': ('Гостевой визит с ночевкой', 'Stay Over'),
+ 'stayover': ('Гостевой визит с ночевкой', 'Stay Over'),
+ 'vow_renewal': ('Обновление брачных клятв', 'Vow Renewal'),
+ 'vowrenewal': ('Обновление брачных клятв', 'Vow Renewal'),
+ 'wedding': ('Свадьба', 'Wedding')}
+
+EVENT_ROLE_TRANSLATIONS = {'attendee': ('Гость / Посетитель', 'Attendee'),
+ 'barista': ('Бариста', 'Barista'),
+ 'bartender': ('Бармен', 'Bartender'),
+ 'best_man': ('Почетный свидетель', 'Sim of Honor'),
+ 'bestman': ('Почетный свидетель', 'Sim of Honor'),
+ 'betrothed': ('Жених / Невеста', 'Betrothed'),
+ 'birthday_celebrant': ('Именинник', 'Birthday Sim'),
+ 'birthday_sim': ('Именинник', 'Birthday Sim'),
+ 'birthdaysim': ('Именинник', 'Birthday Sim'),
+ 'bride': ('Невеста', 'Bride'),
+ 'caterer': ('Кейтерер / Повар', 'Caterer'),
+ 'celebrant': ('Виновник торжества', 'Celebrant'),
+ 'celebrity': ('Знаменитость', 'Celebrity'),
+ 'chef': ('Шеф-повар', 'Chef'),
+ 'cook': ('Повар', 'Cook'),
+ 'coworker': ('Коллега', 'Co-worker'),
+ 'deceased': ('Усопший / Виновник поминок', 'Deceased'),
+ 'entertainer': ('Музыкант / Артист', 'Entertainer'),
+ 'expectant': ('Будущий родитель', 'Expectant Parent'),
+ 'family': ('Член семьи', 'Family Member'),
+ 'flower_girl': ('Цветочный паж', 'Flower Pal'),
+ 'flower_pal': ('Цветочный паж', 'Flower Pal'),
+ 'flowergirl': ('Цветочный паж', 'Flower Pal'),
+ 'flowerpal': ('Цветочный паж', 'Flower Pal'),
+ 'groom': ('Жених', 'Groom'),
+ 'guest': ('Гость', 'Guest'),
+ 'guest_of_honor': ('Почетный гость', 'Guest of Honor'),
+ 'guestofhonor': ('Почетный гость', 'Guest of Honor'),
+ 'honor_sim': ('Почетный свидетель', 'Sim of Honor'),
+ 'honorary': ('Почетный гость', 'Guest of Honor'),
+ 'host': ('Организатор / Хозяин', 'Host'),
+ 'invitee': ('Приглашённый гость', 'Invitee'),
+ 'maid_of_honor': ('Почетный свидетель', 'Sim of Honor'),
+ 'maidofhonor': ('Почетный свидетель', 'Sim of Honor'),
+ 'mixologist': ('Бармен / Миксолог', 'Mixologist'),
+ 'mourner': ('Скорбящий', 'Mourner'),
+ 'musician': ('Музыкант', 'Musician'),
+ 'officiant': ('Ведущий церемонии', 'Officiant'),
+ 'organizer': ('Организатор', 'Organizer'),
+ 'performer': ('Артист / Выступающий', 'Performer'),
+ 'ring_bearer': ('Несущий кольца', 'Ring Bearer'),
+ 'ringbearer': ('Несущий кольца', 'Ring Bearer'),
+ 'sim_of_honor': ('Почетный свидетель', 'Sim of Honor'),
+ 'simofhonor': ('Почетный свидетель', 'Sim of Honor')}
+
+LOT_ROLE_DEFINITIONS = [
+    {'id': 'livein_nanny', 'ru': 'Живущая в доме няня', 'en': 'Live-in Nanny',
+     'keys': ('lms_livein_nanny', 'livein_nanny', 'liveinnanny')},
+    {'id': 'livein_maid', 'ru': 'Живущая в доме горничная', 'en': 'Live-in Maid',
+     'keys': ('lms_livein_maid', 'livein_maid', 'liveinmaid')},
+    {'id': 'livein_gardener', 'ru': 'Живущий в доме садовник', 'en': 'Live-in Gardener',
+     'keys': ('lms_livein_gardener', 'livein_gardener', 'liveingardener')},
+    {'id': 'livein_butler', 'ru': 'Живущий в доме дворецкий', 'en': 'Live-in Butler',
+     'keys': ('lms_livein_butler', 'livein_butler', 'liveinbutler')},
+    {'id': 'bartender', 'ru': 'Бармен на смене', 'en': 'Bartender on duty',
+     'keys': ('job_bartender', 'job_bar_bartender', 'bar_bartender', 'venue_bartender', 'openmic_bartender', 'isbartender', 'servicenpc_bartender', 'situation_bartender', 'bartender_situation')},
+    {'id': 'barista', 'ru': 'Бариста (кафе)', 'en': 'Barista (café)',
+     'keys': ('job_barista', 'cafe_barista', 'isbarista', 'barista_situation', 'situation_barista')},
+    {'id': 'waiter', 'ru': 'Официант', 'en': 'Waiter',
+     'keys': ('job_waiter', 'job_restaurant_waiter', 'restaurant_waiter', 'dineout_waiter', 'iswaiter', 'waiter_situation', 'situation_waiter', 'waitstaff')},
+    {'id': 'chef_caterer', 'ru': 'Шеф-повар / Кейтерер', 'en': 'Chef / Caterer',
+     'keys': ('job_caterer', 'job_restaurant_chef', 'job_chef', 'restaurant_chef', 'chef_situation', 'caterer_situation', 'situation_caterer', 'iscaterer', 'ischef', 'trait_is_caterer')},
+    {'id': 'hostess', 'ru': 'Администратор зала (Хостес)', 'en': 'Host / Hostess',
+     'keys': ('job_restaurant_host', 'restaurant_host', 'job_hostess', 'restaurant_hostess', 'situation_restaurant_host')},
+    {'id': 'stall_vendor', 'ru': 'Продавец в ларьке', 'en': 'Stall Vendor',
+     'keys': ('job_marketstall_vendor', 'job_stall_vendor', 'job_foodstall_vendor', 'stall_vendor', 'foodstall_vendor', 'vendor_situation', 'isvendor', 'situation_marketstall_vendor')},
+    {'id': 'dj', 'ru': 'Диджей (DJ)', 'en': 'DJ',
+     'keys': ('job_dj', 'job_nightclub_dj', 'job_club_dj', 'dj_situation', 'nightclub_dj', 'club_dj', 'situation_dj', 'isdj', 'trait_isdj')},
+    {'id': 'entertainer', 'ru': 'Приглашённый артист / Музыкант', 'en': 'Entertainer / Busker',
+     'keys': ('job_entertainer', 'job_busker', 'job_pianist', 'entertainer_situation', 'lounge_entertainer', 'pianist_situation', 'isentertainer', 'situation_busker')},
+    {'id': 'massage_therapist', 'ru': 'Массажист (Спа-салон)', 'en': 'Massage Therapist',
+     'keys': ('job_massage_therapist', 'job_reflexologist', 'massagetherapist', 'massage_therapist', 'reflexologist', 'ismassagetherapist', 'situation_massage_therapist', 'reflexologist_situation')},
+    {'id': 'yoga_instructor', 'ru': 'Инструктор по йоге', 'en': 'Yoga Instructor',
+     'keys': ('job_yoga_instructor', 'job_instructor_yoga', 'yogainstructor', 'yoga_instructor', 'isyogainstructor', 'situation_yoga_instructor')},
+    {'id': 'gym_trainer', 'ru': 'Фитнес-тренер (Спортзал)', 'en': 'Gym Trainer',
+     'keys': ('job_gym_trainer', 'gymtrainer', 'gym_trainer', 'isgymtrainer', 'situation_gym_trainer')},
+    {'id': 'librarian', 'ru': 'Библиотекарь', 'en': 'Librarian',
+     'keys': ('job_librarian', 'job_library_librarian', 'library_librarian', 'islibrarian', 'situation_librarian')},
+    {'id': 'park_ranger', 'ru': 'Смотритель парка / Рейнджер', 'en': 'Park Ranger',
+     'keys': ('job_forest_ranger', 'job_park_ranger', 'forestranger', 'forest_ranger', 'parkranger', 'isforestranger', 'situation_forest_ranger')},
+    {'id': 'lifeguard', 'ru': 'Пляжный спасатель', 'en': 'Lifeguard',
+     'keys': ('job_beach_lifeguard', 'job_lifeguard', 'beach_lifeguard', 'islifeguard', 'situation_lifeguard')},
+    {'id': 'retail_employee', 'ru': 'Сотрудник заведения', 'en': 'Venue Employee',
+     'keys': ('job_retail_employee', 'job_store_clerk', 'job_vet_employee', 'retail_employee', 'store_clerk', 'vet_employee', 'clinic_employee', 'vet_clinic_employee')},
+    {'id': 'paparazzi', 'ru': 'Папарацци', 'en': 'Paparazzi',
+     'keys': ('job_paparazzi', 'paparazzi_situation', 'ispaparazzi', 'trait_paparazzi', 'situation_paparazzi')},
+    {'id': 'butler', 'ru': 'Дворецкий', 'en': 'Butler',
+     'keys': ('job_butler', 'butler_situation', 'isbutler', 'situation_butler', 'trait_isbutler')},
+    {'id': 'nanny', 'ru': 'Няня (на вызове)', 'en': 'Nanny on duty',
+     'keys': ('servicenpc_nanny', 'isnanny', 'job_nanny', 'situation_nanny', 'trait_servicenpc_nanny')},
+    {'id': 'repairman', 'ru': 'Мастер по ремонту', 'en': 'Repairman',
+     'keys': ('servicenpc_repair', 'servicenpc_repairman', 'isrepair', 'job_repairman', 'job_repair', 'situation_repairman', 'trait_servicenpc_repair')},
+    {'id': 'maid', 'ru': 'Горничная / Уборщик', 'en': 'Maid / Cleaner',
+     'keys': ('servicenpc_maid', 'ismaid', 'job_maid', 'situation_maid', 'trait_servicenpc_maid')},
+    {'id': 'gardener', 'ru': 'Садовник', 'en': 'Gardener',
+     'keys': ('servicenpc_gardener', 'isgardener', 'job_gardener', 'situation_gardener', 'trait_servicenpc_gardener')},
+    {'id': 'pizza_delivery', 'ru': 'Доставщик еды / пиццы', 'en': 'Delivery Courier',
+     'keys': ('pizzadelivery', 'ispizzadelivery', 'delivery_courier', 'fooddelivery', 'job_pizzadelivery', 'job_delivery', 'situation_delivery')},
+    {'id': 'mail_carrier', 'ru': 'Почтальон', 'en': 'Mail Carrier',
+     'keys': ('job_mailcarrier', 'job_mailman', 'mailcarrier', 'ismailman', 'situation_mailcarrier', 'servicenpc_mailcarrier')},
+    {'id': 'firefighter', 'ru': 'Пожарный на вызове', 'en': 'Firefighter',
+     'keys': ('job_firefighter', 'situation_firefighter', 'firefighter', 'isfirefighter', 'trait_firefighter')},
+    {'id': 'police', 'ru': 'Полицейский на службе', 'en': 'Police Officer',
+     'keys': ('job_detective_patrol', 'job_police', 'detective_patrol', 'ispolice', 'situation_police', 'situation_detective_patrol')},
+]
+
+
+LIVEIN_STAFF_KEYWORDS = (('livein_nanny', 'Живущая в доме няня', 'Live-in Nanny'),
+ ('livein_maid', 'Живущая в доме горничная', 'Live-in Maid'),
+ ('livein_gardener', 'Живущий в доме садовник', 'Live-in Gardener'),
+ ('livein_butler', 'Живущий в доме дворецкий', 'Live-in Butler'),
+ ('butler', 'Дворецкий', 'Butler'),
+ ('bonehilda', 'Скелехильда (Горничная)', 'Bonehilda'))
+
+
+def get_sim_age_category(sim_info) -> str:
+    """Returns upper-case age category string like 'CHILD', 'TEEN', 'ADULT', etc."""
+    if sim_info is None:
+        return "ADULT"
+    try:
+        age_enum = getattr(sim_info, "age", None)
+        if age_enum is not None:
+            return getattr(age_enum, "name", str(age_enum)).upper()
+    except Exception:
+        pass
+    return "ADULT"
+
+
+def are_sims_siblings(info_a, info_b) -> bool:
+    """Checks if two Sims are siblings or young household peers."""
+    if info_a is None or info_b is None:
+        return False
+    try:
+        if hasattr(info_a, "genealogy") and info_a.genealogy is not None:
+            siblings = getattr(info_a.genealogy, "get_siblings", lambda: ())()
+            if getattr(info_b, "sim_id", None) in siblings:
+                return True
+        if hasattr(info_a, "relationship_tracker") and info_a.relationship_tracker is not None:
+            rel = info_a.relationship_tracker.get_relationship(getattr(info_b, "sim_id", 0))
+            if rel is not None:
+                for bit in getattr(rel, "relationship_bits", ()):
+                    b_name = getattr(bit, "__name__", str(bit)).lower()
+                    if "sibling" in b_name or "brother" in b_name or "sister" in b_name:
+                        return True
+    except Exception:
+        pass
+    return (getattr(info_a, "household_id", 1) == getattr(info_b, "household_id", 2))
+
+
+def get_localized_age(age_raw: str, gender_raw: str = "MALE", is_en: bool = False) -> str:
+    """Returns grammatically gender-accurate localized age string."""
+    age_key = str(age_raw or "ADULT").upper().strip()
+    if is_en:
+        en_map = {
+            "BABY": "Newborn",
+            "INFANT": "Infant",
+            "TODDLER": "Toddler",
+            "CHILD": "Child",
+            "TEEN": "Teen",
+            "YOUNGADULT": "Young Adult",
+            "ADULT": "Adult",
+            "ELDER": "Elder",
+        }
+        return en_map.get(age_key, "Adult")
+    g_key = str(gender_raw or "MALE").upper().strip()
+    if g_key == "FEMALE":
+        return FEMALE_AGE_TRANSLATIONS.get(age_key, "Взрослая")
+    return MALE_AGE_TRANSLATIONS.get(age_key, "Взрослый")
+
+# Dynamic age-specific roleplay instruction modifiers for LLM
+
+
+def is_basemental_installed() -> bool:
+    """
+    Checks if Basemental Drugs / Basemental Alcohol mod is active in the game runtime,
+    or if the Basemental Beer Brewing Station package is loaded.
+    """
+    try:
+        import sys
+        for mod_name in sys.modules.keys():
+            if "basemental" in str(mod_name).lower():
+                return True
+        try:
+            import Basemental
+            return True
+        except Exception:
+            pass
+        try:
+            import services, sims4.resources
+            action_mgr = services.get_instance_manager(sims4.resources.Types.ACTION)
+            if action_mgr is not None and action_mgr.get(10081277161234529723) is not None:
+                return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+def is_grim_reaper_sim(sim_info) -> bool:
+    """Accurately checks if a Sim is the iconic Grim Reaper (Костлявая Смерть / Жнец)."""
+    if sim_info is None:
+        return False
+    try:
+        if getattr(sim_info, "is_grim_reaper", False) or getattr(sim_info, "is_reaper", False):
+            return True
+        f_name = (getattr(sim_info, "first_name", "") or "").lower().strip()
+        l_name = (getattr(sim_info, "last_name", "") or "").lower().strip()
+        full = f"{f_name} {l_name}".strip()
+        reaper_words = ["grim", "reaper", "смерт", "костляв", "жнец"]
+        if any(w in full for w in reaper_words) or any(w in f_name for w in reaper_words) or any(w in l_name for w in reaper_words):
+            return True
+
+        # Check traits (ID 16851 is trait_GrimReaper in The Sims 4)
+        traits = []
+        if hasattr(sim_info, "get_traits"):
+            try:
+                traits.extend(sim_info.get_traits())
+            except Exception:
+                pass
+        trait_tracker = getattr(sim_info, "trait_tracker", None)
+        if trait_tracker is not None:
+            equipped = getattr(trait_tracker, "equipped_traits", None) or getattr(trait_tracker, "personality_traits", None) or ()
+            traits.extend(equipped)
+        for t in traits:
+            if getattr(t, "guid64", 0) in (16851, 0x41D3):
+                return True
+            t_name = (getattr(t, "__name__", "") or str(t)).lower()
+            if "grim" in t_name or "reaper" in t_name:
+                return True
+
+        # Check running affordances on sim instance
+        sim_inst = sim_info.get_sim_instance() if hasattr(sim_info, "get_sim_instance") else None
+        if sim_inst is not None and hasattr(sim_inst, "get_all_running_and_queued_interactions"):
+            try:
+                for inter in sim_inst.get_all_running_and_queued_interactions():
+                    aff_name = (getattr(getattr(inter, "affordance", None), "__name__", "") or "").lower()
+                    if any(k in aff_name for k in ["reap", "reaper", "grim", "scythe", "harvest_soul"]):
+                        return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def get_grim_reaper_instance_on_lot():
+    """Returns instanced Grim Reaper on active lot, if present."""
+    if services is None or not hasattr(services, "sim_info_manager"):
+        return None
+    try:
+        sim_mgr = services.sim_info_manager()
+        if sim_mgr and hasattr(sim_mgr, "instanced_sims_gen"):
+            for inst in sim_mgr.instanced_sims_gen():
+                inf = getattr(inst, "sim_info", None)
+                if inf and is_grim_reaper_sim(inf):
+                    return inst
+                if hasattr(inst, "get_all_running_and_queued_interactions"):
+                    for inter in inst.get_all_running_and_queued_interactions():
+                        aff_name = (getattr(getattr(inter, "affordance", None), "__name__", "") or "").lower()
+                        if any(k in aff_name for k in ["reap", "reaper", "grim", "scythe", "harvest_soul"]):
+                            return inst
+    except Exception:
+        pass
+    return None
+
+
+def find_dying_or_dead_sim_info(sim_a=None, sim_b=None):
+    """
+    Finds the SimInfo of the dying or deceased Sim on the active lot.
+    Checks:
+    1. Instanced Sims with is_dying flag or death affordance (excluding reaper and mourners).
+    2. Interactions of Grim Reaper or participants targeting the deceased or urnstone.
+    3. Urnstone / tombstone objects on the active lot.
+    4. Household SimInfos with is_dead / is_ghost flag.
+    5. Global SimInfoManager for deceased Sims.
+    """
+    if services is None:
+        return None
+
+    # 1. Any instanced Sim currently dying or running death interactions
+    try:
+        sim_mgr = services.sim_info_manager() if hasattr(services, "sim_info_manager") else None
+        if sim_mgr and hasattr(sim_mgr, "instanced_sims_gen"):
+            for inst in sim_mgr.instanced_sims_gen():
+                inf = getattr(inst, "sim_info", None)
+                if not inf or is_grim_reaper_sim(inf):
+                    continue
+                if getattr(inst, "is_dying", False) or getattr(inf, "is_dead", False):
+                    return inf
+                if hasattr(inst, "get_all_running_and_queued_interactions"):
+                    for inter in inst.get_all_running_and_queued_interactions():
+                        aff = getattr(inter, "affordance", None)
+                        aff_name = (getattr(aff, "__name__", "") or str(aff) or "").lower()
+                        if (aff_name.startswith("death_") or "_death" in aff_name or aff_name.startswith("sim_death")) and not any(k in aff_name for k in ["witness", "react", "mourn", "plead", "reap", "reaper", "grim"]):
+                            return inf
+    except Exception:
+        pass
+
+    # 2. Check running interactions of Grim Reaper, sim_a, sim_b
+    actors = [sim_a, sim_b]
+    reaper = get_grim_reaper_instance_on_lot()
+    if reaper and reaper not in actors:
+        actors.append(reaper)
+
+    for act_sim in actors:
+        if act_sim is None:
+            continue
+        try:
+            inters = []
+            if hasattr(act_sim, "get_all_running_and_queued_interactions"):
+                inters = act_sim.get_all_running_and_queued_interactions()
+            elif hasattr(act_sim, "get_running_and_queued_interactions"):
+                inters = act_sim.get_running_and_queued_interactions()
+            for inter in inters:
+                aff = getattr(inter, "affordance", None)
+                aff_name = (getattr(aff, "__name__", "") or "").lower()
+                if any(k in aff_name for k in ["death", "mourn", "plead", "reap", "urn", "grave", "kill", "die"]):
+                    target = getattr(inter, "target", None)
+                    if target is not None:
+                        t_info = getattr(target, "sim_info", target)
+                        if t_info and hasattr(t_info, "first_name") and not is_grim_reaper_sim(t_info):
+                            return t_info
+                        if hasattr(target, "get_stored_sim_info"):
+                            st = target.get_stored_sim_info()
+                            if st:
+                                return st
+                        for st_attr in ["dead_sim_info", "ghost_sim_info", "_stored_sim_info"]:
+                            st = getattr(target, st_attr, None)
+                            if st and hasattr(st, "first_name"):
+                                return st
+        except Exception:
+            pass
+
+    # 3. Urnstone / tombstone on active lot
+    try:
+        obj_mgr = services.object_manager() if hasattr(services, "object_manager") else None
+        sim_mgr = services.sim_info_manager() if hasattr(services, "sim_info_manager") else None
+        if obj_mgr and hasattr(obj_mgr, "objects"):
+            for obj in obj_mgr.objects:
+                obj_name = (getattr(obj, "__class__", type(obj)).__name__ or "").lower()
+                if "urnstone" in obj_name or "tombstone" in obj_name or "grave" in obj_name or getattr(obj, "is_urnstone", False):
+                    if hasattr(obj, "get_stored_sim_info"):
+                        st = obj.get_stored_sim_info()
+                        if st:
+                            return st
+                    for st_attr in ["dead_sim_info", "ghost_sim_info", "_stored_sim_info"]:
+                        st = getattr(obj, st_attr, None)
+                        if st and hasattr(st, "first_name"):
+                            return st
+                    if hasattr(obj, "get_target_sim_id") and sim_mgr:
+                        t_id = obj.get_target_sim_id()
+                        if t_id:
+                            st = sim_mgr.get(t_id)
+                            if st:
+                                return st
+    except Exception:
+        pass
+
+    # 4. Household members with is_dead / is_ghost
+    try:
+        client = services.client_manager().get_first_client() if hasattr(services, "client_manager") else None
+        hh = getattr(client, "household", None) if client else None
+        if hh and hasattr(hh, "sim_info_gen"):
+            for h_info in hh.sim_info_gen():
+                if (getattr(h_info, "is_dead", False) or getattr(h_info, "is_ghost", False)) and not is_grim_reaper_sim(h_info):
+                    return h_info
+    except Exception:
+        pass
+
+    # 5. Global sim_info_manager deceased Sims
+    try:
+        sim_mgr = services.sim_info_manager() if hasattr(services, "sim_info_manager") else None
+        if sim_mgr and hasattr(sim_mgr, "get_all"):
+            for s_info in sim_mgr.get_all():
+                if getattr(s_info, "is_dead", False) and not is_grim_reaper_sim(s_info):
+                    return s_info
+    except Exception:
+        pass
+
+    return None
+
+
+def is_father_winter_sim(sim_info) -> bool:
+    """Accurately checks if a Sim is Father Winter / Clement Frost (Дед Мороз)."""
+    if sim_info is None:
+        return False
+    try:
+        f_name = (getattr(sim_info, "first_name", "") or "").lower().strip()
+        l_name = (getattr(sim_info, "last_name", "") or "").lower().strip()
+        full = f"{f_name} {l_name}".strip()
+        if "clement" in f_name or "frost" in l_name or "мороз" in l_name or "дед мороз" in full or "father winter" in full or "клемент" in f_name:
+            return True
+        trait_tracker = getattr(sim_info, "trait_tracker", None)
+        if trait_tracker is not None:
+            equipped = getattr(trait_tracker, "equipped_traits", None) or getattr(trait_tracker, "personality_traits", None) or ()
+            for t in equipped:
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if "fatherwinter" in t_name or "father_winter" in t_name:
+                    return True
+    except Exception:
+        pass
+
+
+def get_sim_gender_and_pronouns_desc(sim_info, is_en: bool = False) -> str:
+    """Returns clear, unambiguous gender label with strict first-person grammatical instructions."""
+    gender_raw = getattr(getattr(sim_info, "gender", None), "name", "MALE")
+    is_grim = is_grim_reaper_sim(sim_info)
+    if is_en:
+        if is_grim:
+            return "Male (he/him/his) [Grim Reaper is an immortal male entity! Express thoughts in 1st person masculine]"
+        if gender_raw == "FEMALE":
+            return "Female (she/her/hers)"
+        return "Male (he/him/his)"
+
+    if is_grim:
+        return "Мужской (ОН / ЕГО). ВАЖНО: Несмотря на то, что слово «смерть» в русском языке грамматически женского рода, персонаж «Смерть / Жнец» — МУЖЧИНА (ОН)! Все мысли от первого лица («Я») формулируй СТРОГО в мужском роде: «я пошел», «я устал», «я забрал душу», «я готов». Категорически запрещено использовать женский род о себе («я устала»)! О симках думай строго в женском роде («она», «её»)."
+
+    if gender_raw == "FEMALE":
+        return "Женский (ОНА / ЕЁ). Мысли персонажа от первого лица («Я») и глаголы прошедшего времени формулируй СТРОГО в женском роде: «я пошла», «я устала», «я сделала», «я уверена»."
+    else:
+        return "Мужской (ОН / ЕГО). Мысли персонажа от первого лица («Я») и глаголы прошедшего времени формулируй СТРОГО в мужском роде: «я пошел», «я устал», «я сделал», «я уверен»."
+
+
+def _check_sim_bool_prop_or_method(sim_info, attr_name: str) -> bool:
+    """Safely checks a boolean property or method on SimInfo without treating bound method objects as truthy."""
+    if sim_info is None or not hasattr(sim_info, attr_name):
+        return False
+    try:
+        val = getattr(sim_info, attr_name, None)
+        if val is None:
+            return False
+        if callable(val):
+            return bool(val())
+        return bool(val)
+    except Exception:
+        return False
+
+
+def _is_sim_vampire(sim_info) -> bool:
+    if _check_sim_bool_prop_or_method(sim_info, "is_vampire"):
+        return True
+    if hasattr(sim_info, "occult_tracker") and sim_info.occult_tracker is not None:
+        try:
+            from sims.occult.occult_enums import OccultType
+            if hasattr(OccultType, "VAMPIRE") and hasattr(sim_info.occult_tracker, "has_occult_type"):
+                if sim_info.occult_tracker.has_occult_type(OccultType.VAMPIRE):
+                    return True
+        except Exception:
+            pass
+    if hasattr(sim_info, "get_traits"):
+        try:
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if t_name in ("trait_occultvampire", "trait_occult_vampire") or t_name.startswith("trait_occult_vampire"):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_sim_werewolf(sim_info) -> bool:
+    if _check_sim_bool_prop_or_method(sim_info, "is_werewolf"):
+        return True
+    if hasattr(sim_info, "occult_tracker") and sim_info.occult_tracker is not None:
+        try:
+            from sims.occult.occult_enums import OccultType
+            if hasattr(OccultType, "WEREWOLF") and hasattr(sim_info.occult_tracker, "has_occult_type"):
+                if sim_info.occult_tracker.has_occult_type(OccultType.WEREWOLF):
+                    return True
+        except Exception:
+            pass
+    if hasattr(sim_info, "get_traits"):
+        try:
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if t_name in ("trait_occultwerewolf", "trait_occult_werewolf") or t_name.startswith("trait_occult_werewolf"):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_sim_mermaid(sim_info) -> bool:
+    if _check_sim_bool_prop_or_method(sim_info, "is_mermaid"):
+        return True
+    if hasattr(sim_info, "occult_tracker") and sim_info.occult_tracker is not None:
+        try:
+            from sims.occult.occult_enums import OccultType
+            if hasattr(OccultType, "MERMAID") and hasattr(sim_info.occult_tracker, "has_occult_type"):
+                if sim_info.occult_tracker.has_occult_type(OccultType.MERMAID):
+                    return True
+        except Exception:
+            pass
+    if hasattr(sim_info, "get_traits"):
+        try:
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if t_name in ("trait_occultmermaid", "trait_occult_mermaid") or t_name.startswith("trait_occult_mermaid"):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_sim_witch(sim_info) -> bool:
+    if _check_sim_bool_prop_or_method(sim_info, "is_witch") or _check_sim_bool_prop_or_method(sim_info, "is_spellcaster"):
+        return True
+    if hasattr(sim_info, "occult_tracker") and sim_info.occult_tracker is not None:
+        try:
+            from sims.occult.occult_enums import OccultType
+            if hasattr(OccultType, "WITCH") and hasattr(sim_info.occult_tracker, "has_occult_type"):
+                if sim_info.occult_tracker.has_occult_type(OccultType.WITCH):
+                    return True
+        except Exception:
+            pass
+    if hasattr(sim_info, "get_traits"):
+        try:
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if t_name in ("trait_occult_witch", "trait_occultwitch", "trait_occult_spellcaster") or t_name.startswith("trait_occult_witch"):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_sim_alien(sim_info) -> bool:
+    if _check_sim_bool_prop_or_method(sim_info, "is_alien"):
+        return True
+    if hasattr(sim_info, "occult_tracker") and sim_info.occult_tracker is not None:
+        try:
+            from sims.occult.occult_enums import OccultType
+            if hasattr(OccultType, "ALIEN") and hasattr(sim_info.occult_tracker, "has_occult_type"):
+                if sim_info.occult_tracker.has_occult_type(OccultType.ALIEN):
+                    return True
+        except Exception:
+            pass
+    if hasattr(sim_info, "get_traits"):
+        try:
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if t_name in ("trait_occultalien", "trait_occult_alien") or t_name.startswith("trait_occult_alien"):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_sim_plantsim(sim_info) -> bool:
+    """Accurately checks if a Sim is currently an active PlantSim, strictly excluding challenge/scenario flags."""
+    if sim_info is None:
+        return False
+    try:
+        if hasattr(sim_info, "get_traits"):
+            for t in sim_info.get_traits():
+                t_name = getattr(t, "__name__", str(t)).lower()
+                if any(ign in t_name for ign in ["challenge", "tree", "scenario", "originator", "completed", "unlocked"]):
+                    continue
+                if t_name in ("trait_plantsim", "trait_planthood"):
+                    return True
+        active_buffs = get_all_sim_buffs(sim_info)
+        for b in active_buffs:
+            b_type = getattr(b, "buff_type", None) or type(b)
+            b_name = getattr(b_type, "__name__", str(b)).lower()
+            if any(ign in b_name for ign in ["challenge", "tree", "scenario", "completed", "unlocked", "originator"]):
+                continue
+            if b_name == "buff_plantsim" or (b_name.startswith("buff_plantsim_") and not any(k in b_name for k in ["challenge", "tree"])):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def get_fitness_stuff_action_details(sim_info, sim_instance, interactions_list, full_context_text: str) -> str:
+    """SP11: Fitness Stuff alias."""
+    return get_fitness_action_details(sim_info, sim_instance, interactions_list, full_context_text)
+
+
+def _get_fire_obj_level(obj):
+    if obj is None:
+        return 0
+    if hasattr(obj, "level"):
+        try:
+            lvl = obj.level
+            if lvl is not None:
+                return int(lvl() if callable(lvl) else lvl)
+        except Exception:
+            pass
+    if hasattr(obj, "routing_surface") and obj.routing_surface is not None:
+        try:
+            return int(getattr(obj.routing_surface, "secondary_id", 0) or 0)
+        except Exception:
+            pass
+    if hasattr(obj, "location") and obj.location is not None:
+        try:
+            lvl = getattr(obj.location, "level", 0)
+            if lvl is not None:
+                return int(lvl)
+        except Exception:
+            pass
+    return 0
+
+
+def _check_fire_obj_is_outside(obj):
+    if obj is None:
+        return False
+    # 1. Native is_outside property / method
+    if hasattr(obj, "is_outside"):
+        try:
+            val = obj.is_outside
+            res = val() if callable(val) else bool(val)
+            if res is not None:
+                return bool(res)
+        except Exception:
+            pass
+    # 2. build_buy check
+    if services is not None:
+        try:
+            import build_buy
+            pos = getattr(obj, "position", None)
+            lvl = _get_fire_obj_level(obj)
+            if pos is not None and hasattr(build_buy, "is_location_outside"):
+                return bool(build_buy.is_location_outside(pos, lvl))
+        except Exception:
+            pass
+    return False
+
+
+def _check_fire_obj_room_id(obj):
+    if obj is None or services is None:
+        return 0
+    try:
+        import build_buy
+        zone_id = services.current_zone_id()
+        pos = getattr(obj, "position", None)
+        lvl = _get_fire_obj_level(obj)
+        if pos is not None and zone_id is not None and hasattr(build_buy, "get_room_id"):
+            return int(build_buy.get_room_id(zone_id, pos, lvl) or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def get_fire_hazard_context(sim_info=None, other_sim_info=None, is_en: bool = False):
+    """
+    Comprehensive, situational fire analysis engine:
+    - Determines if an active fire is present on the lot.
+    - Accurately discovers fire objects via fire_service._fire_objects / _burning_objects.
+    - Determines WHERE the fire is:
+        • Дома (at home)
+        • В гостях (visiting another Sim's house)
+        • В общественном месте (at gym, bar, cafe, club, etc.)
+    - Determines RELATIVE POSITION & DISTANCE to the Sim:
+        • Прямо в этой же комнате (в шаге / в X метрах)
+        • Внутри дома, в соседней комнате (в X метрах)
+        • Внутри дома, на другом этаже (в X метрах)
+        • Внутри дома (персонаж снаружи во дворе / на улице, в X метрах)
+        • Снаружи здания (во дворе / возле стен дома, в X метрах)
+        • На открытом воздухе (во дворе / на улице, в X метрах)
+    - Checks if any Sim (or target Sim) is actively on fire / burning.
+    Returns a dict with rich spatial & contextual metadata, or None if no fire is active.
+    """
+    if services is None:
+        return None
+
+    import math
+
+    # 0. Resolve reference Sim instance for distance calculation
+    if sim_info is None and services is not None:
+        try:
+            client = services.client_manager().get_first_client()
+            if client is not None:
+                sim_info = getattr(client, "active_sim_info", None)
+        except Exception:
+            pass
+
+    sim_inst = None
+    if sim_info is not None:
+        if hasattr(sim_info, "get_sim_instance") and callable(sim_info.get_sim_instance):
+            sim_inst = sim_info.get_sim_instance()
+        if sim_inst is None and hasattr(sim_info, "position"):
+            sim_inst = sim_info
+
+    if sim_inst is None and other_sim_info is not None:
+        if hasattr(other_sim_info, "get_sim_instance") and callable(other_sim_info.get_sim_instance):
+            sim_inst = other_sim_info.get_sim_instance()
+        if sim_inst is None and hasattr(other_sim_info, "position"):
+            sim_inst = other_sim_info
+
+    if sim_inst is None and services is not None:
+        try:
+            sim_mgr = services.sim_info_manager()
+            if sim_mgr and hasattr(sim_mgr, "instanced_sims_gen"):
+                for inst in sim_mgr.instanced_sims_gen():
+                    if inst is not None:
+                        sim_inst = inst
+                        if sim_info is None:
+                            sim_info = getattr(inst, "sim_info", None)
+                        break
+        except Exception:
+            pass
+
+    # 1. Discover all active fire objects on the lot
+    fire_objs = []
+    fire_service = None
+    try:
+        if hasattr(services, "get_fire_service") and callable(services.get_fire_service):
+            fire_service = services.get_fire_service()
+        elif hasattr(services, "fire_service") and callable(services.fire_service):
+            fire_service = services.fire_service()
+
+        if fire_service is not None:
+            # 1. _fire_objects (WeakSet of active Fire objects)
+            f_set = getattr(fire_service, "_fire_objects", None)
+            if f_set:
+                for f in list(f_set):
+                    if f is not None and f not in fire_objs:
+                        fire_objs.append(f)
+
+            # 2. _burning_objects (Objects caught in fire)
+            b_set = getattr(fire_service, "_burning_objects", None)
+            if b_set:
+                for b in list(b_set):
+                    if b is not None and b not in fire_objs:
+                        fire_objs.append(b)
+
+            # 3. fires property fallback
+            raw_fires = getattr(fire_service, "fires", None)
+            if raw_fires:
+                for f in list(raw_fires):
+                    if f is not None and f not in fire_objs:
+                        fire_objs.append(f)
+    except Exception:
+        pass
+
+    try:
+        obj_mgr = services.object_manager()
+        if obj_mgr is not None:
+            for obj in list(obj_mgr.values()):
+                if obj is None or obj in fire_objs:
+                    continue
+                cls_name = getattr(obj, "__class__", type(obj)).__name__.lower()
+                if cls_name == "fire" or "fireobject" in cls_name:
+                    fire_objs.append(obj)
+    except Exception:
+        pass
+
+    # Check if fire service reports active fire even if objects list was empty
+    is_fire_active = len(fire_objs) > 0
+    if not is_fire_active:
+        try:
+            if fire_service is not None:
+                raw_act = getattr(fire_service, "fire_is_active", False)
+                if (callable(raw_act) and raw_act()) or bool(raw_act):
+                    is_fire_active = True
+                elif getattr(fire_service, "number_of_fires", 0) > 0:
+                    is_fire_active = True
+        except Exception:
+            pass
+
+    # Check if target or other sim is reacting to fire or panicking
+    if not is_fire_active:
+        for s_inf in (sim_info, other_sim_info):
+            if s_inf is None:
+                continue
+            try:
+                s_i = getattr(s_inf, "get_sim_instance", lambda: None)() if hasattr(s_inf, "get_sim_instance") else s_inf
+                if s_i is not None and hasattr(s_i, "get_running_and_queued_interactions"):
+                    for inter in s_i.get_running_and_queued_interactions():
+                        aff = getattr(inter, "affordance", None)
+                        aff_name = (getattr(aff, "__name__", "") or "").lower()
+                        if any(k in aff_name for k in ["fire_panic", "react_to_fire", "extinguish_fire", "fire_extinguish", "run_away_fire"]):
+                            is_fire_active = True
+                            break
+                if is_fire_active:
+                    break
+            except Exception:
+                pass
+
+    if not is_fire_active:
+        return None
+
+    # 2. Determine lot type (Home, Visiting, Venue)
+    current_zone = services.current_zone() if services else None
+    lot = getattr(current_zone, "lot", None) if current_zone else None
+    sim_hh_id = getattr(sim_info, "household_id", 0) if sim_info else 0
+    lot_owner_hh_id = getattr(lot, "owner_household_id", 0) if lot else 0
+    active_hh_id = services.active_household_id() if hasattr(services, "active_household_id") else 0
+
+    is_owner_active = False
+    if lot and hasattr(lot, "is_owner_household_active"):
+        try:
+            is_owner_active = lot.is_owner_household_active()
+        except Exception:
+            is_owner_active = False
+
+    is_home = False
+    if sim_hh_id and lot_owner_hh_id and sim_hh_id == lot_owner_hh_id:
+        is_home = True
+    elif is_owner_active and sim_hh_id and active_hh_id and sim_hh_id == active_hh_id:
+        is_home = True
+
+    venue_service = services.venue_service() if services else None
+    active_venue = venue_service.active_venue if venue_service else None
+    v_name = getattr(active_venue, "__name__", str(active_venue)).lower() if active_venue else ""
+    is_residential = ("residential" in v_name or "apartment" in v_name or "penthouse" in v_name or not v_name)
+
+    if is_home:
+        lot_type = "home"
+        lot_desc = "У себя дома" if not is_en else "At home"
+        danger_note = "Опасность уничтожения собственного жилья и имущества" if not is_en else "Danger of destruction of personal home and property"
+    elif is_residential:
+        lot_type = "visiting"
+        lot_desc = "В гостях (в чужом доме)" if not is_en else "Visiting (someone else's house)"
+        danger_note = "Персонаж находится в гостях в чужом загоревшемся доме" if not is_en else "The Sim is visiting inside a burning house"
+    else:
+        lot_type = "venue"
+        venue_base_name = None
+        for v_key, v_val in VENUE_TRANSLATIONS.items():
+            if v_key in v_name:
+                venue_base_name = v_val
+                break
+        if not venue_base_name:
+            venue_base_name = "В общественном заведении" if not is_en else "At a public venue"
+        lot_desc = f"В общественном месте ({venue_base_name})" if not is_en else f"At a public venue ({venue_base_name})"
+        danger_note = "Опасность и всеобщая паника среди посетителей заведения" if not is_en else "Danger and crowd panic among visitors"
+
+    # 3. Spatial position relative to Sim
+    is_on_lot = (sim_inst is not None and getattr(sim_inst, "is_on_active_lot", lambda: True)())
+
+    dist_meters = None
+    spatial_desc = ""
+    summary = ""
+    in_same_room = False
+    fire_outside = False
+    sim_outside = False
+
+    if not is_on_lot:
+        if is_home:
+            spatial_desc = "в доме персонажа (персонаж в этот момент в отъезде на другом участке)" if not is_en else "at the Sim's home (the Sim is currently away on another lot)"
+            summary = f"ПОЖАР ({lot_desc.upper()}): {spatial_desc}!" if not is_en else f"FIRE ({lot_desc.upper()}): {spatial_desc}!"
+        else:
+            spatial_desc = "на основном участке (персонаж находится в безопасности в другом месте)" if not is_en else "on the active lot (the Sim is safe on another lot)"
+            summary = f"ПОЖАР ({lot_desc.upper()}): {spatial_desc}!" if not is_en else f"FIRE ({lot_desc.upper()}): {spatial_desc}!"
+    else:
+        sim_pos = getattr(sim_inst, "position", None)
+        if sim_pos is None and hasattr(sim_inst, "location") and sim_inst.location is not None:
+            sim_pos = getattr(sim_inst.location, "transform", sim_inst.location)
+            if hasattr(sim_pos, "translation"):
+                sim_pos = sim_pos.translation
+
+        sim_room = _check_fire_obj_room_id(sim_inst)
+        sim_outside = _check_fire_obj_is_outside(sim_inst)
+        if sim_room > 0:
+            sim_outside = False
+        sim_level = _get_fire_obj_level(sim_inst)
+
+        nearest_dist = 999.0
+        nearest_fire = None
+        for f in fire_objs:
+            fp = getattr(f, "position", None)
+            if fp is None and hasattr(f, "location") and f.location is not None:
+                fp = getattr(f.location, "transform", f.location)
+                if hasattr(fp, "translation"):
+                    fp = fp.translation
+            if sim_pos and fp and hasattr(sim_pos, "x") and hasattr(fp, "x"):
+                d = math.sqrt((sim_pos.x - fp.x)**2 + (sim_pos.z - fp.z)**2)
+                if d < nearest_dist:
+                    nearest_dist = d
+                    nearest_fire = f
+
+        if nearest_fire is not None and nearest_dist < 900.0:
+            dist_meters = max(1, int(round(nearest_dist)))
+            fire_room = _check_fire_obj_room_id(nearest_fire)
+            fire_level = _get_fire_obj_level(nearest_fire)
+            fire_outside = _check_fire_obj_is_outside(nearest_fire)
+            if fire_room > 0:
+                fire_outside = False
+
+            if sim_room > 0 and fire_room > 0 and sim_room == fire_room:
+                in_same_room = True
+                if dist_meters <= 3:
+                    spatial_desc = (
+                        f"прямо в этой же комнате, буквально в паре шагов (в {dist_meters} м от персонажа)"
+                        if not is_en else f"right in the same room, just steps away ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь прямо в этой же комнате в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is right in the same room, {dist_meters} m away!"
+                    )
+                else:
+                    spatial_desc = (
+                        f"в этой же комнате (в {dist_meters} м от персонажа)"
+                        if not is_en else f"in the same room ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь в этой же комнате в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is in the same room, {dist_meters} m away!"
+                    )
+            elif sim_room > 0 and fire_room > 0:
+                if sim_level == fire_level:
+                    spatial_desc = (
+                        f"внутри дома, в соседней комнате (в {dist_meters} м от персонажа)"
+                        if not is_en else f"inside the building, in another room ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь в соседней комнате внутри дома в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is in another room inside, {dist_meters} m away!"
+                    )
+                else:
+                    floor_str = ("на верхнем этаже" if fire_level > sim_level else "на нижнем этаже / в подвале") if not is_en else ("on the upper floor" if fire_level > sim_level else "on the lower floor / basement")
+                    spatial_desc = (
+                        f"внутри дома, {floor_str} (в {dist_meters} м от персонажа)"
+                        if not is_en else f"inside the building, {floor_str} ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь {floor_str} внутри дома в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is {floor_str} inside, {dist_meters} m away!"
+                    )
+            elif sim_room > 0 and fire_outside:
+                spatial_desc = (
+                    f"снаружи здания (полыхает во дворе / возле стен дома в {dist_meters} м от персонажа)"
+                    if not is_en else f"outside the building (burning in the yard / near walls, {dist_meters} m away)"
+                )
+                summary = (
+                    f"ПОЖАР ({lot_desc.upper()}): огонь полыхает снаружи во дворе в {dist_meters} м от персонажа!"
+                    if not is_en else f"FIRE ({lot_desc.upper()}): fire is burning outdoors in the yard, {dist_meters} m away!"
+                )
+            elif sim_outside and not fire_outside:
+                spatial_desc = (
+                    f"внутри дома (персонажи стоят снаружи во дворе / на улице в {dist_meters} м от бушующего в доме огня)"
+                    if not is_en else f"inside the building (the Sims are standing outdoors in the yard, {dist_meters} m away from the fire burning inside)"
+                )
+                summary = (
+                    f"ПОЖАР ({lot_desc.upper()}): огонь полыхает внутри здания в {dist_meters} м (персонаж стоит на улице во дворе)!"
+                    if not is_en else f"FIRE ({lot_desc.upper()}): fire is burning inside the building {dist_meters} m away (the Sim is outdoors in the yard)!"
+                )
+            elif sim_outside and fire_outside:
+                spatial_desc = (
+                    f"снаружи на открытом воздухе (полыхает во дворе / на улице в {dist_meters} м от персонажа)"
+                    if not is_en else f"outdoors in open air (burning in the yard / on the street, {dist_meters} m away)"
+                )
+                summary = (
+                    f"ПОЖАР ({lot_desc.upper()}): огонь полыхает на открытом воздухе во дворе в {dist_meters} м от персонажа!"
+                    if not is_en else f"FIRE ({lot_desc.upper()}): fire is burning outdoors in the yard, {dist_meters} m away!"
+                )
+            else:
+                if not fire_outside:
+                    spatial_desc = (
+                        f"внутри здания на участке (в {dist_meters} м от персонажа)"
+                        if not is_en else f"inside the building on the lot ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь внутри здания в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is inside the building, {dist_meters} m away!"
+                    )
+                else:
+                    spatial_desc = (
+                        f"на открытом воздухе на участке (в {dist_meters} м от персонажа)"
+                        if not is_en else f"outdoors on the lot ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь на участке в {dist_meters} м от персонажа!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire on the lot, {dist_meters} m away!"
+                    )
+        else:
+            # Fallback when exact fire objects list is empty but fire service reports active fire
+            fp = None
+            try:
+                if fire_service and hasattr(fire_service, "get_fire_position"):
+                    fp = fire_service.get_fire_position()
+            except Exception:
+                pass
+            if fp and sim_pos and hasattr(sim_pos, "x") and hasattr(fp, "x"):
+                dist_meters = max(1, int(round(math.sqrt((sim_pos.x - fp.x)**2 + (sim_pos.z - fp.z)**2))))
+
+            if sim_outside:
+                if dist_meters:
+                    spatial_desc = (
+                        f"внутри дома (персонажи стоят снаружи во дворе в {dist_meters} м от огня)"
+                        if not is_en else f"inside the building (the Sims are outdoors {dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь внутри здания в {dist_meters} м (персонаж стоит на улице во дворе)!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is inside {dist_meters} m away (Sim is outdoors)!"
+                    )
+                else:
+                    spatial_desc = (
+                        "внутри дома (персонажи находятся снаружи во дворе / на улице)"
+                        if not is_en else "inside the building (the Sims are outdoors in the yard)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь внутри здания (персонаж стоит на улице во дворе)!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire is inside the building (Sim is outdoors)!"
+                    )
+            else:
+                if dist_meters:
+                    spatial_desc = (
+                        f"внутри здания на участке (в {dist_meters} м от персонажа)"
+                        if not is_en else f"inside the building on the lot ({dist_meters} m away)"
+                    )
+                    summary = (
+                        f"ПОЖАР ({lot_desc.upper()}): огонь внутри здания в {dist_meters} м!"
+                        if not is_en else f"FIRE ({lot_desc.upper()}): fire inside the building {dist_meters} m away!"
+                    )
+                else:
+                    spatial_desc = "внутри здания на участке" if not is_en else "inside the building on the lot"
+                    summary = f"ПОЖАР ({lot_desc.upper()}): внутри здания на участке!" if not is_en else f"FIRE ({lot_desc.upper()}): inside the building on the lot!"
+
+    # 4. Check if someone is actively on fire
+    burning_status = ""
+    try:
+        if sim_inst is not None and hasattr(sim_inst, "get_all_buffs"):
+            for b in sim_inst.get_all_buffs():
+                b_n = getattr(b, "__class__", type(b)).__name__.lower()
+                if any(k in b_n for k in ["fire_recentonfire", "buff_fire_onfire", "singed"]):
+                    burning_status = "КРИТИЧЕСКАЯ УГРОЗА: Персонаж охвачен пламенем и горит прямо сейчас!" if not is_en else "CRITICAL THREAT: The Sim is on fire right now!"
+                    break
+        if not burning_status and services is not None:
+            sim_mgr = services.sim_info_manager()
+            if sim_mgr and hasattr(sim_mgr, "instanced_sims_gen"):
+                for other_inst in sim_mgr.instanced_sims_gen():
+                    if other_inst == sim_inst:
+                        continue
+                    if hasattr(other_inst, "get_all_buffs"):
+                        for b in other_inst.get_all_buffs():
+                            b_n = getattr(b, "__class__", type(b)).__name__.lower()
+                            if any(k in b_n for k in ["fire_recentonfire", "buff_fire_onfire"]):
+                                o_name = getattr(getattr(other_inst, "sim_info", None), "first_name", "Человек")
+                                burning_status = (
+                                    f"КРИТИЧЕСКАЯ УГРОЗА: Рядом полыхает {o_name}, человека охватило пламя!"
+                                    if not is_en else f"CRITICAL THREAT: {o_name} is on fire right nearby!"
+                                )
+                                break
+                    if burning_status:
+                        break
+    except Exception:
+        pass
+
+    # 5. Build summary and full context
+    if burning_status:
+        summary = f"{summary} {burning_status}"
+    if not is_en:
+        full_context = (
+            f"ЧРЕЗВЫЧАЙНАЯ СИТУАЦИЯ — ПОЖАР ({lot_desc.upper()}):\n"
+            f"- Очаг возгорания: {spatial_desc}.\n"
+            f"- Обстановка: {danger_note}."
+        )
+        if burning_status:
+            full_context += f"\n- {burning_status}"
+    else:
+        full_context = (
+            f"EMERGENCY — FIRE ({lot_desc.upper()}):\n"
+            f"- Fire location: {spatial_desc}.\n"
+            f"- Situation: {danger_note}."
+        )
+        if burning_status:
+            full_context += f"\n- {burning_status}"
+
+    return {
+        "is_active": True,
+        "lot_type": lot_type,
+        "lot_desc": lot_desc,
+        "spatial_desc": spatial_desc,
+        "distance_meters": dist_meters,
+        "in_same_room": in_same_room,
+        "is_fire_outside": fire_outside,
+        "is_sim_outside": sim_outside,
+        "burning_status": burning_status,
+        "summary": summary,
+        "full_context": full_context,
+    }
+
+
+def get_career_status_and_schedule(career, sim_info):
+    """
+    Analyzes career / school runtime state:
+    - Status: At work / In school, Skipping (truant >= 1h), Late (< 1h),
+              Before work/school, After work/school, Day off, Vacation/PTO, Working from home.
+    - Schedule: Days of week and working hours.
+    - Next shift: Day and time of the upcoming shift.
+    - Homework / Daily task status.
+    """
+    c_name = getattr(career, "__name__", "") or getattr(getattr(career, "__class__", None), "__name__", "") or str(career)
+    c_name_lower = c_name.lower()
+    is_school = (
+        getattr(career, "is_school_career", False)
+        or getattr(career, "career_category", None) == 2
+        or any(k in c_name_lower for k in ["school", "gradeschool", "highschool", "школ"])
+    )
+
+    now = None
+    try:
+        import services
+        time_svc = services.time_service()
+        if time_svc is not None:
+            now = time_svc.sim_now
+    except Exception:
+        pass
+
+    work_scheduler = None
+    try:
+        if hasattr(career, "_get_work_scheduler"):
+            work_scheduler = career._get_work_scheduler()
+    except Exception:
+        pass
+
+    entry_days = []
+    start_h = None
+    start_m = None
+    end_h = None
+    end_m = None
+
+    if work_scheduler is not None:
+        try:
+            entries = getattr(work_scheduler, "_schedule_entries", None)
+            if entries:
+                for entry in entries:
+                    st = getattr(entry, "start_time", None)
+                    et = getattr(entry, "end_time", None)
+                    if st is not None:
+                        entry_days.append(st.day())
+                        if start_h is None:
+                            start_h = st.hour()
+                            start_m = st.minute()
+                    if et is not None and end_h is None:
+                        end_h = et.hour()
+                        end_m = et.minute()
+        except Exception:
+            pass
+
+        if not entry_days:
+            try:
+                tuning_entries = getattr(work_scheduler, "_schedule_entry_tuning", [])
+                for entry in tuning_entries:
+                    days_avail = getattr(entry, "days_available", {})
+                    if hasattr(days_avail, "items"):
+                        for d_val, is_avail in days_avail.items():
+                            if is_avail:
+                                entry_days.append(int(d_val))
+                    st = getattr(entry, "start_time", None)
+                    if st is not None and start_h is None:
+                        start_h = st.hour()
+                        start_m = st.minute()
+                        dur = getattr(entry, "duration", 8.0)
+                        end_h = int((start_h + dur) % 24)
+                        end_m = start_m
+            except Exception:
+                pass
+
+    if is_school and not entry_days:
+        entry_days = [1, 2, 3, 4, 5]
+        start_h, start_m, end_h, end_m = 8, 0, 15, 0
+
+    entry_days = sorted(list(set(entry_days)))
+    schedule_str = ""
+    if entry_days:
+        if len(entry_days) == 7:
+            days_label = "Ежедневно"
+        elif entry_days == [1, 2, 3, 4, 5]:
+            days_label = "Пн, Вт, Ср, Чт, Пт"
+        elif entry_days == [0, 6]:
+            days_label = "Сб, Вс"
+        else:
+            days_label = ", ".join(DAYS_SHORT_RU.get(d, str(d)) for d in entry_days)
+
+        if start_h is not None and end_h is not None:
+            schedule_str = f"График: {days_label} ({start_h:02d}:{start_m or 0:02d}–{end_h:02d}:{end_m or 0:02d})"
+        else:
+            schedule_str = f"График: {days_label}"
+    else:
+        schedule_str = "График: Свободный график"
+
+    next_shift_str = ""
+    try:
+        if hasattr(career, "get_next_work_time"):
+            best_time, next_start, next_end = career.get_next_work_time()
+            if next_start is not None and now is not None:
+                ns_day = next_start.day()
+                ns_time = f"{next_start.hour():02d}:{next_start.minute():02d}"
+                if ns_day == now.day():
+                    day_word = "Сегодня"
+                elif ns_day == (now.day() + 1) % 7:
+                    day_word = "Завтра"
+                else:
+                    day_word = DAYS_FULL_RU.get(ns_day, f"День {ns_day}")
+                next_shift_str = f"Следующая смена: {day_word} в {ns_time}"
+    except Exception:
+        pass
+
+    status_str = ""
+    taking_day_off = getattr(career, "taking_day_off", False)
+    if taking_day_off:
+        reason = getattr(career, "taking_day_off_reason", None)
+        r_str = str(reason).lower()
+        if is_school:
+            status_str = "Каникулы"
+        elif "pto" in r_str:
+            status_str = "В отпуске (Оплачиваемый отгул)"
+        elif "sick" in r_str:
+            status_str = "На больничном"
+        elif "home" in r_str:
+            status_str = "Работает из дома"
+        else:
+            status_str = "В отпуске"
+
+    elif getattr(career, "on_assignment", False):
+        status_str = "Работает из дома"
+
+    elif getattr(career, "currently_at_work", False):
+        status_str = "В школе" if is_school else "На работе"
+
+    else:
+        is_shift_active = False
+        active_shift_start = None
+
+        if getattr(career, "is_work_time", False):
+            is_shift_active = True
+            active_shift_start = getattr(career, "_current_work_start", None)
+
+        if not is_shift_active and work_scheduler is not None and now is not None:
+            entries = getattr(work_scheduler, "_schedule_entries", None) or []
+            for entry in entries:
+                st = getattr(entry, "start_time", None)
+                et = getattr(entry, "end_time", None)
+                if st is not None and et is not None:
+                    if hasattr(now, "time_between_week_times") and now.time_between_week_times(st, et):
+                        is_shift_active = True
+                        active_shift_start = st
+                        break
+
+        if not is_shift_active and now is not None and entry_days and now.day() in entry_days:
+            if start_h is not None and end_h is not None:
+                now_mins = now.hour() * 60 + now.minute()
+                s_start_mins = start_h * 60 + (start_m or 0)
+                s_end_mins = end_h * 60 + (end_m or 0)
+                if s_start_mins < s_end_mins:
+                    if s_start_mins <= now_mins <= s_end_mins:
+                        is_shift_active = True
+                else:
+                    if now_mins >= s_start_mins or now_mins <= s_end_mins:
+                        is_shift_active = True
+
+        if is_shift_active and now is not None:
+            elapsed_minutes = 0.0
+            if active_shift_start is not None and hasattr(active_shift_start, "_ticks_in_week") and hasattr(now, "_ticks_in_week"):
+                try:
+                    now_ticks = now._ticks_in_week()
+                    st_ticks = active_shift_start._ticks_in_week()
+                    diff = now_ticks - st_ticks
+                    if diff < 0:
+                        diff += (7 * 24 * 60 * 60 * 1000)
+                    elapsed_minutes = diff / (60 * 1000)
+                except Exception:
+                    pass
+
+            if elapsed_minutes <= 0.0 and start_h is not None and now is not None:
+                now_m = now.hour() * 60 + now.minute()
+                st_m = start_h * 60 + (start_m or 0)
+                diff_m = now_m - st_m
+                if diff_m < 0:
+                    diff_m += (24 * 60)
+                elapsed_minutes = float(diff_m)
+
+            start_lbl = f"{start_h:02d}:{start_m or 0:02d}" if start_h is not None else ""
+
+            if elapsed_minutes >= 60.0:
+                if is_school:
+                    status_str = f"Прогуливает уроки (смена с {start_lbl})" if start_lbl else "Прогуливает уроки"
+                else:
+                    status_str = f"Прогуливает работу (смена с {start_lbl})" if start_lbl else "Прогуливает работу"
+            else:
+                if is_school:
+                    status_str = f"Опаздывает на уроки (начало в {start_lbl})" if start_lbl else "Опаздывает на уроки"
+                else:
+                    status_str = f"Опаздывает на работу (смена в {start_lbl})" if start_lbl else "Опаздывает на работу"
+
+        else:
+            if now is not None and entry_days:
+                if now.day() in entry_days:
+                    t_start_h = start_h if start_h is not None else 9
+                    t_start_m = start_m if start_m is not None else 0
+                    now_m = now.hour() * 60 + now.minute()
+                    s_start_m = t_start_h * 60 + t_start_m
+
+                    if now_m < s_start_m:
+                        time_lbl = f"{t_start_h:02d}:{t_start_m:02d}"
+                        if is_school:
+                            status_str = f"До уроков (начало в {time_lbl})"
+                        else:
+                            status_str = f"До работы (смена в {time_lbl})"
+                    else:
+                        status_str = "После уроков" if is_school else "После работы"
+                else:
+                    status_str = "Выходной"
+            else:
+                status_str = "Выходной"
+
+    homework_str = ""
+    if is_school:
+        homework_done = False
+        try:
+            tip = career._get_performance_tooltip()
+            if tip is not None and LocalizationHelperTuning is not None:
+                raw_tip = _loc_text(tip) or ""
+                tip_low = raw_tip.lower()
+                if any(w in tip_low for w in ["сделан", "выполнен", "готово", "done", "complete"]):
+                    if not any(nw in tip_low for nw in ["не сделан", "не выполнен", "not done", "incomplete"]):
+                        homework_done = True
+        except Exception:
+            pass
+
+        if not homework_done:
+            try:
+                metrics = getattr(career.current_level_tuning, "performance_metrics", None)
+                stat_metrics = getattr(metrics, "statistic_metrics", []) if metrics else []
+                for metric in stat_metrics:
+                    stat_obj = getattr(metric, "statistic", None)
+                    if stat_obj:
+                        stat_inst = sim_info.get_statistic(stat_obj, add=False)
+                        if stat_inst:
+                            val = stat_inst.get_value()
+                            lower_th, upper_th = career._get_statistic_progress_thresholds(stat_obj, val)
+                            if lower_th is not None and getattr(lower_th, "threshold", 0) > 0:
+                                homework_done = True
+                                break
+            except Exception:
+                pass
+
+        if not homework_done:
+            try:
+                sim_inst = sim_info.get_sim_instance()
+                if sim_inst is not None and hasattr(sim_inst, "inventory_component"):
+                    for item in sim_inst.inventory_component:
+                        i_name = f"{getattr(item, '__name__', '')} {type(item).__name__}".lower()
+                        if "homework" in i_name or "домашн" in i_name:
+                            for comm in item.get_all_commodities():
+                                c_name_comm = str(comm).lower()
+                                if "progress" in c_name_comm or "homework" in c_name_comm:
+                                    max_v = getattr(comm, "max_value", 100.0)
+                                    if comm.get_value() >= (max_v - 0.1):
+                                        homework_done = True
+                                        break
+            except Exception:
+                pass
+
+        homework_str = "Домашнее задание: Сделано" if homework_done else "Домашнее задание: Не сделано"
+
+    daily_task_str = ""
+    if not is_school:
+        try:
+            tip = career._get_performance_tooltip()
+            if tip is not None and LocalizationHelperTuning is not None:
+                raw_tip = _loc_text(tip) or ""
+                clean_tip = raw_tip.strip()
+                if clean_tip and len(clean_tip) > 2 and len(clean_tip) < 100:
+                    daily_task_str = f"Задание на день: {clean_tip}"
+        except Exception:
+            pass
+
+    return {
+        "is_school": is_school,
+        "status": status_str,
+        "schedule": schedule_str,
+        "next_shift": next_shift_str,
+        "homework": homework_str,
+        "daily_task": daily_task_str,
+    }
+
+
+def is_sim_in_labor_state(sim_info, sim_instance=None, act_text: str = "") -> bool:
+    """
+    Strictly checks if a Sim (female or male) is actively in labor / having contractions right now.
+    Returns False during trimesters 1, 2, and 3.
+    """
+    if sim_info is None and sim_instance is None:
+        return False
+
+    actual_sim_info = getattr(sim_info, "sim_info", sim_info)
+    inst = sim_instance or (getattr(actual_sim_info, "get_sim_instance", lambda: None)() if hasattr(actual_sim_info, "get_sim_instance") else (sim_info if hasattr(sim_info, "sim_info") else None))
+
+    # 1. Action text check
+    if act_text and any(w in act_text.lower() for w in ["�", "�", "�", "giving_birth", "childbirth", "deliver_baby", "labor_contractions"]):
+        return True
+
+    # 2. Direct native TS4 instance manager check for buff_Pregnancy_InLabor (12564) and walkstyle (12565)
+    try:
+        import services
+        import sims4.resources
+        buff_mgr = services.get_instance_manager(sims4.resources.Types.BUFF)
+        if buff_mgr is not None:
+            for g_id in (12564, 12565):
+                b_tuning = buff_mgr.get(g_id)
+                if b_tuning is not None:
+                    if hasattr(actual_sim_info, "has_buff") and actual_sim_info.has_buff(b_tuning):
+                        return True
+                    if inst is not None and hasattr(inst, "has_buff") and inst.has_buff(b_tuning):
+                        return True
+    except Exception:
+        pass
+
+    # 3. Direct buff scan (12564 = buff_Pregnancy_InLabor, alien labor, custom mods)
+    labor_keys = (
+        "12564", "12565", "inlabor", "in_labor", "labor_contractions",
+        "givingbirth", "giving_birth", "childbirth", "early_labor", "active_labor",
+        "pushing_labor", "transition_labor", "buff_pregnancy_inlabor",
+        "�", "�", "�!"
+    )
+    for b in get_all_sim_buffs(actual_sim_info):
+        b_type = getattr(b, "buff_type", b)
+        b_name = (getattr(b_type, "__name__", "") or str(b_type)).lower()
+        cls_name = getattr(getattr(b, "__class__", type(b)), "__name__", "").lower()
+        guid = str(getattr(b_type, "guid64", "") or getattr(b, "guid64", "") or "")
+        b_str = str(b).lower()
+        loc_name = ""
+        for name_attr in ("buff_name", "name", "_name"):
+            v = getattr(b_type, name_attr, None) or getattr(b, name_attr, None)
+            if v and isinstance(v, str):
+                loc_name = v.lower()
+                break
+        comb = f"{b_name} {cls_name} {guid} {b_str} {loc_name}"
+        if any(k in comb for k in labor_keys):
+            return True
+        if "labor" in comb and any(k in comb for k in ["pregnan", "birth", "baby", "delivery", "contractions"]):
+            return True
+
+    # 4. Pregnancy tracker checks: method calls, Trimester enum, and progress
+    try:
+        p_trk = getattr(actual_sim_info, "pregnancy_tracker", None)
+        if p_trk is not None:
+            for m_name in ("is_in_labor", "in_labor", "_in_labor", "is_labor"):
+                m = getattr(p_trk, m_name, None)
+                if callable(m) and m():
+                    return True
+                elif bool(m):
+                    return True
+
+            cur_tri = None
+            if hasattr(p_trk, "get_current_trimester"):
+                try:
+                    cur_tri = p_trk.get_current_trimester()
+                except Exception:
+                    pass
+            elif hasattr(p_trk, "current_trimester"):
+                cur_tri = getattr(p_trk, "current_trimester", None)
+            if cur_tri is not None and "labor" in str(cur_tri).lower():
+                return True
+
+            is_preg = getattr(actual_sim_info, "is_pregnant", False) or getattr(p_trk, "is_pregnant", False)
+            if is_preg:
+                prog = getattr(actual_sim_info, "pregnancy_progress", 0.0)
+                if not prog and hasattr(p_trk, "get_pregnancy_progress"):
+                    try:
+                        prog = p_trk.get_pregnancy_progress()
+                    except Exception:
+                        pass
+                if prog is not None and float(prog) >= 0.99:
+                    return True
+    except Exception:
+        pass
+
+    # 5. Running affordances / interactions
+    try:
+        if inst is not None:
+            for inter in getattr(inst, "get_running_and_queued_interactions", lambda: ())():
+                aff = getattr(inter, "affordance", None)
+                aff_n = (getattr(aff, "__name__", "") or str(aff) or "").lower()
+                if any(k in aff_n for k in ["giving_birth", "childbirth", "deliver_baby", "labor_contractions", "have_baby", "in_labor"]):
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def get_sim_labor_hazard_context(sim_info=None, other_sim_info=None, is_en: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Returns an emergency warning context if a Sim (female or male) is actively in labor.
+    Strictly returns None during trimesters 1, 2, and 3.
+    """
+    try:
+        # Check 1: sim_info (Self is in labor)
+        if sim_info is not None and is_sim_in_labor_state(sim_info):
+            name = getattr(sim_info, "first_name", "Сим" if not is_en else "Sim")
+            gender_raw = getattr(getattr(sim_info, "gender", None), "name", "FEMALE")
+            is_male = (gender_raw == "MALE")
+
+            is_alien = False
+            try:
+                from ai_thought_reader.config import get_experimental_flag
+                if is_male and get_experimental_flag("alien_male_pregnancy"):
+                    is_alien = True
+            except Exception:
+                pass
+            if not is_alien:
+                p_text = (get_sim_pregnancy_info(sim_info) or "").lower()
+                is_alien = ("инопланет" in p_text or "похищен" in p_text or "alien" in p_text)
+
+            if is_en:
+                if is_alien:
+                    summary = f"{name} is having active contractions and delivering an alien baby right now! (Buff 'Baby is Coming!')"
+                else:
+                    summary = f"{name} is having active contractions and giving birth right now! (Buff 'Baby is Coming!')"
+                full_context = (
+                    f"EMERGENCY (LABOR & CHILDBIRTH): {name} is actively giving birth this second! "
+                    f"Forbidden to discuss routine, work, or casual topics. Focus entirely on contractions, panic, pain, and urgent delivery."
+                )
+            else:
+                if is_alien:
+                    summary = f"У {name} прямо сейчас начались схватки и роды инопланетного малыша! (Мудлет «Пора!» — срочно рожать дома в люльке или лететь в больницу)"
+                else:
+                    summary = f"У {name} прямо сейчас начались болезненные схватки и роды! (Мудлет «Пора!» — срочно рожать в люльке дома или ехать в больницу)"
+                full_context = (
+                    f"ЧРЕЗВЫЧАЙНАЯ СИТУАЦИЯ (СХВАТКИ И РОДЫ): У {name} прямо в эту секунду происходят активные РОДЫ (мудлет «Пора!»)! "
+                    f"Категорически запрещено думать или говорить о повседневных делах, работе или спокойном быте. "
+                    f"Все мысли и эмоции должны быть сосредоточены исключительно на родах, боли от схваток, панике, волнении и скором появлении малыша!"
+                )
+
+            return {
+                "is_self": True,
+                "labor_sim_id": getattr(sim_info, "sim_id", 0),
+                "labor_sim_name": name,
+                "is_male": is_male,
+                "is_alien": is_alien,
+                "summary": summary,
+                "summary_en": summary,
+                "full_context": full_context,
+                "full_context_en": full_context,
+            }
+
+        # Check 2: other_sim_info (Direct dialogue partner is in labor)
+        if other_sim_info is not None and is_sim_in_labor_state(other_sim_info):
+            o_name = getattr(other_sim_info, "first_name", "Сим" if not is_en else "Sim")
+            o_gender = getattr(getattr(other_sim_info, "gender", None), "name", "FEMALE")
+            o_is_male = (o_gender == "MALE")
+
+            if is_en:
+                summary = f"{o_name} is actively in labor and giving birth right now! (Baby is being born this minute)"
+                full_context = (
+                    f"EMERGENCY (LABOR & CHILDBIRTH): {o_name} is actively giving birth right in front of you! "
+                    f"Focus on urgent assistance, panic, support, and rushing to the hospital or bassinet."
+                )
+            else:
+                summary = f"У {o_name} прямо сейчас начались болезненные схватки и роды! (Ребенок рождается сию минуту)"
+                full_context = (
+                    f"ЧРЕЗВЫЧАЙНАЯ СИТУАЦИЯ (СХВАТКИ И РОДЫ): У {o_name} прямо на глазах начались активные роды и схватки! "
+                    f"Запрещено вести спокойные разговоры. Все внимание должно быть приковано к поддержке рожающего, панике, волнению и срочной организации родов!"
+                )
+
+            return {
+                "is_self": False,
+                "labor_sim_id": getattr(other_sim_info, "sim_id", 0),
+                "labor_sim_name": o_name,
+                "is_male": o_is_male,
+                "is_alien": False,
+                "summary": summary,
+                "summary_en": summary,
+                "full_context": full_context,
+                "full_context_en": full_context,
+            }
+
+        # Check 3: Check household Sims
+        if sim_info is not None:
+            household = getattr(sim_info, "household", None)
+            if household is not None and hasattr(household, "sim_info_gen"):
+                for h_sim in household.sim_info_gen():
+                    if h_sim != sim_info and is_sim_in_labor_state(h_sim):
+                        h_name = getattr(h_sim, "first_name", "Член семьи" if not is_en else "Family member")
+                        if is_en:
+                            summary = f"Labor in household: {h_name} is actively in labor and having contractions right now!"
+                            full_context = f"EMERGENCY (CHILDBIRTH): {h_name} in the household has gone into active labor! Urgent baby delivery!"
+                        else:
+                            summary = f"Экстренная ситуация в семье: у {h_name} прямо сейчас начались схватки и роды!"
+                            full_context = f"ЧРЕЗВЫЧАЙНАЯ СИТУАЦИЯ (РОЖДЕНИЕ МАЛЫША): У {h_name} прямо сейчас начались роды и схватки! Все мысли о помощи и рождении ребенка!"
+                        return {
+                            "is_self": False,
+                            "labor_sim_id": getattr(h_sim, "sim_id", 0),
+                            "labor_sim_name": h_name,
+                            "is_male": getattr(getattr(h_sim, "gender", None), "name", "FEMALE") == "MALE",
+                            "is_alien": False,
+                            "summary": summary,
+                            "summary_en": summary,
+                            "full_context": full_context,
+                            "full_context_en": full_context,
+                        }
+    except Exception as e:
+        log_exception("Error in get_sim_labor_hazard_context", e)
+
+    return None
+
+
+def get_plant_growth_stage(tgt, inter=None, is_en: bool = False) -> str:
+    """
+    Extracts the growth stage of the plant being interacted with.
+    Supported stages:
+      - Умирающее / Dying
+      - Саженец / Seedling (dirt mound)
+      - Росток / Sprout
+      - Взрослое / Mature
+      - В цвету / In bloom
+    Returns lowercase localized string, or empty string "" if undetermined.
+    """
+    try:
+        from sims4.localization import LocalizationHelperTuning
+    except Exception:
+        LocalizationHelperTuning = None
+
+    candidates = []
+
+    def _add_cand(obj):
+        if obj is not None and obj not in candidates:
+            candidates.append(obj)
+
+    # 1. Interaction target (often the specific plant entity)
+    if inter is not None:
+        try:
+            _add_cand(getattr(inter, "target", None))
+        except Exception:
+            pass
+
+    # 2. Main target passed to function
+    _add_cand(tgt)
+
+    # 3. Children of target (e.g. plant slotted in dirt patch / planter box / pot)
+    if tgt is not None and hasattr(tgt, "children"):
+        try:
+            for child in getattr(tgt, "children", ()):
+                _add_cand(child)
+        except Exception:
+            pass
+
+    # 4. Children of interaction target
+    if inter is not None:
+        try:
+            i_tgt = getattr(inter, "target", None)
+            if i_tgt is not None and hasattr(i_tgt, "children"):
+                for child in getattr(i_tgt, "children", ()):
+                    _add_cand(child)
+        except Exception:
+            pass
+
+    # 5. Parent object (if target is a slotted sub-object)
+    if tgt is not None and hasattr(tgt, "parent"):
+        try:
+            _add_cand(getattr(tgt, "parent", None))
+        except Exception:
+            pass
+
+    def _normalize_stage(raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        t = str(raw_text).strip().lower()
+        if any(w in t for w in ["умирающ", "увядш", "мертв", "dying", "dead"]):
+            return "dying" if is_en else "умирающее"
+        if any(w in t for w in ["саженец", "кучк", "гряз", "земл", "mound", "dirt", "planted", "seedling", "sapling"]):
+            return "seedling" if is_en else "саженец"
+        if any(w in t for w in ["росток", "sprout"]):
+            return "sprout" if is_en else "росток"
+        if any(w in t for w in ["взрослое", "взросл", "mature"]):
+            return "mature" if is_en else "взрослое"
+        if any(w in t for w in ["в цвету", "цвет", "bloom", "blossom", "flowering", "harvestable"]):
+            return "in bloom" if is_en else "в цвету"
+        return ""
+
+    for cand in candidates:
+        if cand is None:
+            continue
+
+        # Check state_component
+        if hasattr(cand, "state_component") and cand.state_component is not None:
+            try:
+                sc = cand.state_component
+                states_dict = getattr(sc, "_states", None)
+                if states_dict:
+                    items = []
+                    if hasattr(states_dict, "items"):
+                        try:
+                            items = list(states_dict.items())
+                        except Exception:
+                            items = []
+                    elif hasattr(states_dict, "values"):
+                        try:
+                            items = [(None, v) for v in states_dict.values()]
+                        except Exception:
+                            items = []
+
+                    for s_type, s_val in items:
+                        if s_val is None:
+                            continue
+                        st_name = getattr(s_type, "__name__", str(s_type)).lower() if s_type else ""
+                        sv_name = getattr(s_val, "__name__", str(s_val)).lower()
+
+                        is_growth_state = (
+                            "growth" in st_name or "plantgrowth" in st_name or
+                            "cropgrowth" in st_name or "plantgrowth" in sv_name or
+                            "crop_growth" in sv_name or "oversizedcrop_growth" in sv_name or
+                            any(k in sv_name for k in [
+                                "sprout", "dirtmound", "mound", "mature", "blooming",
+                                "blossom", "flowering", "inbloom", "dying", "dead", "sapling"
+                            ])
+                        )
+
+                        if is_growth_state:
+                            # 1. Try display_name via LocalizationHelperTuning
+                            d_name = getattr(s_val, "display_name", None)
+                            if d_name is not None and LocalizationHelperTuning is not None:
+                                try:
+                                    raw_d = _loc_text(d_name)
+                                    norm = _normalize_stage(raw_d)
+                                    if norm:
+                                        return norm
+                                except Exception:
+                                    pass
+
+                            # 2. Match directly on sv_name
+                            norm_val = _normalize_stage(sv_name)
+                            if norm_val:
+                                return norm_val
+            except Exception:
+                pass
+
+        # Check gardening_component UI metadata
+        if hasattr(cand, "gardening_component") and cand.gardening_component is not None:
+            try:
+                gc = cand.gardening_component
+                if hasattr(gc, "_ui_metadata_gen"):
+                    for k, v in gc._ui_metadata_gen():
+                        k_str = str(k).lower()
+                        if any(gk in k_str for gk in ["growth", "stage", "state"]):
+                            raw_v = None
+                            if LocalizationHelperTuning is not None:
+                                try:
+                                    raw_v = _loc_text(v)
+                                except Exception:
+                                    pass
+                            if not raw_v:
+                                raw_v = str(v)
+                            norm = _normalize_stage(raw_v)
+                            if norm:
+                                return norm
+            except Exception:
+                pass
+
+    return ""
+
+
+def extract_crafting_item_name(inter, tgt=None, interactions_list=None) -> str:
+    """
+    Safely extracts the human-readable localized name of the item, dish, drink, or
+    object currently being crafted by the Sim.
+    Covers Cooking, Baking, Mixology, Woodworking, Knitting, Cross-Stitch,
+    Jewelry Crafting, Gem Cutting, Candle Making, Fabrication, Robotics,
+    Flower Arranging, Canning, Fizzing, and Painting.
+    """
+    # 1. UI name on the interaction itself (e.g. 'Подать онигири' -> 'Онигири', 'Приготовить: Осенний салат' -> 'Осенний салат')
+    for test_i in [inter] + (interactions_list or []):
+        if test_i is None:
+            continue
+        try:
+            ui_name = get_interaction_ui_name(test_i)
+            if ui_name:
+                cand = ""
+                if ":" in ui_name:
+                    cand = ui_name.split(":", 1)[1].strip()
+                elif "(" in ui_name and ")" in ui_name:
+                    start = ui_name.find("(") + 1
+                    end = ui_name.rfind(")")
+                    if 0 <= start < end:
+                        cand = ui_name[start:end].strip()
+                else:
+                    cand = re.sub(
+                        r"^(подать|приготовить|сделать|испечь|сварить|пожарить|запечь|создать|смешать|сервировать|взять|вязать|вышить|мастерить|собрать|огранить|произвести|изготовить|написать|serve|cook|make|bake|prepare|craft|mix|knit|stitch|paint)\s+",
+                        "",
+                        ui_name,
+                        flags=re.IGNORECASE
+                    ).strip()
+
+                if cand and is_human_readable_text(cand):
+                    c_low = cand.lower().strip()
+                    bad_exact = {
+                        "приготовить", "сделать", "создать", "мастерить", "испечь", "смешать", "вязать", "вышить",
+                        "cook", "make", "craft", "bake", "mix", "knit", "stitch", "paint", "draw", "serve", "подать",
+                        "верстак", "стол", "плита", "печь", "духовка", "стойка", "мольберт", "доска", "миксер", "вафельница", "бар",
+                        "table", "bench", "station", "stove", "oven", "easel", "counter", "bar", "mixer"
+                    }
+                    if c_low not in bad_exact and len(cand) >= 2:
+                        return cand.capitalize()
+        except Exception:
+            pass
+
+    # 2. Check crafting process on inter, tgt, or any running interaction
+    candidates_to_probe = [inter, tgt]
+    if interactions_list:
+        for other_i in interactions_list:
+            if other_i not in candidates_to_probe:
+                candidates_to_probe.append(other_i)
+                o_tgt = getattr(other_i, "target", None)
+                if o_tgt is not None and o_tgt not in candidates_to_probe:
+                    candidates_to_probe.append(o_tgt)
+
+    for obj in candidates_to_probe:
+        if obj is None:
+            continue
+        proc = None
+        if hasattr(obj, "get_crafting_process") and callable(getattr(obj, "get_crafting_process")):
+            try:
+                proc = obj.get_crafting_process()
+            except Exception:
+                pass
+        if proc is None and hasattr(obj, "crafting_process"):
+            proc = getattr(obj, "crafting_process", None)
+
+        if proc is not None:
+            # 2a. Recipe display name or tuning name
+            recipe = getattr(proc, "recipe", None)
+            if recipe is not None:
+                if hasattr(recipe, "get_display_name") and LocalizationHelperTuning is not None:
+                    try:
+                        d = recipe.get_display_name()
+                        if d:
+                            raw = _loc_text(d)
+                            if raw and is_human_readable_text(str(raw)):
+                                return str(raw).strip()
+                    except Exception:
+                        pass
+                if hasattr(recipe, "_display_name") and LocalizationHelperTuning is not None:
+                    try:
+                        d = getattr(recipe, "_display_name")
+                        if d:
+                            raw = _loc_text(d)
+                            if raw and is_human_readable_text(str(raw)):
+                                return str(raw).strip()
+                    except Exception:
+                        pass
+
+                rec_name = getattr(recipe, "__name__", "") or str(recipe)
+                rec_name_clean = rec_name.replace("_", "").lower()
+                for cat_keys, cat_name in CRAFT_ITEMS_CATALOG:
+                    if any(k in rec_name_clean for k in cat_keys):
+                        return cat_name
+
+            # 2b. Crafted object / ico / target inside crafting process
+            for attr in ["current_ico", "crafting_process_target", "crafted_value"]:
+                if hasattr(proc, attr):
+                    item = getattr(proc, attr, None)
+                    if item is not None:
+                        if hasattr(item, "get_custom_name"):
+                            cn = item.get_custom_name()
+                            if cn and is_human_readable_text(str(cn)):
+                                return str(cn).strip()
+                        defn = getattr(item, "definition", None) or getattr(item, "default_definition", None)
+                        if defn is not None and hasattr(defn, "name") and LocalizationHelperTuning is not None:
+                            try:
+                                raw = _loc_text(defn.name)
+                                if raw and is_human_readable_text(str(raw)):
+                                    raw_s = str(raw).strip()
+                                    if not any(b in raw_s.lower() for b in ["верстак", "стол", "плита", "печь", "стойка", "table", "bench", "station", "stove"]):
+                                        return raw_s
+                            except Exception:
+                                pass
+                        item_n = getattr(item, "__name__", "") or str(item)
+                        item_clean = item_n.replace("_", "").lower()
+                        for cat_keys, cat_name in CRAFT_ITEMS_CATALOG:
+                            if any(k in item_clean for k in cat_keys):
+                                return cat_name
+
+    # 3. Direct recipe attribute on interaction or object
+    for obj in candidates_to_probe:
+        if obj is not None and hasattr(obj, "recipe") and obj.recipe is not None:
+            rec = getattr(obj, "recipe")
+            if hasattr(rec, "get_display_name") and LocalizationHelperTuning is not None:
+                try:
+                    d = rec.get_display_name()
+                    if d:
+                        raw = _loc_text(d)
+                        if raw and is_human_readable_text(str(raw)):
+                            return str(raw).strip()
+                except Exception:
+                    pass
+            rec_n = getattr(rec, "__name__", "") or str(rec)
+            rec_clean = rec_n.replace("_", "").lower()
+            for cat_keys, cat_name in CRAFT_ITEMS_CATALOG:
+                if any(k in rec_clean for k in cat_keys):
+                    return cat_name
+
+    # 4. Target definition or custom name if target is the item being crafted
+    if tgt is not None and not hasattr(tgt, "sim_info"):
+        try:
+            if hasattr(tgt, "get_custom_name"):
+                cn = tgt.get_custom_name()
+                if cn and is_human_readable_text(str(cn)):
+                    return str(cn).strip()
+            defn = getattr(tgt, "definition", None) or getattr(tgt, "default_definition", None)
+            if defn is not None and hasattr(defn, "name") and LocalizationHelperTuning is not None:
+                raw = _loc_text(defn.name)
+                if raw and is_human_readable_text(str(raw)):
+                    raw_s = str(raw).strip()
+                    raw_low = raw_s.lower()
+                    if not any(b in raw_low for b in [
+                        "верстак", "стол", "плита", "печь", "стойка", "мольберт", "доска", "миксер", "вафельница",
+                        "table", "bench", "station", "stove", "oven", "easel", "counter", "bar", "mixer"
+                    ]):
+                        return raw_s
+            tgt_n = getattr(tgt, "__name__", "") or str(tgt)
+            tgt_clean = tgt_n.replace("_", "").lower()
+            for cat_keys, cat_name in CRAFT_ITEMS_CATALOG:
+                if any(k in tgt_clean for k in cat_keys):
+                    return cat_name
+        except Exception:
+            pass
+
+    # 5. Check all interactions affordances and tokens against CRAFT_ITEMS_CATALOG
+    for sub_i in [inter] + (interactions_list or []):
+        if sub_i is None:
+            continue
+        try:
+            tokens = get_interaction_identifier_tokens(sub_i)
+            combined_tok = f"{getattr(sub_i, '__name__', '')} {' '.join(tokens)}".replace("_", "").lower()
+            for cat_keys, cat_name in CRAFT_ITEMS_CATALOG:
+                if any(k in combined_tok for k in cat_keys):
+                    return cat_name
+        except Exception:
+            pass
+
+    return ""
+
+
+def get_object_catalog_name(tgt, inter=None) -> str:
+    """
+    Safely extracts a localized, human-readable name of an object in The Sims 4.
+    Priority 1: Extract from interaction UI display name parentheses, e.g. 'Чинить (Плита «Шеф»)' -> 'Плита «Шеф»'.
+    Priority 2: Custom name set by player (if renamed).
+    Priority 3: Target definition catalog name (tgt.definition.name / tgt.definition.get_instance_name()).
+    """
+    if inter is not None:
+        try:
+            ui_name = get_interaction_ui_name(inter)
+            if ui_name and "(" in ui_name and ")" in ui_name:
+                start = ui_name.find("(") + 1
+                end = ui_name.rfind(")")
+                if 0 <= start < end:
+                    parsed = ui_name[start:end].strip()
+                    if parsed and is_human_readable_text(parsed):
+                        return parsed
+        except Exception:
+            pass
+
+    if tgt is None:
+        return ""
+
+    try:
+        # Player custom renamed object
+        if hasattr(tgt, "get_custom_name"):
+            c_name = tgt.get_custom_name()
+            if c_name and is_human_readable_text(str(c_name)):
+                return str(c_name).strip()
+        if hasattr(tgt, "custom_name"):
+            c_name = tgt.custom_name
+            if c_name and is_human_readable_text(str(c_name)):
+                return str(c_name).strip()
+    except Exception:
+        pass
+
+    try:
+        # Target definition catalog name
+        defn = getattr(tgt, "definition", None)
+        if defn is not None:
+            if hasattr(defn, "name"):
+                d_name = getattr(defn, "name")
+                if d_name and LocalizationHelperTuning is not None:
+                    try:
+                        raw = _loc_text(d_name)
+                        if raw and is_human_readable_text(str(raw)):
+                            return str(raw).strip()
+                    except Exception:
+                        pass
+                if d_name and is_human_readable_text(str(d_name)):
+                    return str(d_name).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+def get_dynamic_repair_activity(sim_info, sim_instance, interactions_list, full_context_text: str = "") -> str:
+    """
+    Universal repair, tinkering, and upgrade engine for ANY object in The Sims 4.
+    Handles 40+ specific appliance/science/plumbing/eco/animal categories + dynamic catalog fallback.
+    """
+    if not interactions_list:
+        return ""
+
+    for inter in interactions_list:
+        try:
+            # Skip social conversations (talking about handiness is not physical repairing)
+            if getattr(inter, "is_social", False):
+                continue
+            aff = getattr(inter, "affordance", None)
+            if aff is not None and getattr(aff, "is_social", False):
+                continue
+
+            i_tokens = get_interaction_identifier_tokens(inter)
+            ui_name = get_interaction_ui_name(inter)
+            inter_name = getattr(inter, "__name__", str(inter)).lower()
+            aff_name = getattr(aff, "__name__", "").lower() if aff is not None else ""
+            cls_name = getattr(getattr(inter, "__class__", None), "__name__", "").lower()
+
+            tgt = getattr(inter, "target", None)
+            if tgt is None and hasattr(inter, "get_participant"):
+                try:
+                    from interactions import ParticipantType
+                    tgt = inter.get_participant(ParticipantType.TargetSim) or inter.get_participant(ParticipantType.Object)
+                except Exception:
+                    pass
+
+            t_tokens = []
+            if tgt is not None:
+                t_tokens.append(type(tgt).__name__.lower())
+                t_tokens.append(getattr(tgt, "__name__", str(tgt)).lower())
+                defn = getattr(tgt, "definition", None)
+                if defn is not None:
+                    try:
+                        t_tokens.append(str(getattr(defn, "name", "")).lower())
+                    except Exception:
+                        pass
+
+            inter_raw = f"{inter_name} {aff_name} {cls_name} {' '.join(i_tokens)} {ui_name}".lower()
+            target_raw = f"{' '.join(t_tokens)}".lower()
+            combined_raw = f"{inter_raw} {target_raw}".lower()
+            combined_condensed = combined_raw.replace(" ", "").replace("_", "")
+
+            # 1. Detection of Repair / Maintenance / Salvage / Tinkering / Upgrade
+            is_repair = (
+                any(k in combined_raw for k in [
+                    "repair", "salvage", "scavenge", "tinkering", "fix_broken", "fixbroken",
+                    "чинить", "починить", "отремонтировать", "ремонт", "исправить", "разобрать на детали"
+                ])
+                or any(k in combined_condensed for k in [
+                    "repair", "salvage", "scavenge", "tinkering",
+                    "починить", "отремонтировать", "чинить"
+                ])
+            )
+            # Check Russian root "чин" safely (not "чист")
+            if not is_repair and "чин" in combined_raw:
+                if any(k in combined_raw for k in ["чинить", "починить", "чинит", "починка", "чинка"]):
+                    is_repair = True
+
+            is_upgrade = (
+                any(k in combined_raw for k in [
+                    "upgrade", "улучшить", "модернизировать", "улучшение", "модернизация"
+                ])
+                or any(k in combined_condensed for k in [
+                    "upgrade", "улучшить", "модернизировать"
+                ])
+            )
+
+            if not (is_repair or is_upgrade):
+                continue
+
+            # Exclude toddler mess / child playing
+            if any(k in combined_raw for k in ["makemess", "playinmess", "playmess", "messplay"]):
+                continue
+
+            # 2. Categorization across 40+ object types
+            # 2.1 Stove, Oven, Grill, Barbecue
+            if any(k in target_raw or k in inter_raw for k in ["stove", "oven", "grill", "range", "barbeque", "bbq", "плит", "духовк", "гриль", "барбекю"]):
+                if is_upgrade:
+                    return "Модернизирует и улучшает кухонную плиту / гриль"
+                return "Чинит и ремонтирует кухонную плиту / гриль"
+
+            # 2.2 Refrigerator
+            if any(k in combined_raw for k in ["fridge", "refrigerator", "minifridge", "холодильник"]):
+                if is_upgrade:
+                    return "Модернизирует и улучшает холодильник"
+                return "Чинит и ремонтирует холодильник"
+
+            # 2.3 Dishwasher
+            if any(k in combined_raw for k in ["dishwasher", "посудомоечн", "посудомойк"]):
+                if is_upgrade:
+                    return "Модернизирует и улучшает посудомоечную машину"
+                return "Чинит и ремонтирует посудомоечную машину"
+
+            # 2.4 Microwave
+            if any(k in combined_raw for k in ["microwave", "микроволновк", "свч"]):
+                return "Чинит микроволновую печь"
+
+            # 2.5 Coffee maker, Espresso machine, Tea maker / Brewer
+            if any(k in combined_raw for k in ["coffee", "espresso", "teamaker", "tea_brewer", "teabrewer", "кофеварк", "кофемашин", "чайник", "эспрессо"]):
+                return "Чинит кофеварку / чайник"
+
+            # 2.6 Small Kitchen Appliances: Waffle maker, Pizza oven, Popcorn, Stand mixer, Fondue, Deep fryer, Hot pot
+            if any(k in combined_raw for k in ["waffle", "pizza", "popcorn", "standmixer", "mixer", "fondue", "hotpot", "вафельниц", "пицц", "попкорн", "миксер", "фондю", "фритюрниц"]):
+                return "Чинит кухонную мелкую технику"
+
+            # 2.7 Sink & Faucet
+            if any(k in combined_raw for k in ["sink", "washbasin", "раковин", "умывальник", "кран"]):
+                if is_upgrade:
+                    return "Модернизирует сантехнику (устанавливает улучшения)"
+                return "Чинит раковину и водопроводный кран"
+
+            # 2.8 Toilet
+            if any(k in combined_raw for k in ["toilet", "унитаз"]):
+                if is_upgrade:
+                    return "Модернизирует сантехнику (устанавливает улучшения)"
+                return "Чинит и прочищает унитаз"
+
+            # 2.9 Shower (excluding tubs)
+            if any(k in combined_raw for k in ["shower", "душ"]) and not any(k in combined_raw for k in ["bath", "tub", "ванн"]):
+                if is_upgrade:
+                    return "Модернизирует сантехнику (устанавливает улучшения)"
+                return "Чинит душевую кабину"
+
+            # 2.10 Bathtub & Hot Tub / Jacuzzi
+            if any(k in combined_raw for k in ["bath", "tub", "hottub", "джакузи", "ванн"]):
+                if is_upgrade:
+                    return "Модернизирует сантехнику (устанавливает улучшения)"
+                return "Чинит ванну / джакузи"
+
+            # 2.11 Computer & Laptop
+            if any(k in combined_raw for k in ["computer", "laptop", "ноутбук", "компьютер", "пк"]):
+                if is_upgrade:
+                    return "Модернизирует и улучшает компоненты компьютера"
+                return "Разбирает и чинит компьютер"
+
+            # 2.12 Television
+            if any(k in combined_raw for k in ["tv", "television", "телевизор"]):
+                return "Чинит и настраивает телевизор"
+
+            # 2.13 Stereo & DJ Booth
+            if any(k in combined_raw for k in ["stereo", "audio", "djbooth", "dj_booth", "стерео", "магнитофон", "диджей", "колонк"]):
+                return "Чинит аудиосистему / стереосистему"
+
+            # 2.14 Gaming Console & Arcade Machine
+            if any(k in combined_raw for k in ["gamingconsole", "console", "arcade", "приставк", "консол", "аркадн"]):
+                return "Чинит игровую приставку / аркадный автомат"
+
+            # 2.15 Washing Machine (Laundry Day)
+            if any(k in combined_raw for k in ["washingmachine", "washer", "стиральн"]):
+                return "Чинит стиральную машину"
+
+            # 2.16 Clothes Dryer (Laundry Day)
+            if any(k in combined_raw for k in ["dryer", "сушилк"]):
+                return "Чинит сушилку для белья"
+
+            # 2.17 Chemistry Analyzer (Get to Work)
+            if any(k in combined_raw for k in ["chemlab", "chemistrylab", "chemicalanalyzer", "chemistry", "химическ", "анализатор"]):
+                return "Чинит химический анализатор в лаборатории"
+
+            # 2.18 Invention Constructor (Get to Work)
+            if any(k in combined_raw for k in ["inventionconstructor", "invention", "конструктор", "робот-конструктор"]):
+                return "Чинит и налаживает изобретательский конструктор"
+
+            # 2.19 Cloning Machine (Get to Work)
+            if any(k in combined_raw for k in ["cloningmachine", "cloning", "клон"]):
+                return "Чинит и калибрует клонирующую машину"
+
+            # 2.20 Wormhole Generator / Electroflux Portal (Get to Work)
+            if any(k in combined_raw for k in ["wormholegenerator", "wormhole", "electroflux", "портал", "червоточин"]):
+                return "Чинит генератор червоточин (межпланетный портал)"
+
+            # 2.21 SimRay / Ray gun (Get to Work)
+            if any(k in combined_raw for k in ["simray", "freezeray", "raygun", "рентгеносим"]):
+                return "Чинит и перенастраивает Рентгеносим"
+
+            # 2.22 Eco Fabricator (Eco Lifestyle)
+            if any(k in combined_raw for k in ["fabricator", "преобразовател", "фабрикатор"]):
+                return "Чинит и налаживает эко-преобразователь (фабрикатор)"
+
+            # 2.23 Power / Water Generator (Eco Lifestyle)
+            if any(k in combined_raw for k in ["powergenerator", "watergenerator", "generator", "генератор"]):
+                return "Чинит генератор энергии / водосборник"
+
+            # 2.24 Wind Turbine / Solar Panel (Eco Lifestyle)
+            if any(k in combined_raw for k in ["windturbine", "turbine", "solarpanel", "solar", "ветрогенератор", "турбин", "солнечн"]):
+                return "Чинит ветряк / солнечные панели"
+
+            # 2.25 Juice Fizzer (Eco Lifestyle)
+            if any(k in combined_raw for k in ["juicefizzer", "fizzer", "соковарен", "шипучк"]):
+                return "Чинит аппарат для производства шипучки"
+
+            # 2.26 Candle Making Station (Eco Lifestyle)
+            if any(k in combined_raw for k in ["candlemaking", "candle_table", "candle", "свеч"]):
+                return "Чинит стол для изготовления свечей"
+
+            # 2.27 Chicken Coop (Cottage Living)
+            if any(k in combined_raw for k in ["chickencoop", "coop", "курятн"]):
+                return "Чинит и укрепляет курятник"
+
+            # 2.28 Animal Shed (Cottage Living)
+            if any(k in combined_raw for k in ["animalshed", "shed", "хлев", "стойл"]):
+                return "Чинит хлев для животных"
+
+            # 2.29 Dollhouse (Toddler / Kids)
+            if any(k in combined_raw for k in ["dollhouse", "кукольн"]):
+                return "Чинит сломанный кукольный домик"
+
+            # 2.30 Servo / Robot (Discover University)
+            if any(k in combined_raw for k in ["servo", "humanoidrobot", "серво"]):
+                return "Чинит и налаживает робота Серво"
+
+            # 2.31 Robotics Station (Discover University)
+            if any(k in combined_raw for k in ["roboticstable", "roboticsstation", "robotics", "робототехник"]):
+                return "Чинит верстак робототехники"
+
+            # 2.32 Thermostat (Seasons)
+            if any(k in combined_raw for k in ["thermostat", "термостат"]):
+                return "Чинит и калибрует термостат"
+
+            # 2.33 Trash Chute & NanoCan
+            if any(k in combined_raw for k in ["trashchute", "nanocan", "мусоропровод", "утилизатор"]):
+                return "Чинит мусоропровод / электронный утилизатор"
+
+            # 2.34 Cauldron / Potion Station (Realm of Magic)
+            if any(k in combined_raw for k in ["cauldron", "potion", "котел", "алхими"]):
+                return "Чинит и очищает магический котел"
+
+            # 2.35 Lamp / Light fixture
+            if any(k in combined_raw for k in ["lamp", "light", "люстр", "светильник", "ламп"]):
+                return "Чинит и заменяет лампочки в светильнике"
+
+            # 2.36 Bicycle (Discover University)
+            if any(k in combined_raw for k in ["bicycle", "bike", "велосипед"]):
+                return "Чинит и настраивает велосипед"
+
+            # 2.37 Weather Controller (Seasons)
+            if any(k in combined_raw for k in ["weathercontroller", "weather_machine", "управленипогод"]):
+                return "Чинит машину управления погодой"
+
+            # 2.38 Rocket Ship
+            if any(k in combined_raw for k in ["rocketship", "rocket", "ракетостроени", "ракет"]):
+                return "Чинит и собирает космическую ракету"
+
+            # 2.39 Salvaging Parts
+            if any(k in combined_raw for k in ["salvage", "scavenge", "сбордеталей", "разобрать"]):
+                return "Разбирает сломанный предмет на детали и шестеренки"
+
+            # 2.40 Universal Dynamic Catalog Name Fallback
+            catalog_name = get_object_catalog_name(tgt, inter)
+            if catalog_name:
+                if is_upgrade:
+                    return f"Модернизирует и улучшает: {catalog_name}"
+                return f"Чинит и ремонтирует: {catalog_name}"
+
+            if is_upgrade:
+                return "Модернизирует и улучшает оборудование"
+            return "Занимается починкой и ремонтом сломанного предмета"
+
+        except Exception:
+            continue
+
+    return ""
+
+
+def get_dynamic_cleaning_activity(sim_info, sim_instance, interactions_list, full_context_text: str = "") -> str:
+    """
+    Universal cleaning, sanitizing, chores, dishwashing, and garbage disposal engine.
+    Handles throwing away (food, trash, diapers), washing dishes (sink/dishwasher),
+    puddles/mess, appliances, plumbing, and dynamic catalog fallbacks.
+    """
+    if not interactions_list:
+        return ""
+
+    for inter in interactions_list:
+        try:
+            # Skip social conversations
+            if getattr(inter, "is_social", False):
+                continue
+            aff = getattr(inter, "affordance", None)
+            if aff is not None and getattr(aff, "is_social", False):
+                continue
+
+            i_tokens = get_interaction_identifier_tokens(inter)
+            ui_name = get_interaction_ui_name(inter)
+            inter_name = getattr(inter, "__name__", str(inter)).lower()
+            aff_name = getattr(aff, "__name__", "").lower() if aff is not None else ""
+            cls_name = getattr(getattr(inter, "__class__", None), "__name__", "").lower()
+
+            tgt = getattr(inter, "target", None)
+            if tgt is None and hasattr(inter, "get_participant"):
+                try:
+                    from interactions import ParticipantType
+                    tgt = inter.get_participant(ParticipantType.TargetSim) or inter.get_participant(ParticipantType.Object)
+                except Exception:
+                    pass
+
+            t_tokens = []
+            if tgt is not None:
+                t_tokens.append(type(tgt).__name__.lower())
+                t_tokens.append(getattr(tgt, "__name__", str(tgt)).lower())
+                defn = getattr(tgt, "definition", None)
+                if defn is not None:
+                    try:
+                        t_tokens.append(str(getattr(defn, "name", "")).lower())
+                    except Exception:
+                        pass
+
+            inter_raw = f"{inter_name} {aff_name} {cls_name} {' '.join(i_tokens)} {ui_name}".lower()
+            target_raw = f"{' '.join(t_tokens)}".lower()
+            combined_raw = f"{inter_raw} {target_raw}".lower()
+            combined_condensed = combined_raw.replace(" ", "").replace("_", "")
+
+            # 1. Skip toddlers/children playing with mess or splashing in toilet
+            is_toddler_mess = any(k in combined_condensed for k in [
+                "makemess", "makeamess", "playinmess", "playmess", "messplay",
+                "playintrash", "trashplay", "toddlertoiletplay", "playintoilet",
+                "toiletplay", "puddleplay", "playinpuddle", "curious"
+            ])
+            if is_toddler_mess:
+                continue
+
+            # 2. Detection of Cleaning / Sanitizing / Washing / Chores / Trash / Dishes
+            is_cleaning = (
+                any(k in combined_raw for k in [
+                    "clean", "wash", "mop", "sweep", "vacuum", "dust", "scrub", "tidy",
+                    "sanitize", "sponge", "wipe", "polish", "empty", "throwaway", "throw away",
+                    "bus dishes", "clear dishes", "collect trash", "collect dishes",
+                    "load dishwasher", "unload dishwasher", "laundry", "take out trash", "trash", "garbage"
+                ])
+                or any(k in combined_raw for k in [
+                    "почистить", "чистит", "уборк", "убрать", "вымыть", "помыть", "мыть",
+                    "протереть", "вытереть", "подмести", "пылесос", "вынести", "выбросить", "выкинуть", "отмыть", "постирать", "мусор", "посуд"
+                ])
+                or any(k in combined_condensed for k in [
+                    "clean", "wash", "mop", "sweep", "vacuum", "dust", "scrub", "tidy",
+                    "sanitize", "sponge", "wipe", "polish", "busdishes", "cleardishes",
+                    "collecttrash", "collectdishes", "loaddishwasher", "unloaddishwasher", "throwaway",
+                    "почистить", "чистит", "уборка", "убрать", "вымыть", "помыть", "выбросить", "выкинуть"
+                ])
+            )
+            if not is_cleaning and "чист" in combined_raw:
+                is_cleaning = True
+
+            # If it's a repair interaction, it belongs to repair engine, not cleaning!
+            if any(k in combined_raw for k in ["чинить", "починить", "ремонт", "исправить"]) and not any(k in combined_raw for k in ["clean", "wash", "чист", "мыть"]):
+                continue
+
+            if not is_cleaning:
+                continue
+
+            # Extract item description (food recipe, carried object, or target definition)
+            item_desc = ""
+            try:
+                recipe_name = get_sim_active_recipe_or_dish_name(sim_info, sim_instance, [inter])
+                if recipe_name:
+                    item_desc = recipe_name
+            except Exception:
+                pass
+            if not item_desc:
+                try:
+                    held_name = get_sim_held_object_name(sim_info, is_en=False)
+                    if held_name and not any(k in held_name.lower() for k in ["мусорное ведро", "мусорный бак", "урна", "раковина", "trash"]):
+                        item_desc = held_name
+                except Exception:
+                    pass
+            if not item_desc and tgt is not None:
+                try:
+                    cat_name = get_object_catalog_name(tgt, inter)
+                    if cat_name and not any(k in cat_name.lower() for k in ["мусорное ведро", "мусорный бак", "урна", "раковина", "посудомойк", "trash", "can", "bin", "dumpster", "sink", "dishwasher"]):
+                        item_desc = cat_name
+                except Exception:
+                    pass
+
+            # 3. Categorization across cleaning categories in STRICT precedence order:
+
+            # 3.0. Trash, Garbage & Throwing away (HIGHEST PRIORITY for throwaway actions)
+            is_trash_or_discard = (
+                any(k in combined_raw for k in ["throwaway", "throw_away", "throw away", "empty_trash", "emptytrash", "collect_trash", "collecttrash", "take_out_trash", "takeouttrash", "dumpster", "trash", "garbage", "rubbish"])
+                or any(k in combined_raw for k in ["выбросить", "выкинуть", "вынести мусор", "выбрасывает", "мусор", "урн"])
+            )
+            if is_trash_or_discard:
+                if any(k in combined_raw for k in ["diaper", "подгузник"]):
+                    return "Выбрасывает использованный подгузник в мусорное ведро"
+                if item_desc:
+                    return f"Выбрасывает в мусорное ведро: {item_desc}"
+                return "Выбрасывает мусор в мусорное ведро"
+
+            # 3.1. Dishes & Dishwasher (HIGH PRIORITY for dish washing)
+            is_dishes = (
+                any(k in combined_raw for k in ["wash_dishes", "washdishes", "bus_dishes", "busdishes", "clear_dishes", "cleardishes", "load_dishwasher", "loaddishwasher", "unload_dishwasher", "dish", "plate", "bowl", "cup", "glass", "dishwasher"])
+                or any(k in combined_raw for k in ["посуд", "тарелк", "кружк", "чашк", "бокал", "посудомоечн", "вымыть посуду", "моет посуду", "помыть посуду", "убрать посуду"])
+            )
+            if is_dishes:
+                if any(k in combined_raw for k in ["dishwasher", "посудомоечн", "посудомойк"]):
+                    if item_desc:
+                        return f"Загружает посуду ({item_desc}) в посудомоечную машину"
+                    return "Моет посуду в посудомоечной машине"
+                else:
+                    if item_desc:
+                        return f"Моет посуду (остатки {item_desc}) в раковине"
+                    return "Моет посуду в раковине"
+
+            # 3.2 Floor mess, puddles, spills
+            if any(k in combined_raw for k in ["puddle", "луж", "water"]) and any(k in combined_raw for k in ["mop", "clean", "швабр", "вытер", "вымыт", "убрать"]):
+                return "Вытирает шваброй лужу на полу"
+            if any(k in combined_raw for k in ["mess", "flour", "art", "spill", "грязь", "краск"]):
+                return "Убирает беспорядок на полу"
+            if any(k in combined_raw for k in ["mop", "швабр"]):
+                return "Моет пол шваброй"
+
+            # 3.3 Stove, Oven, Grill (Only when targeting the stove appliance directly)
+            if any(k in target_raw or k in inter_raw for k in ["stove", "oven", "grill", "range", "barbeque", "bbq", "плит", "духовк", "гриль"]):
+                return "Чистит и отмывает кухонную плиту"
+
+            # 3.4 Sink
+            if any(k in target_raw or k in inter_raw for k in ["sink", "washbasin", "раковин", "умывальник"]):
+                return "Моет и чистит раковину"
+
+            # 3.5 Toilet & Potty
+            if any(k in target_raw or k in inter_raw for k in ["toilet", "potty", "унитаз", "горшок"]):
+                return "Моет и чистит унитаз"
+
+            # 3.6 Shower
+            if any(k in target_raw or k in inter_raw for k in ["shower", "душ"]) and not any(k in target_raw or k in inter_raw for k in ["bath", "tub", "ванн"]):
+                return "Моет душевую кабину"
+
+            # 3.7 Bathtub & Hot Tub / Jacuzzi
+            if any(k in target_raw or k in inter_raw for k in ["bath", "tub", "hottub", "джакузи", "ванн"]):
+                return "Моет ванну / джакузи"
+
+            # 3.8 Counters, Tables, Kitchen Surfaces
+            if any(k in target_raw or k in inter_raw for k in ["counter", "table", "стол", "поверхност", "тумб"]):
+                return "Протирает кухонные поверхности и столы"
+
+            # 3.9 Refrigerator
+            if any(k in target_raw or k in inter_raw for k in ["fridge", "refrigerator", "холодильник"]):
+                return "Наводит порядок и моет холодильник"
+
+            # 3.11 Special BMD Bong & Ashtray
+            if "bong" in combined_raw and "bongo" not in combined_raw:
+                return "Чистит и моет бонг"
+            if "ashtray" in combined_raw or "пепельниц" in combined_raw:
+                return "Вытряхивает и чистит пепельницу"
+
+            # 3.12 Vacuum & Dusting
+            if any(k in combined_raw for k in ["vacuum", "dust", "пылесос", "пыл"]):
+                return "Пылесосит и наводит чистоту"
+
+            # 3.13 Laundry (Washer, dryer, hamper, laundry tub)
+            if any(k in combined_raw for k in ["laundry", "washer", "dryer", "washingmachine", "стирк", "постирать", "белье"]):
+                return "Занимается стиркой белья"
+
+            # 3.14 Chicken Coop & Animal Shed (Cottage Living)
+            if any(k in combined_raw for k in ["chickencoop", "coop", "animalshed", "shed", "курятн", "хлев"]):
+                return "Чистит курятник / хлев и меняет подстилку"
+
+            # 3.15 Pet Litter Box & Bowls
+            if any(k in combined_raw for k in ["litterbox", "petbowl", "litter_box", "лоток", "миск"]):
+                return "Чистит лоток / моет миски питомца"
+
+            # 3.16 Aquarium & Pet Cage
+            if any(k in combined_raw for k in ["aquarium", "fishtank", "cage", "аквариум", "клетк"]):
+                return "Чистит аквариум / клетку питомца"
+
+            # 3.17 Science Equipment (Get to Work)
+            if any(k in combined_raw for k in ["chemlab", "chemistrylab", "chemicalanalyzer", "chemistry", "химическ", "анализатор", "inventionconstructor"]):
+                return "Чистит и дезинфицирует научное оборудование"
+
+            # 3.18 Eco Machines & Generators
+            if any(k in combined_raw for k in ["fabricator", "powergenerator", "watergenerator", "turbine", "генератор", "преобразовател"]):
+                return "Чистит и прочищает фильтры оборудования"
+
+            # 3.19 Swimming Pool
+            if any(k in combined_raw for k in ["pool", "бассейн"]):
+                return "Очищает воду и чистит бассейн"
+
+            # 3.20 Universal Dynamic Catalog Name Fallback
+            catalog_name = get_object_catalog_name(tgt, inter)
+            if catalog_name:
+                return f"Моет и чистит: {catalog_name}"
+
+            return "Убирается / наводит чистоту"
+
+        except Exception:
+            continue
+
+    return ""
+
+
+def is_sim_actively_conversing(sim_instance, interactions_list=None) -> bool:
+    """
+    Returns True ONLY if the Sim has an active, currently-running social interaction
+    or active social mixer. Lingering/stale SocialGroups from past conversations do NOT count.
+    """
+    if sim_instance is None:
+        return False
+
+    if interactions_list is None:
+        interactions_list = get_sim_running_interactions(sim_instance)
+
+    for inter in interactions_list:
+        # 1. Native Sims 4 is_social flags
+        if getattr(inter, "is_social", False):
+            return True
+        aff = getattr(inter, "affordance", None)
+        if aff is not None and getattr(aff, "is_social", False):
+            return True
+
+        # 2. Check active mixers on the interaction
+        for attr_name in ("active_mixers", "_active_mixers"):
+            if hasattr(inter, attr_name):
+                try:
+                    for m in getattr(inter, attr_name, []):
+                        if getattr(m, "is_social", False):
+                            return True
+                        m_aff = getattr(m, "affordance", None)
+                        if m_aff is not None and getattr(m_aff, "is_social", False):
+                            return True
+                        m_name = (getattr(m, "__name__", "") or str(m)).lower()
+                        if any(sk in m_name for sk in ["social", "chat", "talk", "flirt", "joke", "argue", "kiss", "hug"]):
+                            return True
+                except Exception:
+                    pass
+
+        # 3. Class and affordance names
+        cls_name = getattr(getattr(inter, "__class__", None), "__name__", "").lower()
+        aff_name = (getattr(aff, "__name__", "") or str(aff)).lower() if aff is not None else ""
+        i_name = (getattr(inter, "__name__", "") or str(inter)).lower()
+
+        for name_to_check in (cls_name, aff_name, i_name):
+            if "socialsuperinteraction" in name_to_check or "socialmixerinteraction" in name_to_check:
+                return True
+            if any(sk in name_to_check for sk in [
+                "social_", "_social", "sim_chat", "chat_with", "flirt", "talk_to",
+                "tell_joke", "apologize", "compliment", "argue", "kiss", "hug", "embrace"
+            ]) and not any(skip in name_to_check for skip in [
+                "computer", "video_chat", "phone", "social_media", "network", "web"
+            ]):
+                return True
+
+    return False
+
+
+def get_sim_current_activity_and_posture(sim_info, is_en: bool = False, other_sim_info=None) -> str:
+    """
+    Extracts the full physical activity and posture/furniture of a Sim for live dialogue and roleplay profiles.
+    Distinguishes specific furniture (armchair, sofa, chair at table, desk chair, barstool, bench, bed)
+    and combines it naturally with concurrent activities (TV watching, eating, cooking, gaming, drinking, etc.).
+    Examples:
+      - "Смотрит телевизор вместе (сидя в кресле)" / "Watching TV together (sitting in an armchair)"
+      - "Смотрит комедию по ТВ (сидя на диване)" / "Watching comedy on TV (sitting on the sofa)"
+      - "Сидит в кресле" / "Sitting in an armchair"
+      - "Сидит на диване" / "Sitting on the sofa"
+      - "Сидит на стуле за столом" / "Sitting on a chair at the table"
+      - "Ужинает / ест (сидя за столом)" / "Eating meal (sitting at the table)"
+      - "Стоит" / "Standing"
+      - "Готовит еду (стоя у плиты / тумбы)" / "Cooking food (standing by the stove / counter)"
+    """
+    try:
+        if sim_info is None:
+            return "Unknown activity" if is_en else "Занимается своими делами"
+
+        sim_instance = sim_info.get_sim_instance() if hasattr(sim_info, "get_sim_instance") else None
+        if sim_instance is None:
+            return "Doing their own things" if is_en else "Занимается своими делами"
+
+        # 1. Check active intimacy / sex (WickedWhims or WooHoo)
+        sex_info = get_sim_active_sex_info(sim_info)
+        if sex_info:
+            partners = sex_info.get("partners", "partner" if is_en else "партнёром")
+            pose = sex_info.get("pose", "intimacy" if is_en else "интимная близость")
+            group_type = sex_info.get("group_type", "")
+            num_partners = sex_info.get("num_partners", 1)
+            if is_en:
+                if num_partners == 0:
+                    return f"Engaged in solo masturbation ({pose})"
+                if group_type:
+                    return f"Engaged in group intimacy [{group_type}] ({pose}) with {partners}"
+                return f"Engaged in physical intimacy ({pose}) with {partners}"
+            else:
+                if num_partners == 0:
+                    return f"Занимается самоудовлетворением / соло ({pose})"
+                if group_type:
+                    return f"Занимается групповым сексом [{group_type}] ({pose}) с {partners}"
+                return f"Занимается сексом / интимом ({pose}) с {partners}"
+
+        # 2. Extract posture and furniture object
+        posture_obj = getattr(sim_instance, "posture", None)
+        posture_name = getattr(getattr(posture_obj, "posture_type", None), "__name__", "") or getattr(posture_obj, "name", "") or str(type(posture_obj).__name__)
+        posture_low = posture_name.lower()
+
+        p_target = getattr(posture_obj, "target", None)
+        if p_target is None and hasattr(sim_instance, "posture_state"):
+            try:
+                p_state = getattr(sim_instance, "posture_state", None)
+                if p_state is not None:
+                    body = getattr(p_state, "body", None)
+                    if body is not None:
+                        p_target = getattr(body, "target", None)
+            except Exception:
+                pass
+
+        interactions_list = get_sim_running_interactions(sim_instance)
+
+        if p_target is None:
+            for inter in interactions_list:
+                i_n = getattr(inter, "__name__", str(inter)).lower()
+                if any(s in i_n for s in ["sit", "seating", "chair", "sofa", "bed", "couch", "bench", "stool", "lounger"]):
+                    tgt = getattr(inter, "target", None)
+                    if tgt is not None and not hasattr(tgt, "sim_info"):
+                        p_target = tgt
+                        break
+
+        target_tokens = get_clean_object_tokens(p_target) if p_target is not None else set()
+        if p_target is not None:
+            target_tokens.add(p_target.__class__.__name__.lower())
+
+        is_armchair = any(k in target_tokens for k in [
+            "chairliving", "chair_living", "armchair", "livingchair", "recliner", 
+            "loungechair", "accentchair", "clubchair", "wingback", "rockingchair", "chair_accent"
+        ])
+        is_sofa = any(k in target_tokens for k in [
+            "sofa", "couch", "loveseat", "sectional", "settee", "divan"
+        ])
+        is_desk_chair = any(k in target_tokens for k in [
+            "chairdesk", "chair_desk", "deskchair", "officechair", "computerchair"
+        ])
+        is_dining_chair = any(k in target_tokens for k in [
+            "chairdining", "chair_dining", "diningchair"
+        ]) or ("chair" in target_tokens and not is_armchair and not is_desk_chair)
+        is_barstool = any(k in target_tokens for k in [
+            "barstool", "stool", "bar_stool"
+        ])
+        is_bed = any(k in target_tokens for k in [
+            "bed", "bunkbed", "doublebed", "singlebed", "murphybed"
+        ])
+        is_bench = any(k in target_tokens for k in [
+            "bench", "parkbench", "picnicbench"
+        ])
+        is_hottub = any(k in target_tokens for k in [
+            "hottub", "hot_tub", "jacuzzi"
+        ])
+        is_pool = any(k in target_tokens for k in [
+            "pool", "ocean", "water"
+        ]) or "swim" in posture_low
+        is_highchair = any(k in target_tokens for k in ["highchair"]) or "highchair" in posture_low
+        is_crib = any(k in target_tokens for k in ["crib"]) or "crib" in posture_low
+
+        at_table = False
+        if is_dining_chair or is_desk_chair:
+            parent_obj = getattr(p_target, "parent", None) if p_target is not None else None
+            parent_tokens = get_clean_object_tokens(parent_obj) if parent_obj is not None else set()
+            if any(t in parent_tokens for t in ["table", "desk", "dining"]):
+                at_table = True
+            else:
+                for inter in interactions_list:
+                    tgt = getattr(inter, "target", None)
+                    if tgt is not None and any(t in get_clean_object_tokens(tgt) for t in ["table", "desk", "dining"]):
+                        at_table = True
+                        break
+
+        is_sitting = (
+            "sit" in posture_low 
+            or "seating" in posture_low 
+            or is_armchair 
+            or is_sofa 
+            or is_dining_chair 
+            or is_desk_chair 
+            or is_barstool 
+            or is_highchair
+        ) and not ("lay" in posture_low or "sleep" in posture_low)
+
+        is_lying = (
+            "lay" in posture_low 
+            or "lie" in posture_low 
+            or "sleep" in posture_low 
+            or "nap" in posture_low
+        )
+
+        if is_armchair:
+            posture_ru = "Сидит в кресле"
+            posture_en = "Sitting in an armchair"
+            adv_ru = "сидя в кресле"
+            adv_en = "sitting in an armchair"
+        elif is_sofa:
+            posture_ru = "Сидит на диване"
+            posture_en = "Sitting on the sofa"
+            adv_ru = "сидя на диване"
+            adv_en = "sitting on the sofa"
+        elif is_desk_chair:
+            posture_ru = "Сидит в компьютерном кресле за столом" if at_table else "Сидит в компьютерном кресле"
+            posture_en = "Sitting in a desk chair at the table" if at_table else "Sitting in a desk chair"
+            adv_ru = "сидя за столом" if at_table else "сидя в кресле"
+            adv_en = "sitting at the desk" if at_table else "sitting in a desk chair"
+        elif is_dining_chair:
+            posture_ru = "Сидит на стуле за столом" if at_table else "Сидит на стуле"
+            posture_en = "Sitting on a chair at the table" if at_table else "Sitting on a chair"
+            adv_ru = "сидя за столом" if at_table else "сидя на стуле"
+            adv_en = "sitting at the table" if at_table else "sitting on a chair"
+        elif is_barstool:
+            posture_ru = "Сидит на барном стуле"
+            posture_en = "Sitting on a barstool"
+            adv_ru = "сидя на барном стуле"
+            adv_en = "sitting on a barstool"
+        elif is_bench:
+            posture_ru = "Сидит на скамейке"
+            posture_en = "Sitting on a bench"
+            adv_ru = "сидя на скамейке"
+            adv_en = "sitting on a bench"
+        elif is_hottub:
+            posture_ru = "Отдыхает в джакузи"
+            posture_en = "Relaxing in the hot tub"
+            adv_ru = "в джакузи"
+            adv_en = "in the hot tub"
+        elif is_pool:
+            posture_ru = "Плавает в бассейне"
+            posture_en = "Swimming in the pool"
+            adv_ru = "в бассейне"
+            adv_en = "in the pool"
+        elif is_bed:
+            if is_lying:
+                posture_ru = "Лежит в кровати"
+                posture_en = "Lying in bed"
+                adv_ru = "лежа в кровати"
+                adv_en = "lying in bed"
+            else:
+                posture_ru = "Сидит на кровати"
+                posture_en = "Sitting on bed"
+                adv_ru = "сидя на кровати"
+                adv_en = "sitting on bed"
+        elif is_highchair:
+            posture_ru = "Сидит в детском стульчике"
+            posture_en = "Sitting in a highchair"
+            adv_ru = "сидя в детском стульчике"
+            adv_en = "sitting in a highchair"
+        elif is_crib:
+            posture_ru = "Лежит в детской кроватке"
+            posture_en = "Lying in crib"
+            adv_ru = "лежа в кроватке"
+            adv_en = "lying in crib"
+        elif is_lying:
+            posture_ru = "Лежит и отдыхает"
+            posture_en = "Lying down and resting"
+            adv_ru = "лежа"
+            adv_en = "lying down"
+        elif is_sitting:
+            posture_ru = "Сидит"
+            posture_en = "Sitting"
+            adv_ru = "сидя"
+            adv_en = "sitting"
+        else:
+            posture_ru = "Стоит"
+            posture_en = "Standing"
+            adv_ru = "стоя"
+            adv_en = "standing"
+
+        # 3. Check physical activity across running interactions
+        all_int_text = []
+        for inter in interactions_list:
+            all_int_text.extend(get_interaction_identifier_tokens(inter))
+            tgt = getattr(inter, "target", None)
+            if tgt is not None:
+                all_int_text.append(type(tgt).__name__.lower())
+                all_int_text.append(getattr(tgt, "__name__", str(tgt)).lower())
+        full_context_text = " ".join(all_int_text).replace("_", "").lower()
+
+        physical_act = _get_physical_activity(sim_info, sim_instance, interactions_list, full_context_text)
+
+        generic_idles = (
+            "Стоит на месте",
+            "Стоит на месте, осматривается",
+            "Сидит на полу / играет",
+            "Лежит на полу и с любопытством разглядывает всё вокруг",
+            "Сидит на диване / стуле и отдыхает",
+            "Сидит на диване / стуле",
+            "Сидит за столом",
+            "Сидит в кресле",
+            "Сидит на диване",
+            "Сидит в компьютерном кресле",
+            "Сидит на стуле",
+            "Сидит на стуле за столом",
+            "Сидит на барном стуле",
+            "Сидит на скамейке",
+        )
+
+        if not physical_act or physical_act in generic_idles:
+            return posture_en if is_en else posture_ru
+
+        # Check if activity is TV watching
+        is_tv = any(k in physical_act.lower() for k in ["телевизор", "тв", "фильм", "сериал", "канал"])
+        other_is_tv = False
+        if is_tv and other_sim_info is not None:
+            try:
+                other_inst = other_sim_info.get_sim_instance() if hasattr(other_sim_info, "get_sim_instance") else None
+                if other_inst is not None:
+                    other_ints = get_sim_running_interactions(other_inst)
+                    for o_i in other_ints:
+                        o_n = getattr(o_i, "__name__", str(o_i)).lower()
+                        o_tgt = getattr(o_i, "target", None)
+                        o_t = getattr(o_tgt, "__name__", str(o_tgt)).lower() if o_tgt else ""
+                        if "tv" in o_n or "television" in o_n or "watch_current_channel" in o_n or "watchtv" in o_n or "watchmovie" in o_n or "tv" in o_t or "television" in o_t:
+                            other_is_tv = True
+                            break
+            except Exception:
+                pass
+
+        # Format Russian
+        if is_tv and other_is_tv:
+            base_act_ru = f"{physical_act} вместе"
+        else:
+            base_act_ru = physical_act
+
+        has_posture_ru = any(k in base_act_ru.lower() for k in ["сидя", "стоя", "лежа", "в кресле", "на диване", "за столом", "на стуле"])
+        if not has_posture_ru and adv_ru:
+            if "готовит" in base_act_ru.lower() and adv_ru == "стоя":
+                res_ru = f"{base_act_ru} (стоя у плиты / кухонной тумбы)"
+            else:
+                res_ru = f"{base_act_ru} ({adv_ru})"
+        else:
+            res_ru = base_act_ru
+
+        # Format English
+        try:
+            from ai_thought_reader.context_en import translate_activity_en
+            base_act_en = translate_activity_en(physical_act)
+        except Exception:
+            base_act_en = physical_act
+
+        if is_tv and other_is_tv:
+            base_act_en = f"{base_act_en} together"
+
+        has_posture_en = any(k in base_act_en.lower() for k in ["sitting", "standing", "lying", "armchair", "sofa", "table", "chair"])
+        if not has_posture_en and adv_en:
+            if "cooking" in base_act_en.lower() and adv_en == "standing":
+                res_en = f"{base_act_en} (standing by the stove / counter)"
+            else:
+                res_en = f"{base_act_en} ({adv_en})"
+        else:
+            res_en = base_act_en
+
+        held_obj = get_sim_held_object_name(sim_info, is_en=is_en)
+        if held_obj:
+            if is_en:
+                return f"{res_en}. Holding in hands: {held_obj}"
+            else:
+                return f"{res_ru}. В руках держит: {held_obj}"
+        return res_en if is_en else res_ru
+
+    except Exception as ex:
+        log_exception("Error in get_sim_current_activity_and_posture", ex)
+        return "Idle" if is_en else "Отдыхает"
+
+
+def is_object_in_same_room_as_sim(sim_instance, target_obj) -> bool:
+    """
+    Verifies that an interactive object (such as a TV) is in the same room/space
+    as the Sim and within sight distance (<= 12 meters).
+    """
+    if sim_instance is None or target_obj is None:
+        return True
+    try:
+        # 1. 3D Distance check
+        sim_pos = getattr(sim_instance, "position", None)
+        tgt_pos = getattr(target_obj, "position", None)
+        if sim_pos is not None and tgt_pos is not None:
+            dx = float(sim_pos.x) - float(tgt_pos.x)
+            dz = float(sim_pos.z) - float(tgt_pos.z)
+            dy = float(sim_pos.y) - float(tgt_pos.y)
+            dist_sq = dx * dx + dy * dy + dz * dz
+            if dist_sq > 144.0:  # > 12 meters away
+                return False
+
+        # 2. Room check
+        sim_room, sim_out = (0, False)
+        try:
+            sim_room, sim_out = get_sim_room_and_outdoor(sim_instance)
+        except Exception:
+            pass
+
+        tgt_room = 0
+        tgt_out = False
+        try:
+            if services is not None:
+                import build_buy
+                zone_id = services.current_zone_id()
+                tgt_loc = getattr(target_obj, "location", None)
+                tgt_level = getattr(tgt_loc, "level", 0) if tgt_loc is not None else 0
+                if tgt_pos is not None and zone_id is not None:
+                    tgt_room = build_buy.get_room_id(zone_id, tgt_pos, tgt_level)
+                    tgt_out = (tgt_room == 0)
+        except Exception:
+            pass
+
+        if not sim_out and not tgt_out and sim_room != 0 and tgt_room != 0:
+            if sim_room != tgt_room:
+                return False
+        elif sim_out != tgt_out and (sim_room != 0 or tgt_room != 0):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def extract_clean_localized_string(loc_obj) -> Optional[str]:
+    """
+    Extracts clean human-readable text from TS4 LocalizedString protobuf objects or strings.
+    Correctly decodes custom user-entered strings that contain octal escape bytes (e.g. \\320\\242 -> 'ТЕСТ').
+    """
+    if loc_obj is None:
+        return None
+
+    # 1. Direct tokens attribute on protobuf object
+    try:
+        tokens = getattr(loc_obj, "tokens", None)
+        if tokens:
+            raw_parts = []
+            for t in tokens:
+                t_raw = getattr(t, "raw_text", None)
+                if t_raw and is_human_readable_text(str(t_raw)):
+                    raw_parts.append(str(t_raw).strip())
+            if raw_parts:
+                return " ".join(raw_parts).strip()
+    except Exception:
+        pass
+
+    # 2. Extract and decode octal escape bytes from protobuf string representation
+    s_str = str(loc_obj)
+    if "raw_text:" in s_str:
+        try:
+            import re
+            import codecs
+            matches = re.findall(r'raw_text:\s*"([^"]+)"', s_str)
+            if matches:
+                decoded = []
+                for m in matches:
+                    try:
+                        dec = codecs.escape_decode(m.encode("ascii"))[0].decode("utf-8")
+                        if dec:
+                            decoded.append(dec)
+                    except Exception:
+                        if m:
+                            decoded.append(m)
+                if decoded:
+                    res = " ".join(decoded).strip()
+                    if res:
+                        return res
+        except Exception:
+            pass
+
+    # 3. Clean string check
+    if isinstance(loc_obj, str) and is_human_readable_text(loc_obj):
+        return loc_obj.strip()
+
+    # 4. Resolve official STBL string through the hash table
+    try:
+        h = getattr(loc_obj, "hash", 0)
+        t_str = _ru_lookup(h)
+        if t_str and is_human_readable_text(str(t_str)):
+            return str(t_str).strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def get_active_social_event_info(sim_info=None, is_en: bool = False) -> Optional[dict]:
+    """
+    Detects active user-facing social events/parties on the active lot:
+    Birthday party, House party, Wedding, Date, Dinner party, etc.
+    Determines if the given Sim is a participant and what their role/job is.
+    Returns:
+      {
+         'event_name': str,
+         'event_name_en': str,
+         'role': Optional[str],
+         'role_en': Optional[str],
+         'is_participant': bool
+      }
+    or None if no real social event is active.
+    """
+    try:
+        if services is None:
+            return None
+        sit_mgr = services.get_zone_situation_manager() if hasattr(services, "get_zone_situation_manager") else None
+        if sit_mgr is None and hasattr(services, "current_zone"):
+            curr_zone = services.current_zone()
+            if curr_zone is not None:
+                sit_mgr = getattr(curr_zone, "situation_manager", None)
+        if sit_mgr is None:
+            return None
+
+        EXCLUDED_SITUATION_KEYWORDS = (
+            "visit", "visiting", "greeted", "walkby", "open_streets", "ambient",
+            "leave", "career", "service", "patrol", "deliver", "butler", "maid",
+            "nanny", "repair", "invitation", "infant", "toddler", "welcome_wagon",
+            "welcomewagon", "restaurant", "market_stalls", "bar_situation", "bouncer",
+            "vendor", "busker", "tourist", "shopper", "hike", "ghost", "vampire"
+        )
+
+        WHITELISTED_EVENT_KEYWORDS = (
+            "party", "wedding", "birthday", "dinner_party", "dinnerparty", "kava",
+            "keg", "funeral", "date", "baby_shower", "babyshower", "bachelor",
+            "bachelorette", "costume", "spooky", "black_and_white", "blackandwhite",
+            "slumber", "charity_gala", "fan_meet", "pool_party", "poolparty",
+            "vow_renewal", "vowrenewal", "family_reunion", "familyreunion"
+        )
+
+        # 1. Collect candidate situations
+        user_facing_sits = []
+        raw_candidates = []
+        if hasattr(sit_mgr, "get_user_facing_situations"):
+            try:
+                uf = sit_mgr.get_user_facing_situations()
+                if uf:
+                    raw_candidates.extend(list(uf))
+            except Exception:
+                pass
+
+        if hasattr(sit_mgr, "get_all"):
+            try:
+                for s in sit_mgr.get_all():
+                    if s not in raw_candidates:
+                        raw_candidates.append(s)
+            except Exception:
+                pass
+
+        for s in raw_candidates:
+            cls_name = getattr(type(s), "__name__", "").lower()
+            if any(ex in cls_name for ex in EXCLUDED_SITUATION_KEYWORDS):
+                continue
+            if any(wk in cls_name for wk in WHITELISTED_EVENT_KEYWORDS):
+                user_facing_sits.append(s)
+
+        if not user_facing_sits:
+            return None
+
+        sim_inst = None
+        sim_id = None
+        if sim_info is not None:
+            sim_id = getattr(sim_info, "sim_id", None)
+            if hasattr(sim_info, "get_sim_instance"):
+                try:
+                    sim_inst = sim_info.get_sim_instance()
+                except Exception:
+                    pass
+
+        # 2. Pick the most relevant situation for this Sim
+        chosen_sit = None
+        sim_in_chosen = False
+
+        if sim_inst or sim_id:
+            for s in user_facing_sits:
+                is_in = False
+                if sim_inst and hasattr(s, "is_sim_in_situation"):
+                    try:
+                        is_in = bool(s.is_sim_in_situation(sim_inst))
+                    except Exception:
+                        pass
+                if not is_in and hasattr(s, "all_sims_in_situation_gen"):
+                    try:
+                        for s_obj in s.all_sims_in_situation_gen():
+                            s_inf = getattr(s_obj, "sim_info", s_obj)
+                            if getattr(s_inf, "sim_id", None) == sim_id:
+                                is_in = True
+                                break
+                    except Exception:
+                        pass
+                if is_in:
+                    chosen_sit = s
+                    sim_in_chosen = True
+                    break
+
+        if chosen_sit is None:
+            chosen_sit = user_facing_sits[0]
+
+        # 3. Extract event display name
+        ev_name_ru = ""
+        ev_name_en = ""
+        raw_loc_name = None
+
+        if hasattr(chosen_sit, "display_name") and chosen_sit.display_name:
+            raw_loc_name = chosen_sit.display_name
+        elif hasattr(chosen_sit, "situation_display_name") and chosen_sit.situation_display_name:
+            raw_loc_name = chosen_sit.situation_display_name
+        elif hasattr(chosen_sit, "_display_name") and chosen_sit._display_name:
+            raw_loc_name = chosen_sit._display_name
+
+        if raw_loc_name:
+            try:
+                if LocalizationHelperTuning is not None:
+                    txt = _loc_text(raw_loc_name)
+                    if txt and is_human_readable_text(str(txt)):
+                        if is_en:
+                            ev_name_en = str(txt)
+                        else:
+                            ev_name_ru = str(txt)
+            except Exception:
+                pass
+
+        chosen_cls_name = getattr(type(chosen_sit), "__name__", "").lower()
+        for k, (ru_t, en_t) in EVENT_TYPE_TRANSLATIONS.items():
+            if k in chosen_cls_name:
+                if not ev_name_ru:
+                    ev_name_ru = ru_t
+                if not ev_name_en:
+                    ev_name_en = en_t
+                break
+
+        # If name could not be resolved or matched to a known event, this is not a real event
+        if not ev_name_ru and not ev_name_en:
+            return None
+
+        if not ev_name_ru:
+            ev_name_ru = ev_name_en
+        elif not ev_name_en:
+            ev_name_en = ev_name_ru
+
+        # 4. Extract Sim role/job in chosen situation
+        role_ru = None
+        role_en = None
+        is_participant = False
+
+        if (sim_inst or sim_id) and chosen_sit is not None:
+            job_obj = None
+            if sim_inst and hasattr(chosen_sit, "get_current_job_for_sim"):
+                try:
+                    job_obj = chosen_sit.get_current_job_for_sim(sim_inst)
+                except Exception:
+                    pass
+            if job_obj is None and sim_inst and hasattr(chosen_sit, "get_situation_job_for_sim"):
+                try:
+                    job_obj = chosen_sit.get_situation_job_for_sim(sim_inst)
+                except Exception:
+                    pass
+
+            if job_obj is not None or sim_in_chosen:
+                is_participant = True
+                if job_obj is not None:
+                    job_loc = getattr(job_obj, "display_name", None) or getattr(job_obj, "job_display_name", None)
+                    if job_loc and LocalizationHelperTuning is not None:
+                        try:
+                            j_txt = _loc_text(job_loc)
+                            if j_txt and is_human_readable_text(str(j_txt)):
+                                if is_en:
+                                    role_en = str(j_txt)
+                                else:
+                                    role_ru = str(j_txt)
+                        except Exception:
+                            pass
+                    job_cls = getattr(type(job_obj), "__name__", getattr(job_obj, "__name__", "")).lower()
+                    for rk, (ru_r, en_r) in EVENT_ROLE_TRANSLATIONS.items():
+                        if rk in job_cls:
+                            if not role_ru:
+                                role_ru = ru_r
+                            if not role_en:
+                                role_en = en_r
+                            break
+
+                if not role_ru and not role_en:
+                    role_ru = "Гость"
+                    role_en = "Guest"
+                elif not role_ru:
+                    role_ru = role_en
+                elif not role_en:
+                    role_en = role_ru
+
+        if not is_participant:
+            role_ru = None
+            role_en = None
+
+        is_on_lot = True
+        if sim_inst is not None and hasattr(sim_inst, "is_on_active_lot"):
+            try:
+                is_on_lot = bool(sim_inst.is_on_active_lot())
+            except Exception:
+                is_on_lot = True
+
+        active_hh_id = services.active_household_id() if hasattr(services, "active_household_id") else 0
+        sim_hh_id = getattr(sim_info, "household_id", 0) if sim_info is not None else 0
+        is_household_member = bool(active_hh_id and sim_hh_id and active_hh_id == sim_hh_id)
+
+        is_residential = True
+        if hasattr(services, "venue_service"):
+            try:
+                venue_service = services.venue_service()
+                active_venue = venue_service.active_venue if venue_service else None
+                v_name = getattr(active_venue, "__name__", str(active_venue)).lower() if active_venue else ""
+                is_residential = ("residential" in v_name or "apartment" in v_name or "penthouse" in v_name or "rental" in v_name or not v_name)
+            except Exception:
+                is_residential = True
+
+        return {
+            "event_name": ev_name_ru,
+            "event_name_en": ev_name_en,
+            "role": role_ru,
+            "role_en": role_en,
+            "is_participant": is_participant,
+            "is_on_lot": is_on_lot,
+            "is_household_member": is_household_member,
+            "is_residential": is_residential,
+        }
+    except Exception as e:
+        log_exception("Error in get_active_social_event_info", e)
+        return None
+
+
+def _get_party_event_guidance_raw(event_info: Optional[dict], is_en: bool = False) -> Optional[str]:
+    """
+    Generates tailored, atmospheric party guidance for the prompt based on:
+    - Specific event type (Birthday, Wedding, Bachelor, Bachelorette, Baby Shower, Funeral, Date,
+      Dinner Party, House Party, Black & White, Costume/Spooky, Kava, Keg, Slumber Party,
+      Pool Party, Dance Party, Fan Meet, Charity Gala, Family Reunion, or Custom/Modded Party Fallback).
+    - Setting: Residential Home Lot vs Public Venue (Bar, Club, Park, Restaurant, Lounge).
+    - Status: Participant (Birthday Sim / Celebrant / Host / Guest / Staff) vs
+      Uninvited Passerby Outside vs Uninvited Visitor at Home vs Venue Patron.
+    """
+    if not event_info or not isinstance(event_info, dict):
+        return None
+
+    ev_name_ru = str(event_info.get("event_name", "") or "").strip()
+    ev_name_en = str(event_info.get("event_name_en", "") or ev_name_ru).strip()
+    if not ev_name_ru and not ev_name_en:
+        return None
+
+    ev_role_ru = str(event_info.get("role", "") or "").strip()
+    ev_role_en = str(event_info.get("role_en", "") or ev_role_ru).strip()
+    is_part = bool(event_info.get("is_participant", False))
+    is_on_lot = bool(event_info.get("is_on_lot", True))
+    is_hh = bool(event_info.get("is_household_member", False))
+    is_resid = bool(event_info.get("is_residential", True))
+
+    ev_key = f"{ev_name_ru} {ev_name_en}".lower()
+    role_key = f"{ev_role_ru} {ev_role_en}".lower()
+
+    # 1. Non-Participants (Uninvited Sims)
+    if not is_part:
+        if not is_on_lot:
+            if is_en:
+                return (
+                    f"IMPORTANT (Passerby Outside During an Event): The character is just walking down the street or strolling outside. "
+                    f"They are NOT invited to the '{ev_name_en}' and are not participating. "
+                    f"Their thoughts should focus on their own errands (they might casually notice distant music from the house, but should not think of the party as their own)."
+                )
+            return (
+                f"ВАЖНО (Прохожий на улице во время праздника): Персонаж просто идёт по улице или гуляет снаружи. "
+                f"Он НЕ приглашён на праздник «{ev_name_ru}» и не участвует в нём. "
+                f"Мысли персонажа должны быть о его собственных делах и прогулке (можно лишь мельком краем уха заметить музыку или шум с участка, но не думать о празднике как о своём)."
+            )
+
+        if is_hh:
+            if is_en:
+                return (
+                    f"IMPORTANT (Party in the Character's Home): '{ev_name_en}' is taking place in the character's home. "
+                    f"They live here, experiencing the festive household bustle, music, chatter, and guest excitement around them, even if not actively in the official program."
+                )
+            return (
+                f"ВАЖНО (Праздник в родном доме): В доме персонажа проходит «{ev_name_ru}». "
+                f"Персонаж живёт здесь, поэтому ощущает домашнюю праздничную суету, оживление, музыку и шум гостей вокруг, даже если сам не вовлечен в официальную программу праздника."
+            )
+
+        if is_resid:
+            if is_en:
+                return (
+                    f"IMPORTANT (Uninvited Visitor at a House Party): The character entered someone's home during '{ev_name_en}', but was NOT invited! "
+                    f"Reflect natural surprise or awkwardness ('Wait, is there a full party going on here?'), assessing the crowded room, and wondering whether to stay or politely slip away."
+                )
+            return (
+                f"ВАЖНО (Незваный визитёр в доме во время праздника): Персонаж пришёл на жилой участок во время праздника «{ev_name_ru}», но НЕ был на него приглашён! "
+                f"Отрази естественное удивление или неловкость («Ого, да у них тут вечеринка?»), оценку обстановки и размышления о том, стоит ли остаться или поскорее уйти."
+            )
+
+        # Public venue patron
+        if is_en:
+            return (
+                f"IMPORTANT (Venue Patron During a Private Event): The character is at this public venue (bar/club/restaurant/park) on their own business, "
+                f"while an independent group celebrates '{ev_name_en}'. They are not part of the celebration, but experience the buzzing venue atmosphere and may casually observe the revelers."
+            )
+        return (
+            f"ВАЖНО (Посетитель заведения во время чужого праздника): Персонаж находится в общественном месте (бар/клуб/ресторан/парк) по своим личным делам, "
+            f"пока рядом проходит приватное мероприятие «{ev_name_ru}». Персонаж не имеет отношения к празднующим, но чувствует оживлённую атмосферу вокруг и может с любопытством или равнодушием наблюдать за чужим весельем."
+        )
+
+    # 2. Participants
+    # A) Birthday Party
+    if any(k in ev_key for k in ("день рождения", "birthday")):
+        if any(k in role_key for k in ("именинник", "birthday sim", "виновник")):
+            if is_en:
+                return (
+                    "IMPORTANT (Birthday Party — Birthday Sim!): The character is celebrating their birthday and is the absolute center of attention! "
+                    "Reflect birthday excitement, anticipation of blowing out birthday candles, toasts, presents, and warm festive joy."
+                )
+            return (
+                "ВАЖНО (День рождения — Персонаж Именинник!): Персонаж сегодня празднует свой день рождения и находится в центре внимания! "
+                "Отрази праздничную эйфорию, ожидание торта со свечами, тостов и поздравлений от друзей, радость от праздника или лёгкую ностальгию о взрослении."
+            )
+        if any(k in role_key for k in ("организатор", "хозяин", "host")):
+            if is_en:
+                return (
+                    "IMPORTANT (Birthday Party Host): The character is hosting the birthday party. "
+                    "Thoughts should reflect hospitality, checking refreshments and cake, keeping everyone happy, and ensuring a memorable day for the celebrant."
+                )
+            return (
+                "ВАЖНО (Организатор Дня рождения): Персонаж проводит день рождения. "
+                "В его мыслях — забота о гостях, праздничная атмосфера, проверка торта и напитков, а главное — желание сделать этот день особенным и незабываемым для именинника."
+            )
+        if is_resid:
+            if is_en:
+                return (
+                    "IMPORTANT (Home Birthday Party): The character is at a cozy home birthday party. "
+                    "Reflect house-party warmth: delicious food aromas, kitchen chatter, toasts to the birthday sim, clinking glasses, and friendly camaraderie."
+                )
+            return (
+                "ВАЖНО (Домашний День рождения): Персонаж на дне рождения в уютной домашней обстановке. "
+                "Отрази душевную атмосферу: ароматы праздничных угощений, разговоры на кухне, тосты за именинника, звон бокалов и веселье в дружеском кругу."
+            )
+        if is_en:
+            return (
+                "IMPORTANT (Birthday Party at a Venue): The birthday is being celebrated at a lively public venue (bar/club). "
+                "Reflect the energetic vibe: crowded bar counter, pounding music, flowing cocktails, and spirited cheers for the birthday sim!"
+            )
+        return (
+            "ВАЖНО (День рождения в заведении): День рождения отмечается в шумном общественном месте (бар/клуб). "
+            "Отрази клубный драйв: звон бокалов у стойки, громкая музыка, коктейли, крики поздравлений в толпе и праздничный кураж!"
+        )
+
+    # B) Wedding & Vow Renewal
+    if any(k in ev_key for k in ("свадьба", "wedding", "клятв", "vow")):
+        if any(k in role_key for k in ("невеста", "жених", "супруг", "bride", "groom", "betrothed", "couple")):
+            if is_en:
+                return (
+                    "IMPORTANT (Wedding Day — The Couple): The biggest day of their life — getting married! "
+                    "Reflect deep romantic emotion, gazing at their partner, heartfelt vows, wedding kiss excitement, and pure romantic bliss."
+                )
+            return (
+                "ВАЖНО (Свадебное торжество — Бракосочетание): Главный день в жизни персонажа — его свадьба! "
+                "В мыслях должны звучать трепет, восторг, нежность к любимому человеку, брачные клятвы, волнение перед поцелуем и счастье от соединения судеб."
+            )
+        if any(k in role_key for k in ("officiant", "свидетель", "sim of honor", "кольца", "паж", "flower")):
+            r_label = ev_role_en if is_en else ev_role_ru
+            if is_en:
+                return (
+                    f"IMPORTANT (Wedding Ceremony — Honored Role): The character carries an important duty ({r_label}). "
+                    f"Reflect their dedication, pride in helping their friends, and sharing the romantic joy."
+                )
+            return (
+                f"ВАЖНО (Свадебная церемония — Почётная роль): Персонаж исполняет почётную миссию на свадьбе ({r_label}). "
+                f"В мыслях — чувство ответственности за важный момент, радость за молодожёнов и поддержка друзей."
+            )
+        if is_en:
+            return (
+                "IMPORTANT (Wedding Guest): The character is attending a beautiful wedding. "
+                "Reflect romantic elegance: floral arches, champagne flutes, applauding the couple, heartfelt wishes, and festive dancing."
+            )
+        return (
+            "ВАЖНО (Свадебные гости): Персонаж присутствует на свадьбе. "
+            "Отрази романтическую торжественность: праздничные наряды, свадебная арка, лепестки роз, звон бокалов с шампанским, поздравления молодой паре и танцы."
+        )
+
+    # C) Bachelor Party
+    if any(k in ev_key for k in ("мальчишник", "bachelor")):
+        if is_en:
+            return (
+                "IMPORTANT (Bachelor Party): The ultimate guys' night before the wedding! "
+                "Reflect wild banter with the bros, toasts to bachelor memories, drinks flowing, and high-energy pre-wedding revelry."
+            )
+        return (
+            "ВАЖНО (Мальчишник): Мужской отрыв перед свадьбой! "
+            "В мыслях — дружеский кураж, безудержные шутки, тосты за холостяцкую свободу, бочки с соком, стаканчики, музыка и безумное веселье с пацанами."
+        )
+
+    # D) Bachelorette Party
+    if any(k in ev_key for k in ("девичник", "bachelorette")):
+        if is_en:
+            return (
+                "IMPORTANT (Bachelorette Party): Vibrant celebration for the bride-to-be! "
+                "Reflect bonding with girlfriends, colorful cocktails, dance-floor energy, playful laughter, and pre-wedding excitement."
+            )
+        return (
+            "ВАЖНО (Девичник): Яркий и безбашенный девичник! "
+            "В мыслях — женские секреты, коктейли, смех, селфи, танцы до упаду, поздравления будущей невесте и беззаботный праздничный отрыв."
+        )
+
+    # E) Baby Shower
+    if any(k in ev_key for k in ("будущего ребенка", "baby_shower", "babyshower")):
+        if is_en:
+            return (
+                "IMPORTANT (Baby Shower): A tender and heartwarming gathering. "
+                "Reflect sweetness, celebrating expectant parents, baby talk and gifts, pastel decor, and anticipation of a new life arriving soon."
+            )
+        return (
+            "ВАЖНО (Праздник будущего ребенка / Baby Shower): Умилительный, нежный и тёплый праздник. "
+            "В мыслях — радость за будущих родителей, разговоры о малыше, милые детские подарки, пастельные украшения и предвкушение новой жизни."
+        )
+
+    # F) Funeral / Memorial
+    if any(k in ev_key for k in ("похорон", "поминк", "funeral")):
+        if any(k in role_key for k in ("усопший", "deceased")):
+            if is_en:
+                return (
+                    "IMPORTANT (Memorial Service — The Deceased): The character observes their own memorial as a spirit. "
+                    "Reflect ghostly detachment, watching mourning loved ones, and reflections on life left behind."
+                )
+            return (
+                "ВАЖНО (Поминальная служба — Усопший): Персонаж видит свои собственные поминки с того света (в виде призрака). "
+                "В мыслях — потустороннее спокойствие, наблюдение за скорбящими близкими и воспоминания о жизни."
+            )
+        if is_en:
+            return (
+                "IMPORTANT (Funeral / Memorial Service): Solemn farewell memorial. "
+                "Reflect somber grief, reminiscing cherished memories of the deceased, offering quiet solace to family, and deep respect."
+            )
+        return (
+            "ВАЖНО (Похоронная церемония / Поминки): Траурное прощание с близким. "
+            "В мыслях — светлая печаль, скорбь об утрате, теплые воспоминания об усопшем, взаимная поддержка и уважение к памяти ушедшего."
+        )
+
+    # G) Romantic Date
+    if any(k in ev_key for k in ("свидани", "date")):
+        if is_en:
+            return (
+                "IMPORTANT (Romantic Date): An intimate rendezvous. "
+                "Reflect romantic tension, flirting, reading partner's cues, butterflies in the stomach, and eagerness to deepen the connection."
+            )
+        return (
+            "ВАЖНО (Романтическое свидание): Интимный романтический тет-а-тет. "
+            "В мыслях — влечение к спутнику, флирт, искры между ними, комплименты, желание произвести впечатление и сблизиться."
+        )
+
+    # H) Dinner Party
+    if any(k in ev_key for k in ("званый ужин", "dinner")):
+        if is_en:
+            return (
+                "IMPORTANT (Dinner Party): An elegant dining gathering. "
+                "Reflect savory aromas of gourmet courses, clinking silverware, captivating table conversations, fine drinks, and cultured leisure."
+            )
+        return (
+            "ВАЖНО (Званый ужин): Изысканный гастрономический вечер. "
+            "В мыслях — аппетитные ароматы блюд, звон посуды, светские разговоры за столом, комплименты кулинару и неторопливое наслаждение вечером."
+        )
+
+    # I) House Party
+    if any(k in ev_key for k in ("домашняя вечеринка", "house_party", "houseparty")):
+        if is_en:
+            return (
+                "IMPORTANT (House Party): Classic house party buzz! "
+                "Reflect booming speakers, dancing in the living room, snacks and drinks, flirting on couches, and carefree hanging out with friends."
+            )
+        return (
+            "ВАЖНО (Домашняя вечеринка): Классический домашний движ! "
+            "В мыслях — громкая музыка из колонок, танцы посреди комнаты, снеки и выпивка, флирт на диване и свободный непринуждённый отрыв с друзьями."
+        )
+
+    # J) Black and White Party
+    if any(k in ev_key for k in ("черно-белая", "black_and_white", "blackandwhite")):
+        if is_en:
+            return (
+                "IMPORTANT (Black and White Party): An ultra-chic monochrome affair. "
+                "Reflect classic black-and-white elegance, smooth jazz tunes, refined drinks, subtle flirtation, and sophisticated noir aesthetics."
+            )
+        return (
+            "ВАЖНО (Черно-белая вечеринка): Элегантный вечер в монохроме. "
+            "В мыслях — строгая эстетика черного и белого, утонченный джаз, звон хрустальных бокалов, светский лоск и загадочный полумрак."
+        )
+
+    # K) Costume / Spooky Party
+    if any(k in ev_key for k in ("костюмированная", "жуткая", "spooky", "costume")):
+        if is_en:
+            return (
+                "IMPORTANT (Costume / Spooky Party): Carnival revelry and eerie fun! "
+                "Reflect creative costumes, glowing carved pumpkins, spooky jokes, playful mischief behind masks, and spirited festivities."
+            )
+        return (
+            "ВАЖНО (Костюмированная вечеринка): Маскарад и мистический карнавал! "
+            "В мыслях — яркие костюмы вокруг, тыквенные фонари, шутливый страх, розыгрыши, угощения и озорное веселье в необычном образе."
+        )
+
+    # L) Kava Party
+    if any(k in ev_key for k in ("кава", "kava")):
+        if is_en:
+            return (
+                "IMPORTANT (Kava Party): A sacred tropical Sulani gathering. "
+                "Reflect toasts of 'Malolo!', soothing kava bowls, island warmth, storytelling, and relaxed harmony with friends."
+            )
+        return (
+            "ВАЖНО (Посиделки с кавой): Традиционный островной чилл Сулани. "
+            "В мыслях — тосты «Малоло!», расслабляющая деревянная чаша с кавой, тепло тропиков, островные легенды и душевный покой в кругу друзей."
+        )
+
+    # M) Keg Party
+    if any(k in ev_key for k in ("бочки", "keg")):
+        if is_en:
+            return (
+                "IMPORTANT (Keg Party): Campus party adrenaline! "
+                "Reflect high-energy keg stands, cheering crowds, red plastic cups, rowdy competitions, and untamed youthful spirit."
+            )
+        return (
+            "ВАЖНО (Вечеринка у бочки): Студенческий угар и сок рекой! "
+            "В мыслях — стойка на руках над бочкой, кричалки толпы, пластиковые стаканчики, азартные конкурсы и безбашенная энергия юности."
+        )
+
+    # N) Slumber Party & Stayover
+    if any(k in ev_key for k in ("пижамная", "slumber", "ночевк", "stayover", "stay_over")):
+        if is_en:
+            return (
+                "IMPORTANT (Slumber Party / Stayover): Cozy late-night bonding. "
+                "Reflect sleeping bags sprawled across the floor, pillow fights, midnight snacks, whispered secrets, and sleep-deprived giggles."
+            )
+        return (
+            "ВАЖНО (Пижамная вечеринка / Ночёвка): Уютный ночной движ без родителей. "
+            "В мыслях — спальники на полу, бой подушками, ночной жор у холодильника, шепот секретов и разговоры до самого рассвета."
+        )
+
+    # O) Pool Party
+    if any(k in ev_key for k in ("бассейн", "pool")):
+        if is_en:
+            return (
+                "IMPORTANT (Pool Party): Sun-drenched summer vibes! "
+                "Reflect refreshing water splashes, cannonballs into the pool, icy drinks, sunbeds, swimwear, and laid-back poolside fun."
+            )
+        return (
+            "ВАЖНО (Вечеринка у бассейна): Летний зной и водный чилл! "
+            "В мыслях — прохлада чистой воды, прыжки с брызгами, шезлонги, освежающие напитки со льдом, загар, яркие купальники и беззаботный летний отдых."
+        )
+
+    # P) Dance Party
+    if any(k in ev_key for k in ("танцевальная", "dance")):
+        if is_en:
+            return (
+                "IMPORTANT (Dance Party): Pure dance floor ecstasy! "
+                "Reflect thumping bass, chest-vibrating beats, dynamic dance moves, flashing lights, and getting lost in the music."
+            )
+        return (
+            "ВАЖНО (Танцевальная вечеринка): Полный отрыв на танцполе! "
+            "В мыслях — мощные басы, вибрирующий ритм музыки, движение тела в такт битам, вспышки софитов, адреналин и эйфория танца."
+        )
+
+    # Q) Meet and Greet / Fan Meet
+    if any(k in ev_key for k in ("знаменитост", "фанат", "meet_and_greet", "fan_meet", "meetandgreet", "fanmeet")):
+        if any(k in role_key for k in ("celebrity", "star", "знаменитость")):
+            if is_en:
+                return (
+                    "IMPORTANT (Meet and Greet — The Star): The character commands the spotlight! "
+                    "Reflect flashing cameras, signing autographs, radiant charm, celebrity prestige, and holding court with admirers."
+                )
+            return (
+                "ВАЖНО (Встреча со звездой — Знаменитость): Персонаж окружен вниманием фанатов! "
+                "В мыслях — вспышки фотокамер, раздача автографов, ослепительная улыбка, статус селебрити и умение держать марку перед толпой."
+            )
+        if is_en:
+            return (
+                "IMPORTANT (Fan Meetup — The Fan): The character is face-to-face with an idol! "
+                "Reflect awe, rapid heart rate, hoping for a selfie or autograph, and sheer fan excitement."
+            )
+        return (
+            "ВАЖНО (Встреча с кумиром — Фанат): Персонаж видит перед собой любимого кумира! "
+            "В мыслях — трепет, учащенный пульс, восторг, жажда автографа или фото на память и шквал эмоций."
+        )
+
+    # R) Charity Gala
+    if any(k in ev_key for k in ("благотворительн", "charity_gala")):
+        if is_en:
+            return (
+                "IMPORTANT (Charity Gala): High-society philanthropy. "
+                "Reflect velvet suits, gala dresses, generous bids, noble social causes, prestige, and impeccable decorum."
+            )
+        return (
+            "ВАЖНО (Благотворительный вечер): Раут высшего общества. "
+            "В мыслях — смокинги и вечерние платья, благотворительные взносы, светский этикет, изысканные манеры, престиж и благородные цели вечера."
+        )
+
+    # S) Family Reunion
+    if any(k in ev_key for k in ("семейный сбор", "family_reunion")):
+        if is_en:
+            return (
+                "IMPORTANT (Family Reunion): Multi-generational family reunion. "
+                "Reflect childhood nostalgia, favorite family recipes, catching up with relatives, and strong ancestral bonds."
+            )
+        return (
+            "ВАЖНО (Семейный сбор): Встреча всей большой семьи. "
+            "В мыслях — воспоминания детства, объятия с родными, домашние угощения по фамильным рецептам, теплота кровных уз и радость воссоединения поколений."
+        )
+
+    # T) Custom / Modded Party Fallback
+    if is_resid:
+        if is_en:
+            return (
+                f"IMPORTANT (Themed House Party): A special event '{ev_name_en}' is underway. "
+                f"Reflect high spirits, cozy house-party charm, mingling with hosts and guests, music, drinks, and lively festive atmosphere."
+            )
+        return (
+            f"ВАЖНО (Тематическая вечеринка в доме): На участке проходит праздничное событие «{ev_name_ru}». "
+            f"Отрази в мыслях приподнятое праздничное настроение, домашний уют тусовки, общение гостей с хозяевами, звон бокалов, музыку и живой интерес к происходящему."
+        )
+    if is_en:
+        return (
+            f"IMPORTANT (Themed Venue Event): A festive event '{ev_name_en}' is taking place at this venue. "
+            f"Reflect buzzing social energy, music, drinks, and dynamic interaction within the party crowd."
+        )
+    return (
+        f"ВАЖНО (Тематическая вечеринка в заведении): В общественном месте проходит праздничное событие «{ev_name_ru}». "
+        f"Отрази в мыслях клубный/барный антураж, праздничный драйв, музыку, звон коктейлей и яркое общение в компании."
+    )
+
+
+def get_party_event_guidance(event_info: Optional[dict], is_en: bool = False, for_director: bool = False) -> Optional[str]:
+    """
+    Returns tailored atmospheric party guidance.
+    If event_info is a SimInfo object rather than a dict, resolves get_active_social_event_info automatically.
+    If for_director=True, dynamically adapts phrasing for living dialogue & scene direction in Autonomous Director.
+    """
+    if event_info is not None and not isinstance(event_info, dict):
+        event_info = get_active_social_event_info(event_info, is_en=is_en)
+    raw = _get_party_event_guidance_raw(event_info, is_en=is_en)
+    if not raw:
+        return None
+    if for_director:
+        if is_en:
+            raw = raw.replace("IMPORTANT (", "IMPORTANT FOR SCENE DIRECTION (")
+            raw = raw.replace("Thoughts should reflect", "Dialogue and reactions should reflect")
+            raw = raw.replace("Their thoughts should focus", "Their conversation should focus")
+            raw = raw.replace("In thoughts", "In conversation")
+            raw = raw.replace("Reflect ", "Reflect in dialogue ")
+        else:
+            raw = raw.replace("ВАЖНО (", "ВАЖНО ДЛЯ РЕЖИССУРЫ СЦЕНЫ (")
+            raw = raw.replace("В мыслях персонажа —", "В разговоре и поведении персонажей —")
+            raw = raw.replace("В его мыслях —", "В темах разговора —")
+            raw = raw.replace("В мыслях —", "В темах разговора и поведении —")
+            raw = raw.replace("Мысли персонажа должны быть", "Разговоры персонажей должны быть")
+            raw = raw.replace("Отрази в мыслях", "Отрази в темах диалога")
+            raw = raw.replace("Отрази ", "Отрази в диалоге ")
+    return raw
+
+
+def get_sim_active_lot_role(sim_info, sim_inst=None, is_en: bool = False):
+    """
+    Identifies any active lot/venue role or commercial service duty the Sim is currently performing.
+    Covers LittleMsSam live-in services, bartenders, baristas, maids, nannies, repairmen, DJs, vendors, etc.
+    CRITICAL:
+    1. Playable household members (selectable, played, or active household) can NEVER be commercial/venue service NPCs!
+       (repairing a toilet, cooking dinner, taking a yoga class, getting a massage, or mixing a drink does NOT make them staff).
+    2. NPC visitors or guests can NEVER be commercial/venue service NPCs unless they are officially on duty with a staff job.
+    """
+    if sim_info is None:
+        return None
+
+    if is_grim_reaper_sim(sim_info):
+        return "Жнец Смерти" if not is_en else "Grim Reaper"
+    if is_father_winter_sim(sim_info):
+        return "Дед Мороз" if not is_en else "Father Winter"
+
+    if sim_inst is None and hasattr(sim_info, "get_sim_instance"):
+        try:
+            sim_inst = sim_info.get_sim_instance()
+        except Exception:
+            sim_inst = None
+
+    # Determine if this Sim is a playable Sim / active household member
+    is_played_or_active = False
+    try:
+        if getattr(sim_info, "is_selectable", False) or getattr(sim_info, "is_selected", False):
+            is_played_or_active = True
+        elif not getattr(sim_info, "is_npc", True):
+            is_played_or_active = True
+        elif services is not None:
+            active_hh = getattr(services, "active_household", lambda: None)()
+            if active_hh is not None and getattr(sim_info, "household_id", None) == getattr(active_hh, "id", None):
+                is_played_or_active = True
+            else:
+                client_mgr = getattr(services, "client_manager", lambda: None)()
+                if client_mgr is not None and hasattr(client_mgr, "get_first_client"):
+                    client = client_mgr.get_first_client()
+                    active_sim = getattr(client, "active_sim", None) if client else None
+                    if active_sim is not None and getattr(active_sim, "sim_info", None) is sim_info:
+                        is_played_or_active = True
+    except Exception:
+        pass
+
+    # A played or active household member can ONLY have a domestic live-in servant role
+    # (LittleMsSam live-in nanny, maid, gardener, butler)
+    if is_played_or_active:
+        return get_sim_livein_staff_role(sim_info, sim_inst=sim_inst, is_en=is_en)
+
+    # 1. Active Situations & SituationJobs (Highest Ground Truth Priority for NPC service staff)
+    try:
+        sit_mgr = None
+        if services is not None:
+            if hasattr(services, "get_zone_situation_manager"):
+                sit_mgr = services.get_zone_situation_manager()
+            if sit_mgr is None and hasattr(services, "current_zone"):
+                curr_zone = services.current_zone()
+                if curr_zone is not None:
+                    sit_mgr = getattr(curr_zone, "situation_manager", None)
+
+        if sit_mgr is not None and sim_inst is not None:
+            sim_sits = []
+            if hasattr(sit_mgr, "get_situations_sim_is_in"):
+                sim_sits = sit_mgr.get_situations_sim_is_in(sim_inst) or []
+            elif hasattr(sit_mgr, "get_all"):
+                sim_sits = sit_mgr.get_all()
+
+            for sit in sim_sits:
+                sit_cls_name = getattr(getattr(sit, "__class__", type(sit)), "__name__", "").lower()
+                sit_str = f"{sit_cls_name} {str(sit)}".lower()
+
+                job = None
+                if hasattr(sit, "get_current_job_for_sim"):
+                    try:
+                        job = sit.get_current_job_for_sim(sim_inst)
+                    except Exception:
+                        pass
+                if job is None and hasattr(sit, "get_sim_job"):
+                    try:
+                        job = sit.get_sim_job(sim_inst)
+                    except Exception:
+                        pass
+
+                job_str = ""
+                if job is not None:
+                    job_cls = getattr(job, "__class__", type(job))
+                    job_str = f"{getattr(job, '__name__', '')} {getattr(job_cls, '__name__', '')} {str(job)}".lower()
+
+                # Guard: If this job clearly indicates a client, customer, student, or guest, they are NOT staff!
+                if any(ind in job_str for ind in ('customer', 'client', 'student', 'patron', 'diner', 'guest', 'visitor', 'patient', 'shopper', 'audience', 'listener')):
+                    continue
+
+                # Check job_str first (highest accuracy)
+                if job_str:
+                    for r_def in LOT_ROLE_DEFINITIONS:
+                        if any(k in job_str for k in r_def["keys"]):
+                            return r_def["en"] if is_en else r_def["ru"]
+
+                # If no specific job_str, fallback to sit_str ONLY if it's NOT a shared venue situation
+                if not any(shared in sit_str for shared in ('yoga', 'massage', 'restaurant', 'dineout', 'bar_', 'nightclub', 'cafe', 'market', 'party', 'wedding')):
+                    for r_def in LOT_ROLE_DEFINITIONS:
+                        if any(k in sit_str for k in r_def["keys"]):
+                            return r_def["en"] if is_en else r_def["ru"]
+    except Exception:
+        pass
+
+    # 2. Traits (Service NPC traits & LittleMsSam custom traits)
+    try:
+        tt = getattr(sim_info, "trait_tracker", None)
+        if tt is not None:
+            traits = getattr(tt, "traits", ())
+            for t in traits:
+                t_name = f"{getattr(t, '__name__', '')} {str(t)}".lower()
+                for r_def in LOT_ROLE_DEFINITIONS:
+                    if any(k in t_name for k in r_def["keys"]):
+                        return r_def["en"] if is_en else r_def["ru"]
+    except Exception:
+        pass
+
+    return None
+
+
+def get_sim_livein_staff_role(sim_info, sim_inst=None, is_en: bool = False):
+    """Checks if a Sim is a domestic live-in servant (Butler, LMS Live-in Nanny/Maid/Gardener/Butler, Bonehilda)."""
+    if sim_info is None:
+        return None
+
+    # Check traits (Vanilla Butler & LittleMsSam Live-in traits)
+    try:
+        tt = getattr(sim_info, "trait_tracker", None)
+        if tt is not None:
+            for t in getattr(tt, "traits", ()):
+                t_name = f"{getattr(t, '__name__', '')} {str(t)}".lower()
+                for key, ru_lbl, en_lbl in LIVEIN_STAFF_KEYWORDS:
+                    if key in t_name:
+                        return en_lbl if is_en else ru_lbl
+    except Exception:
+        pass
+
+    # Check active situations
+    try:
+        sit_mgr = services.get_zone_situation_manager() if hasattr(services, "get_zone_situation_manager") else None
+        if sit_mgr is None and hasattr(services, "current_zone"):
+            curr_zone = services.current_zone()
+            if curr_zone is not None:
+                sit_mgr = getattr(curr_zone, "situation_manager", None)
+        if sit_mgr is not None and sim_inst is not None:
+            sim_sits = []
+            if hasattr(sit_mgr, "get_situations_sim_is_in"):
+                sim_sits = sit_mgr.get_situations_sim_is_in(sim_inst) or []
+            elif hasattr(sit_mgr, "get_all"):
+                sim_sits = sit_mgr.get_all()
+            for sit in sim_sits:
+                sit_str = f"{getattr(sit, '__class__', type(sit)).__name__} {str(sit)}".lower()
+                for key, ru_lbl, en_lbl in LIVEIN_STAFF_KEYWORDS:
+                    if key in sit_str:
+                        return en_lbl if is_en else ru_lbl
+    except Exception:
+        pass
+
+    # Check Bonehilda / Butler name strings
+    f_n = (getattr(sim_info, "first_name", "") or "").lower()
+    l_n = (getattr(sim_info, "last_name", "") or "").lower()
+    if "bonehilda" in f_n or "скелехильда" in f_n or "bonehilda" in l_n:
+        return "Скелехильда (Горничная)" if not is_en else "Bonehilda"
+
+    return None
+
+
+def get_relationship_status(sim_a, sim_b) -> str:
+    """Alias for get_relationship_between_sims."""
+    return get_relationship_between_sims(sim_a, sim_b)
+
+
+
 def get_sim_career_info(sim_info) -> str:
-    """Extracts the Sim's career, exact job title and position description."""
+    """Extracts the Sim's career, exact job title, status, schedule, next shift, and homework."""
+    if is_grim_reaper_sim(sim_info):
+        return "Смерть с косой (Жнец душ)"
+
+    if is_father_winter_sim(sim_info):
+        return "Дед Мороз"
+
+    try:
+        f_name = (getattr(sim_info, "first_name", "") or "").lower().strip()
+        l_name = (getattr(sim_info, "last_name", "") or "").lower().strip()
+        full_name_lower = f"{f_name} {l_name}".strip()
+        if "bonehilda" in full_name_lower or "скелехильда" in full_name_lower:
+            return "Скелехильда-горничная"
+        if "patchy" in full_name_lower or "заплатка" in full_name_lower:
+            return "Огородное пугало"
+        if "crumplebottom" in full_name_lower or "толстопятко" in full_name_lower:
+            return "Госпожа Толстопятко"
+        if "guidry" in full_name_lower or "гидри" in full_name_lower:
+            return "Призрак Клод Рене Дюплантье Гидри"
+        if "temperance" in full_name_lower or "темперанция" in full_name_lower:
+            return "Злобный призрак Темперанция"
+    except Exception:
+        pass
+
     try:
         if hasattr(sim_info, "career_tracker") and sim_info.career_tracker is not None:
             careers = getattr(sim_info.career_tracker, "careers", {})
@@ -12263,28 +16654,57 @@ def get_sim_career_info(sim_info) -> str:
                     if hasattr(career, "current_level_tuning") and career.current_level_tuning:
                         level_name = getattr(career.current_level_tuning, "__name__", "") or ""
 
-                    # Find broad career translation
-                    career_title = None
-                    for car_key, car_val in CAREER_TRANSLATIONS.items():
-                        if car_key in c_name:
-                            career_title = car_val
-                            break
-                    if not career_title:
-                        clean_c = c_name.replace("career_", "").replace("adult_", "").replace("teen_", "").replace("child_", "").strip()
-                        if clean_c.endswith(" on"):
-                            clean_c = clean_c[:-3].strip()
-                        career_title = clean_c.capitalize()
+                    # Get status, schedule, next shift and homework/task
+                    details = get_career_status_and_schedule(career, sim_info)
 
-                    # Find specific job position title & description
-                    job_info = get_career_level_title_and_desc(c_name, track_name, level_name, c_level)
-                    if job_info:
-                        job_title, job_desc = job_info
-                        if job_desc:
-                            career_entries.append(f"{career_title} — Должность: «{job_title}» (Уровень {c_level}: {job_desc})")
-                        else:
-                            career_entries.append(f"{career_title} — Должность: «{job_title}» (Уровень {c_level})")
+                    if details["is_school"]:
+                        grade_desc = SCHOOL_GRADE_TITLES.get(c_level, f"Оценка: {c_level}")
+                        school_type = "Начальная школа" if ("grade" in c_name or "child" in c_name) else "Старшая школа"
+                        entry_parts = [f"{school_type} — {grade_desc}"]
+                        if details["status"]:
+                            entry_parts.append(f"Статус: {details['status']}")
+                        if details["homework"]:
+                            entry_parts.append(details["homework"])
+                        if details["schedule"]:
+                            entry_parts.append(details["schedule"])
+                        if details["next_shift"]:
+                            entry_parts.append(details["next_shift"])
+                        career_entries.append(". ".join(entry_parts))
                     else:
-                        career_entries.append(f"{career_title} (Уровень {c_level})")
+                        career_title = None
+                        for car_key, car_val in CAREER_TRANSLATIONS.items():
+                            if car_key in c_name:
+                                career_title = car_val
+                                break
+                        if not career_title:
+                            clean_c = c_name.replace("career_", "").replace("adult_", "").replace("teen_", "").replace("child_", "").strip()
+                            if clean_c.endswith(" on"):
+                                clean_c = clean_c[:-3].strip()
+                            career_title = clean_c.capitalize()
+
+                        job_info = get_career_level_title_and_desc(c_name, track_name, level_name, c_level)
+                        if job_info:
+                            job_title, job_desc = job_info
+                            title_part = f"{career_title} — Должность: «{job_title}» (Уровень {c_level}"
+                            if job_desc:
+                                title_part += f": {job_desc})"
+                            else:
+                                title_part += ")"
+                        else:
+                            title_part = f"{career_title} (Уровень {c_level})"
+
+                        entry_parts = [title_part]
+                        if details.get("daily_task"):
+                            entry_parts.append(details["daily_task"])
+                        if details["status"]:
+                            entry_parts.append(f"Статус: {details['status']}")
+                        if details["homework"]:
+                            entry_parts.append(details["homework"])
+                        if details["schedule"]:
+                            entry_parts.append(details["schedule"])
+                        if details["next_shift"]:
+                            entry_parts.append(details["next_shift"])
+                        career_entries.append(". ".join(entry_parts))
 
                 if career_entries:
                     return "; ".join(career_entries)
@@ -12499,7 +16919,7 @@ def get_sim_aspiration_info(sim_info) -> str:
                         display_n = getattr(obj, "display_name", None) or getattr(obj, "name", None)
                         if display_n is not None:
                             try:
-                                raw_t = LocalizationHelperTuning.get_raw_text(display_n)
+                                raw_t = _loc_text(display_n)
                                 if raw_t and str(raw_t).strip():
                                     return str(raw_t).strip()
                             except Exception:
@@ -12537,7 +16957,7 @@ def get_sim_aspiration_info(sim_info) -> str:
                     display_n = getattr(prim, "display_name", None) or getattr(prim, "name", None)
                     if display_n is not None:
                         try:
-                            raw_t = LocalizationHelperTuning.get_raw_text(display_n)
+                            raw_t = _loc_text(display_n)
                             if raw_t and str(raw_t).strip():
                                 return str(raw_t).strip()
                         except Exception:
@@ -12575,6 +16995,489 @@ def get_household_funds_info(sim_info) -> str:
         log_exception("Error getting household funds", e)
 
     return "Неизвестно"
+
+def get_sim_clubs_info(sim_info, is_en: bool = False) -> list:
+    """
+    Returns formatted list of clubs the Sim belongs to:
+    e.g. ['«3333333» (Глава клуба). Собрание не проводится. Других участников нет']
+    or with members and leader:
+    ['«Авангард» (Участник). Сейчас идёт собрание клуба!. Другие участники: Лилит Новосельских - Лидер клуба, Трешли Рилперсон']
+    Handles 1, 2, 3 or any number of modded unlimited clubs cleanly.
+    """
+    results = []
+    try:
+        if sim_info is None:
+            return results
+
+        sim_id = getattr(sim_info, "sim_id", 0)
+
+        club_service = None
+        if services is not None and hasattr(services, "get_club_service"):
+            try:
+                club_service = services.get_club_service()
+            except Exception:
+                club_service = None
+
+        if club_service is None or not hasattr(club_service, "get_clubs_for_sim_info"):
+            return results
+
+        # 1. Fetch clubs through get_clubs_for_sim_info
+        clubs = list(club_service.get_clubs_for_sim_info(sim_info) or ())
+
+        # 2. Additional scan through club_service.clubs for custom/modded clubs
+        if hasattr(club_service, "clubs"):
+            try:
+                for c in club_service.clubs:
+                    if c not in clubs:
+                        m_list = getattr(c, "members", ())
+                        if sim_info in m_list or any(getattr(m, "sim_id", -1) == sim_id for m in m_list):
+                            clubs.append(c)
+            except Exception:
+                pass
+
+        if not clubs:
+            return results
+
+        CLUB_SEED_TRANSLATIONS = {
+            # Food / Cooking -> Upper Crusts
+            "foodie": ("Высший свет", "Upper Crusts"),
+            "food": ("Высший свет", "Upper Crusts"),
+            "uppercrust": ("Высший свет", "Upper Crusts"),
+            "upper": ("Высший свет", "Upper Crusts"),
+
+            # Gardening -> Garden Gnomes
+            "gardengnome": ("Садовые гномы", "Garden Gnomes"),
+            "garden": ("Садовые гномы", "Garden Gnomes"),
+            "gnome": ("Садовые гномы", "Garden Gnomes"),
+
+            # Books / Art -> Avant-Gardes
+            "avantgarde": ("Авангард", "Avant-Gardes"),
+            "avant": ("Авангард", "Avant-Gardes"),
+            "book": ("Авангард", "Avant-Gardes"),
+            "reading": ("Авангард", "Avant-Gardes"),
+            "art": ("Авангард", "Avant-Gardes"),
+
+            # Paragons
+            "paragon": ("Образцы совершенства", "Paragons"),
+            "popular": ("Образцы совершенства", "Paragons"),
+
+            # Renegades / Mischief
+            "renegade": ("Бунтари", "Renegades"),
+            "mischief": ("Бунтари", "Renegades"),
+
+            # Spin Masters / DJs / Dance
+            "spinmaster": ("Мастера танцпола", "Spin Masters"),
+            "spin": ("Мастера танцпола", "Spin Masters"),
+            "dj": ("Мастера танцпола", "Spin Masters"),
+            "dance": ("Мастера танцпола", "Spin Masters"),
+
+            # Powerhouse / Fitness
+            "powerhouse": ("Источник бодрости", "Powerhouse"),
+            "fitness": ("Источник бодрости", "Powerhouse"),
+            "workout": ("Источник бодрости", "Powerhouse"),
+
+            # Good Timers / Pub
+            "goodtimer": ("Весельчаки", "Good Timers"),
+            "good_timer": ("Весельчаки", "Good Timers"),
+            "pub": ("Весельчаки", "Good Timers"),
+            "drink": ("Весельчаки", "Good Timers"),
+            "bar": ("Весельчаки", "Good Timers"),
+
+            # League of Adventurers / Kids
+            "leagueofadventurer": ("Лига авантюристов", "League of Adventurers"),
+            "adventur": ("Лига авантюристов", "League of Adventurers"),
+            "kid": ("Лига авантюристов", "League of Adventurers"),
+            "children": ("Лига авантюристов", "League of Adventurers"),
+
+            # Knights of the Hedge / Chess
+            "knightsofthehedge": ("Рыцари кустов", "Knights of the Hedge"),
+            "knight": ("Рыцари кустов", "Knights of the Hedge"),
+            "hedge": ("Рыцари кустов", "Knights of the Hedge"),
+            "chess": ("Рыцари кустов", "Knights of the Hedge"),
+
+            # Partihaus / Party
+            "partihaus": ("Тусовщики", "Partihaus"),
+            "party": ("Тусовщики", "Partihaus"),
+        }
+
+        import re
+        def _clean_club_str(raw_val) -> Optional[str]:
+            if raw_val is None:
+                return None
+            s = str(raw_val).strip()
+            if not s or s.startswith("0x"):
+                return None
+            s_low = s.lower()
+            if any(bad in s_low for bad in ("hash:", "tokens", "text_string", "{", "}", "<", ">")):
+                m_txt = re.search(r'text:\s*"([^"]+)"', s)
+                if m_txt and m_txt.group(1).strip():
+                    found = m_txt.group(1).strip()
+                    if not any(b in found.lower() for b in ("hash:", "tokens", "0x", "{", "}")):
+                        return found
+                return None
+            return s
+
+        for club in clubs:
+            if club is None:
+                continue
+
+            # 1. Resolve club name (custom player name vs pre-made game club)
+            club_name = None
+
+            # 1.1 Direct custom name attributes: _name, _localized_custom_name, custom_name
+            for attr in ("_name", "_localized_custom_name", "custom_name"):
+                try:
+                    val = getattr(club, attr, None)
+                    c_val = _clean_club_str(val)
+                    if c_val:
+                        club_name = c_val
+                        break
+                    if LocalizationHelperTuning is not None and val is not None:
+                        try:
+                            raw_val = _loc_text(val)
+                            c_raw = _clean_club_str(raw_val)
+                            if c_raw:
+                                club_name = c_raw
+                                break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # 1.2 club.name property
+            if not club_name:
+                try:
+                    p_name = getattr(club, "name", None)
+                    c_p = _clean_club_str(p_name)
+                    if c_p:
+                        club_name = c_p
+                except Exception:
+                    pass
+
+            # 1.3 Pre-made club seed lookup (for unedited pre-made clubs)
+            if not club_name:
+                seed = None
+                for seed_attr in ("club_seed", "_club_seed", "seed"):
+                    try:
+                        seed = getattr(club, seed_attr, None)
+                        if seed is not None:
+                            break
+                    except Exception:
+                        pass
+
+                if seed is not None:
+                    try:
+                        s_name = getattr(seed, "__name__", str(seed)).lower()
+                        for k, (ru_val, en_val) in CLUB_SEED_TRANSLATIONS.items():
+                            if k in s_name:
+                                club_name = en_val if is_en else ru_val
+                                break
+
+                        if not club_name and hasattr(seed, "__name__"):
+                            raw_sname = str(getattr(seed, "__name__", ""))
+                            clean_seed = raw_sname.replace("clubSeed_", "").replace("club_", "").replace("InitialSeeds_", "").replace("InitialSeeds", "").replace("_", " ").strip()
+                            clean_seed = re.sub(r'([a-z])([A-Z])', r'\1 \2', clean_seed).strip()
+                            if is_en:
+                                c_seed = _clean_club_str(clean_seed)
+                                if c_seed:
+                                    club_name = c_seed
+                            else:
+                                WORD_MAP = {
+                                    "foodie": "Гурманы",
+                                    "food": "Кулинары",
+                                    "garden": "Садоводы",
+                                    "gardening": "Садоводство",
+                                    "gnome": "Гномы",
+                                    "gnomes": "Гномы",
+                                    "book": "Книголюбы",
+                                    "reading": "Чтение",
+                                    "art": "Искусство",
+                                    "popular": "Популярные",
+                                    "mischief": "Шутники",
+                                    "renegade": "Бунтари",
+                                    "renegades": "Бунтари",
+                                    "dj": "Диджеи",
+                                    "dance": "Танцы",
+                                    "spin": "Танцоры",
+                                    "master": "Мастера",
+                                    "masters": "Мастера",
+                                    "fitness": "Фитнес",
+                                    "workout": "Тренировки",
+                                    "powerhouse": "Бодрость",
+                                    "pub": "Завсегдатаи паба",
+                                    "drink": "Выпивка",
+                                    "bar": "Бар",
+                                    "chess": "Шахматисты",
+                                    "knight": "Рыцари",
+                                    "knights": "Рыцари",
+                                    "hedge": "Кусты",
+                                    "kid": "Дети",
+                                    "kids": "Дети",
+                                    "children": "Дети",
+                                    "adventurer": "Авантюристы",
+                                    "adventurers": "Авантюристы",
+                                    "league": "Лига",
+                                    "party": "Вечеринки",
+                                    "partihaus": "Тусовщики",
+                                    "bowling": "Боулинг",
+                                    "vampire": "Вампиры",
+                                    "vampires": "Вампиры",
+                                    "spellcaster": "Чародеи",
+                                    "werewolf": "Оборотни",
+                                    "werewolves": "Оборотни",
+                                    "club": "Клуб",
+                                }
+                                words = clean_seed.split()
+                                ru_words = [WORD_MAP.get(w.lower(), w) for w in words]
+                                c_seed = _clean_club_str(" ".join(ru_words))
+                                if c_seed:
+                                    club_name = c_seed
+                    except Exception:
+                        pass
+
+            if not club_name:
+                club_name = "Клуб" if not is_en else "Club"
+
+            # 2. Determine role: Leader vs Member
+            is_leader = False
+            leader_obj = getattr(club, "leader", None)
+            leader_id_val = getattr(club, "leader_id", None)
+            try:
+                if leader_obj is not None:
+                    if getattr(leader_obj, "sim_id", -1) == sim_id or leader_obj == sim_info:
+                        is_leader = True
+                if not is_leader and leader_id_val is not None:
+                    if leader_id_val == sim_id:
+                        is_leader = True
+            except Exception:
+                pass
+
+            if is_en:
+                role_str = "Club Leader" if is_leader else "Member"
+            else:
+                role_str = "Глава клуба" if is_leader else "Участник"
+
+            # 3. Check gathering status
+            is_gathering = False
+            try:
+                if hasattr(club, "get_gathering"):
+                    gathering = club.get_gathering()
+                    if gathering is not None:
+                        is_gathering = True
+                elif hasattr(club_service, "clubs_to_gatherings_map"):
+                    if club in club_service.clubs_to_gatherings_map:
+                        is_gathering = True
+            except Exception:
+                pass
+
+            if is_en:
+                gather_str = "Club gathering currently in progress!" if is_gathering else "No gathering in progress"
+            else:
+                gather_str = "Сейчас идёт собрание клуба!" if is_gathering else "Собрание не проводится"
+
+            # 4. Other club members (with special leader annotation if another sim leads)
+            leader_name_entry = None
+            regular_members = []
+            try:
+                members_source = getattr(club, "members", None)
+                if members_source is None and hasattr(club, "_get_member_sim_infos"):
+                    try:
+                        members_source = club._get_member_sim_infos()
+                    except Exception:
+                        members_source = None
+
+                sim_mgr = None
+                if services is not None and hasattr(services, "sim_info_manager"):
+                    try:
+                        sim_mgr = services.sim_info_manager()
+                    except Exception:
+                        sim_mgr = None
+
+                candidates = []
+                if members_source:
+                    candidates.extend(list(members_source))
+                m_ids = getattr(club, "member_ids", None)
+                if m_ids:
+                    candidates.extend(list(m_ids))
+
+                seen_ids = set()
+                for item in candidates:
+                    m_sim = item
+                    if isinstance(item, int):
+                        if sim_mgr:
+                            m_sim = sim_mgr.get(item)
+                        else:
+                            continue
+
+                    if m_sim is None:
+                        continue
+
+                    m_id = getattr(m_sim, "sim_id", -1)
+                    if m_id == sim_id or m_sim == sim_info:
+                        continue
+                    if m_id in seen_ids:
+                        continue
+                    seen_ids.add(m_id)
+
+                    first = getattr(m_sim, "first_name", "") or ""
+                    last = getattr(m_sim, "last_name", "") or ""
+                    full_name = f"{first} {last}".strip()
+                    if not full_name:
+                        continue
+
+                    # Check if this member is the club leader
+                    is_mem_leader = False
+                    try:
+                        if leader_obj is not None:
+                            if getattr(leader_obj, "sim_id", -1) == m_id or leader_obj == m_sim:
+                                is_mem_leader = True
+                        if not is_mem_leader and leader_id_val is not None:
+                            if leader_id_val == m_id:
+                                is_mem_leader = True
+                    except Exception:
+                        pass
+
+                    if is_mem_leader:
+                        leader_tag = " - Лидер клуба" if not is_en else " - Club Leader"
+                        leader_name_entry = f"{full_name}{leader_tag}"
+                    else:
+                        regular_members.append(full_name)
+            except Exception as ex_mem:
+                log_exception("Error collecting other club members", ex_mem)
+
+            other_members = []
+            if leader_name_entry:
+                other_members.append(leader_name_entry)
+            other_members.extend(regular_members)
+
+            if is_en:
+                if other_members:
+                    members_suffix = f"Other members: {', '.join(other_members)}"
+                else:
+                    members_suffix = "No other members"
+                results.append(f'"{club_name}" ({role_str}). {gather_str}. {members_suffix}')
+            else:
+                if other_members:
+                    members_suffix = f"Другие участники: {', '.join(other_members)}"
+                else:
+                    members_suffix = "Других участников нет"
+                results.append(f"«{club_name}» ({role_str}). {gather_str}. {members_suffix}")
+
+    except Exception as e:
+        log_exception("Error in get_sim_clubs_info", e)
+    return results
+
+
+def get_sim_education_info(sim_info, is_en: bool = False):
+    """
+    Extracts university degrees and current higher education status for the Sim:
+    e.g. 'Диплом по биологии с отличием (Университет Фоксбери)' or 'Студент (Специальность: Физика, Университет Бритчестера)'
+    Returns None if no university degree or active enrollment.
+    """
+    try:
+        if sim_info is None:
+            return None
+
+        degree_entries = []
+
+        # 1. Check completed degree traits from trait_tracker
+        trait_tracker = getattr(sim_info, "trait_tracker", None)
+        if trait_tracker is not None:
+            traits_list = getattr(trait_tracker, "traits", ())
+            for trait in traits_list:
+                t_name = getattr(trait, "__name__", "") or str(trait)
+                if "University_" in t_name and "Degree" in t_name:
+                    loc_name = None
+                    if hasattr(trait, "display_name") and trait.display_name is not None:
+                        try:
+                            if LocalizationHelperTuning is not None:
+                                raw_txt = _loc_text(trait.display_name)
+                                if raw_txt and not raw_txt.startswith("0x"):
+                                    loc_name = raw_txt.strip()
+                        except Exception:
+                            pass
+
+                    if not loc_name:
+                        # Fallback parsing
+                        clean = t_name.replace("trait_University_", "").replace("University_", "")
+                        is_honors = "Honors" in clean
+                        clean = clean.replace("Honors", "")
+                        is_bs = clean.endswith("BS")
+                        clean = clean[:-2] if (clean.endswith("BA") or clean.endswith("BS")) else clean
+                        clean = clean.replace("Degree", "")
+                        major_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', clean).strip()
+                        if not is_en:
+                            univ = "Университет Фоксбери" if is_bs else "Университет Бритчестера"
+                            honors_str = " (с отличием)" if is_honors else ""
+                            loc_name = f"Диплом: {major_name}{honors_str} — {univ}"
+                        else:
+                            univ = "Foxbury Institute" if is_bs else "University of Britechester"
+                            honors_str = " with Honors" if is_honors else ""
+                            loc_name = f"{major_name} Degree{honors_str} — {univ}"
+
+                    if loc_name and loc_name not in degree_entries:
+                        degree_entries.append(loc_name)
+
+        # 2. Check active student status from degree_tracker
+        dt = getattr(sim_info, "degree_tracker", None)
+        if dt is not None:
+            try:
+                is_student = False
+                if hasattr(dt, "is_current_student") and dt.is_current_student():
+                    is_student = True
+                elif hasattr(dt, "get_enrolled_major") and dt.get_enrolled_major() is not None:
+                    is_student = True
+
+                if is_student:
+                    univ_name = None
+                    if hasattr(dt, "get_university"):
+                        u = dt.get_university()
+                        if u is not None and hasattr(u, "display_name") and u.display_name:
+                            try:
+                                if LocalizationHelperTuning is not None:
+                                    raw_u = _loc_text(u.display_name)
+                                    if raw_u and not raw_u.startswith("0x"):
+                                        univ_name = raw_u.strip()
+                            except Exception:
+                                pass
+                        if not univ_name and u is not None:
+                            univ_name = getattr(u, "__name__", str(u)).replace("University_", "").replace("_", " ")
+
+                    major_name = None
+                    if hasattr(dt, "get_enrolled_major"):
+                        m = dt.get_enrolled_major()
+                        if m is not None and hasattr(m, "display_name") and m.display_name:
+                            try:
+                                if LocalizationHelperTuning is not None:
+                                    raw_m = _loc_text(m.display_name)
+                                    if raw_m and not raw_m.startswith("0x"):
+                                        major_name = raw_m.strip()
+                            except Exception:
+                                pass
+                        if not major_name and m is not None:
+                            major_name = getattr(m, "__name__", str(m)).replace("University_Major_", "").replace("_", " ")
+
+                    stud_desc = None
+                    if is_en:
+                        m_part = f", Major: {major_name}" if major_name else ""
+                        u_part = f" at {univ_name}" if univ_name else ""
+                        stud_desc = f"University Student (Currently enrolled{m_part}{u_part})"
+                    else:
+                        m_part = f", специальность: {major_name}" if major_name else ""
+                        u_part = f" ({univ_name})" if univ_name else ""
+                        stud_desc = f"Студент университета (сейчас учится{m_part}){u_part}"
+
+                    if stud_desc and stud_desc not in degree_entries:
+                        degree_entries.insert(0, stud_desc)
+            except Exception:
+                pass
+
+        if degree_entries:
+            return "; ".join(degree_entries)
+
+    except Exception as e:
+        log_exception("Error in get_sim_education_info", e)
+    return None
 
 
 def get_sim_pregnancy_info(sim_info) -> str:
@@ -13425,12 +18328,91 @@ def get_sim_transitioning_interaction(sim_instance):
     return None
 
 
-def format_transitioning_activity(act: str) -> str:
+def format_transitioning_activity(act: str, sim_info=None) -> str:
     """Formats an activity that the Sim is currently walking/routing towards (has not started yet)."""
     if not act:
         return "Идёт по своим делам"
 
     act_lower = act.lower().strip()
+
+    # Preserve exact dish and craft names during transition
+    if act.startswith("Готовит блюдо: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет готовить блюдо: {dish}"
+    if act.startswith("Выпекает: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет выпекать: {dish}"
+    if act.startswith("Жарит на гриле: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет жарить на гриле: {dish}"
+    if act.startswith("Делает заготовки (консервирует): "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет делать заготовки: {dish}"
+    if act.startswith("Печет пиццу: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет печь пиццу: {dish}"
+    if act.startswith("Выпекает вафли: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет выпекать вафли: {dish}"
+    if act.startswith("Подготавливает ингредиенты: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идет подготавливать ингредиенты: {dish}"
+    if act.startswith("Мастерит мебель на столярном станке: "):
+        craft = act.split(":", 1)[1].strip()
+        return f"Идет мастерить: {craft}"
+    if act.startswith("Вырезает деревянную скульптуру на столярном станке: "):
+        craft = act.split(":", 1)[1].strip()
+        return f"Идет вырезать скульптуру: {craft}"
+    if act.startswith("Мастерит музыкальный инструмент: "):
+        craft = act.split(":", 1)[1].strip()
+        return f"Идет мастерить инструмент: {craft}"
+    if act.startswith("Мастерит деревянное изделие: "):
+        craft = act.split(":", 1)[1].strip()
+        return f"Идет мастерить: {craft}"
+
+    # Preserve eating and drinking dish names during transition
+    if act.startswith("Ест блюдо: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идёт есть блюдо: {dish}"
+    if act.startswith("Пьет напиток: ") or act.startswith("Пьёт напиток: "):
+        dish = act.split(":", 1)[1].strip()
+        return f"Идёт пить напиток: {dish}"
+    if act.startswith("Ест свежий урожай / плод"):
+        item = act.split(":", 1)[-1].strip() if ":" in act else act.split("(", 1)[-1].rstrip(")").strip()
+        return f"Идёт есть свежий урожай: {item}"
+
+    # Preserve cleaning puddles and floor during transition
+    if act.startswith("Вытирает шваброй лужу на полу"):
+        return "Идёт вытирать лужу на полу"
+    if act.startswith("Убирает беспорядок на полу"):
+        return "Идёт убирать беспорядок на полу"
+    if act.startswith("Моет пол шваброй"):
+        return "Идёт мыть пол шваброй"
+
+    # Butler and domestic staff specific transitions
+    is_butler = False
+    if sim_info is not None:
+        try:
+            is_butler = bool("дворецк" in get_sim_domestic_staff_role(sim_info, is_en=False).lower())
+        except Exception:
+            pass
+
+    if "пыл" in act_lower or "чистот" in act_lower:
+        return "Идёт проверить чистоту комнат"
+    if "гонг" in act_lower:
+        return "Идёт звонить в обеденный гонг"
+    if "поднос" in act_lower or "серебр" in act_lower:
+        return "Идёт подавать напитки на серебряном подносе"
+    if is_butler and ("коктейль" in act_lower or "бар" in act_lower or "напиток" in act_lower or "налива" in act_lower):
+        return "Идёт к барной стойке готовить напитки для семьи"
+    if is_butler and ("уборк" in act_lower or "прибира" in act_lower or "чист" in act_lower):
+        return "Идёт наводить порядок в комнатах особняка" 
+
+    # Erratic sim transitioning to imaginary conversation or self-talk
+    if any(k in act_lower for k in ["воображаем", "общение с друзьями"]):
+        return "Идёт общаться с воображаемыми друзьями (галлюцинации безумца / разговор с пустотой)"
+    if "сам с собой" in act_lower or "спорит сам с собой" in act_lower:
+        return "Идёт спорить или разговаривать сам с собой (приступ безумия)"
 
     # Specific replacements
     if "грязев" in act_lower:
@@ -13572,7 +18554,7 @@ def get_social_dialog_info(sim_info):
                         all_social_interactions.append(aff_cls.__name__.lower())
                     if hasattr(aff, "display_name") and LocalizationHelperTuning is not None:
                         try:
-                            d = LocalizationHelperTuning.get_raw_text(aff.display_name)
+                            d = _loc_text(aff.display_name)
                             if d and is_human_readable_text(str(d)):
                                 curr_list.append(str(d).lower())
                                 all_social_interactions.append(str(d).lower())
@@ -13590,7 +18572,7 @@ def get_social_dialog_info(sim_info):
                         all_social_interactions.append(si_aff_name)
                 if hasattr(inter, "display_name") and LocalizationHelperTuning is not None:
                     try:
-                        d = LocalizationHelperTuning.get_raw_text(inter.display_name)
+                        d = _loc_text(inter.display_name)
                         if d and is_human_readable_text(str(d)):
                             curr_list.append(str(d).lower())
                             all_social_interactions.append(str(d).lower())
@@ -13849,17 +18831,8 @@ def get_social_dialog_info(sim_info):
         else:
             social_action_verb = "Непринужденно общается и беседует с"
 
-        # DEBUG: Log collected tokens for diagnosis
-        if all_social_interactions:
-            try:
-                unique_tokens = list(set(all_social_interactions))[:30]
-                log("[DEBUG SOCIAL TOKENS] {} tokens collected for {}: {}".format(
-                    len(all_social_interactions),
-                    getattr(sim_info, "first_name", "?"),
-                    " | ".join(unique_tokens[:30])
-                ))
-            except Exception:
-                pass
+        # Tokens collected for diagnosis
+        pass
 
         if not found_specific:
             # 1. First priority: Check active mixers (specific gestures, jokes, high-fives, hugs, kiss micro-actions)
@@ -14005,16 +18978,27 @@ def get_social_dialog_info(sim_info):
         is_group = len(target_details) >= 2
         names_list = [t["name"] for t in target_details]
 
-        if found_specific:
+        if is_group:
+            if len(names_list) == 2:
+                names_formatted = f"{names_list[0]} и {names_list[1]}"
+            else:
+                first_part = ", ".join(names_list[:-1])
+                names_formatted = f"{first_part} и {names_list[-1]}"
+
+            if found_specific:
+                verb_clean = social_action_verb.rstrip()
+                if verb_clean.endswith(" с") or verb_clean.endswith(" со"):
+                    base_v = verb_clean.rsplit(" ", 1)[0]
+                    action_text = f"{base_v} в компании с {names_formatted}"
+                elif any(k in social_action_verb for k in ["от", "Выслушивает", "Слушает"]):
+                    action_text = f"{social_action_verb} {names_list[0]} в присутствии {names_formatted}"
+                else:
+                    action_text = f"{social_action_verb} в компании с {names_formatted}"
+            else:
+                action_text = f"Ведет групповой разговор с {names_formatted}"
+        else:
             primary_name = names_list[0] if names_list else "Сим"
             action_text = f"{social_action_verb} {primary_name}"
-        else:
-            if len(names_list) == 1:
-                action_text = f"{social_action_verb} {names_list[0]}"
-            elif len(names_list) == 2:
-                action_text = f"Ведет групповой разговор с {names_list[0]} и {names_list[1]}"
-            else:
-                action_text = f"Ведет групповой разговор с {', '.join(names_list[:-1])} и {names_list[-1]}"
 
         return {
             "is_group": is_group,
@@ -14649,7 +19633,15 @@ PLANT_NAMES_RU = {
 
 
 def extract_plant_name(tgt, inter) -> str:
-    """Extracts Russian localized name of the plant or fruit being gardened."""
+    """Extracts Russian localized name of the plant or fruit being gardened or eaten."""
+    # 0. Check definition or catalog name of the fruit / plant object
+    if tgt is not None:
+        try:
+            d_loc = _extract_object_localized_name(tgt)
+            if d_loc and not _is_bad_dish_name(d_loc):
+                return d_loc
+        except Exception:
+            pass
     # 1. Check custom user-given name if pure string (e.g. from renaming)
     if tgt is not None and hasattr(tgt, "_custom_name"):
         c_name = getattr(tgt, "_custom_name", None)
@@ -14749,7 +19741,7 @@ def get_interaction_identifier_tokens(inter) -> list:
             tokens.append(str(getattr(aff, "guid64", "")).lower())
             if hasattr(aff, "display_name") and LocalizationHelperTuning is not None:
                 try:
-                    raw_d = LocalizationHelperTuning.get_raw_text(aff.display_name)
+                    raw_d = _loc_text(aff.display_name)
                     if raw_d and is_human_readable_text(str(raw_d)):
                         tokens.append(str(raw_d).lower())
                 except Exception:
@@ -14769,7 +19761,7 @@ def get_interaction_identifier_tokens(inter) -> list:
             try:
                 name_loc = inter.get_name(target=getattr(inter, "target", None), context=getattr(inter, "context", None))
                 if name_loc is not None:
-                    raw_name = LocalizationHelperTuning.get_raw_text(name_loc)
+                    raw_name = _loc_text(name_loc)
                     if raw_name and is_human_readable_text(str(raw_name)):
                         tokens.append(str(raw_name).lower())
             except Exception:
@@ -14785,24 +19777,68 @@ def get_interaction_identifier_tokens(inter) -> list:
 
 def get_interaction_ui_name(inter) -> str:
     """Safely extracts the human-readable UI name of an interaction if available in game."""
-    if inter is None:
+    if inter is None or LocalizationHelperTuning is None:
         return ""
-    try:
-        if hasattr(inter, "get_name") and LocalizationHelperTuning is not None:
-            name_loc = inter.get_name(target=getattr(inter, "target", None), context=getattr(inter, "context", None))
-            if name_loc is not None:
-                raw_name = LocalizationHelperTuning.get_raw_text(name_loc)
-                if raw_name and is_human_readable_text(str(raw_name)):
-                    return str(raw_name).strip()
-    except Exception:
-        pass
+
+    def _clean_and_validate(raw_val) -> str:
+        if raw_val is None:
+            return ""
+        s = str(raw_val).strip()
+        if not s or not is_human_readable_text(s):
+            return ""
+        # Reject incomplete parameter templates or parameterless format strings like "Поболтать с: "
+        if s.endswith(":") or s.endswith("...") or s.endswith("с:") or s.endswith("with:"):
+            return ""
+        if any(bad in s.lower() for bad in ["hash:", "tokens", "first_name", "{", "}", "type:"]):
+            return ""
+        return s
+
+    tgt = getattr(inter, "target", None)
+    if hasattr(inter, "get_name") and callable(getattr(inter, "get_name")):
+        if tgt is not None:
+            try:
+                name_loc = inter.get_name(target=tgt)
+                valid = _clean_and_validate(_loc_text(name_loc))
+                if valid:
+                    return valid
+            except Exception:
+                pass
+
+    if hasattr(inter, "get_name") and callable(getattr(inter, "get_name")):
+        try:
+            ctx = getattr(inter, "context", None)
+            if ctx is not None:
+                name_loc = inter.get_name(target=tgt, context=ctx)
+                valid = _clean_and_validate(_loc_text(name_loc))
+                if valid:
+                    return valid
+        except Exception:
+            pass
+
+    if hasattr(inter, "get_name") and callable(getattr(inter, "get_name")):
+        try:
+            name_loc = inter.get_name()
+            valid = _clean_and_validate(_loc_text(name_loc))
+            if valid:
+                return valid
+        except Exception:
+            pass
+
+    if hasattr(inter, "display_name"):
+        try:
+            dn = getattr(inter, "display_name")
+            valid = _clean_and_validate(_loc_text(dn))
+            if valid:
+                return valid
+        except Exception:
+            pass
 
     try:
         aff = getattr(inter, "affordance", None)
-        if aff is not None and hasattr(aff, "display_name") and LocalizationHelperTuning is not None:
-            raw_d = LocalizationHelperTuning.get_raw_text(aff.display_name)
-            if raw_d and is_human_readable_text(str(raw_d)):
-                return str(raw_d).strip()
+        if aff is not None and hasattr(aff, "display_name"):
+            valid = _clean_and_validate(_loc_text(aff.display_name))
+            if valid:
+                return valid
     except Exception:
         pass
 
@@ -15129,7 +20165,12 @@ def get_basemental_substance_activity(sim_info, sim_instance, interactions_list,
             return "Принимает таблетку МДМА (экстази)"
 
         # 9. LEAN / CODEINE (Лин / Кодеин)
-        if any(k in combined_clean for k in ["lean", "кодеин", "codeine", "bmdlean", "сиропскодеином"]):
+        is_drinking = any(k in combined_clean for k in ["drink", "sip", "chug", "consume", "пить", "пьет", "выпить", "глоток"])
+        is_clean_action = any(k in combined_clean for k in ["clean", "уборка", "чистить", "почистить", "мыть", "помыть", "wash", "scrub", "wipe", "mop", "sweep", "tidy"])
+        if not is_clean_action and (
+            any(k in combined_clean for k in ["bmdlean", "codeine", "кодеин", "bmd_lean"])
+            or (("lean" in combined_clean or "лин" in combined_clean) and is_drinking)
+        ):
             return "Пьет кодеиновый сироп (лин)"
 
         # 10. PSYCHEDELICS (Психоделики)
@@ -15228,12 +20269,21 @@ def get_current_activity(sim_info) -> str:
 
         if social_info:
             social_act = social_info.get("action", "")
-            # MULTITASKING: If the Sim has an active physical activity (homework, cooking, TV, eating, blocks, etc.)
-            if physical_act and physical_act not in generic_idles and not physical_act.startswith("С любопытством наблюдает"):
+            # MULTITASKING: Only if physical_act is a genuine non-social activity (cooking, eating, TV, painting, homework, etc.)
+            is_real_physical = (
+                physical_act
+                and physical_act not in generic_idles
+                and not physical_act.startswith("С любопытством наблюдает")
+                and not any(sk in physical_act.lower() for sk in ["поболтать", "общается с", "ведет бесед", "болтает с", "разговаривает с"])
+            )
+            if is_real_physical:
                 targets = social_info.get("targets", [])
-                target_name = targets[0]["name"] if targets else ""
-                if target_name:
-                    return f"{physical_act} и параллельно общается с {target_name}"
+                is_grp = social_info.get("is_group", False)
+                if is_grp and len(targets) >= 2:
+                    t_names = [t["name"] for t in targets]
+                    return f"{physical_act} и параллельно общается в компании с {', '.join(t_names[:-1])} и {t_names[-1]}"
+                elif targets:
+                    return f"{physical_act} и параллельно общается с {targets[0]['name']}"
                 else:
                     return f"{physical_act} и параллельно ведет беседу"
             return social_act
@@ -15276,7 +20326,7 @@ def get_current_activity(sim_info) -> str:
 
             target_act = _get_physical_activity(sim_info, sim_instance, [trans_inter], trans_context_text)
             if target_act and target_act not in generic_idles:
-                return format_transitioning_activity(target_act)
+                return format_transitioning_activity(target_act, sim_info=sim_info)
             elif getattr(sim_instance, "is_moving", False):
                 return "Идёт по своим делам / перемещается"
 
@@ -15288,6 +20338,792 @@ def get_current_activity(sim_info) -> str:
         log_exception("Error determining current activity", e)
 
     return get_infant_idle_activity(sim_info, sim_instance)
+
+
+HELD_OBJECT_RU_TRANSLATIONS = {
+    # Drinks & Consumables
+    "water": "стакан воды",
+    "drink": "напиток",
+    "coffee": "чашка кофе",
+    "tea": "чашка чая",
+    "milk": "стакан молока",
+    "juice": "стакан сока",
+    "beer": "бутылка пива",
+    "wine": "бокал вина",
+    "cocktail": "коктейль",
+    "kava": "пиала кавы",
+    "soda": "банка газировки",
+    "potion": "зелье",
+    "serum": "сыворотка",
+    "plasma": "пакет с плазмой",
+    "mug": "кружка",
+    "cup": "чашка",
+    "glass": "стакан",
+    "bottle": "бутылка",
+    "flask": "фляга",
+    "can": "банка",
+
+    # Food & Dishes
+    "hamcheese": "бутерброд с ветчиной и сыром",
+    "ham_cheese": "бутерброд с ветчиной и сыром",
+    "grilledcheese": "жареный сыр",
+    "grilled_cheese": "жареный сыр",
+    "cheese": "сыр",
+    "ham": "ветчина",
+    "sandwich": "бутерброд",
+    "hotdog": "хот-дог",
+    "hamburger": "гамбургер",
+    "burger": "бургер",
+    "toast": "тост",
+    "cereal": "хлопья",
+    "soup": "суп",
+    "spaghetti": "спагетти",
+    "macncheese": "макароны с сыром",
+    "macaroni": "макароны",
+    "pancake": "блины",
+    "waffle": "вафли",
+    "pie": "пирог",
+    "cookie": "печенье",
+    "chips": "чипсы",
+    "popcorn": "попкорн",
+    "sushi": "суши",
+    "ramen": "рамен",
+    "curry": "карри",
+    "taco": "тако",
+    "steak": "стейк",
+    "egg": "яичница",
+    "omelet": "омлет",
+    "plate": "тарелка с едой",
+    "dish": "блюдо",
+    "bowl": "миска",
+    "serving": "порция еды",
+    "snack": "закуска",
+    "sandwich": "бутерброд",
+    "burger": "бургер",
+    "pizza": "кусок пиццы",
+    "salad": "салат",
+    "cake": "кусок торта",
+    "dessert": "десерт",
+    "apple": "яблоко",
+    "fruit": "фрукт",
+    "fork": "вилка",
+    "spoon": "ложка",
+    "knife": "нож",
+    "chopsticks": "палочки для еды",
+
+    # Items, Tools, Tech & Leisure
+    "book": "книга",
+    "guitar": "гитара",
+    "violin": "скрипка",
+    "microphone": "микрофон",
+    "mic": "микрофон",
+    "phone": "телефон",
+    "cellphone": "смартфон",
+    "tablet": "планшет",
+    "camera": "камера",
+    "brush": "кисть",
+    "canvas": "холст",
+    "paint": "краски",
+    "hammer": "молоток",
+    "wrench": "гаечный ключ",
+    "screwdriver": "отвёртка",
+    "mop": "швабра",
+    "sponge": "губка",
+    "trash bag": "пакет с мусором",
+    "trash": "мусор",
+    "laundry": "белье",
+    "umbrella": "зонт",
+    "flower": "цветок",
+    "rose": "роза",
+    "pen": "ручка",
+    "pencil": "карандаш",
+    "notebook": "блокнот",
+    "journal": "дневник",
+    "homework": "домашнее задание",
+    "doll": "кукла",
+    "toy": "игрушка",
+    "baby": "младенец",
+    "infant": "младенец",
+    "toddler": "малыш",
+}
+
+
+def get_sim_held_object_name(sim_info, is_en: bool = False):
+    """
+    Returns the localized name of the object currently carried/held in hands by the Sim (e.g. coffee mug, plate, drink, guitar, book).
+    Fully automatic: queries native game String Tables (STBL) via catalog_name, recipe_name, and build_buy.
+    Filters out empty consumables or technical dummy objects.
+    """
+    try:
+        if sim_info is None:
+            return None
+        sim_instance = sim_info.get_sim_instance() if hasattr(sim_info, "get_sim_instance") else None
+        if sim_instance is None:
+            return None
+
+        try:
+            from carry.carry_utils import get_carried_objects_gen
+        except Exception:
+            return None
+
+        for hand, posture, obj in get_carried_objects_gen(sim_instance):
+            if obj is None:
+                continue
+
+            # 1. Skip empty consumables
+            if hasattr(obj, "consumable_component") and obj.consumable_component is not None:
+                try:
+                    if getattr(obj.consumable_component, "is_empty", False):
+                        continue
+                except Exception:
+                    pass
+
+            # 2. Get object name
+            obj_name = None
+
+            # Check custom name (e.g., player crafted item, painting, custom food)
+            if hasattr(obj, "custom_name") and obj.custom_name:
+                obj_name = str(obj.custom_name).strip()
+
+            # Check crafting process or recipe display name (for poured drinks, cooked food)
+            if not obj_name:
+                try:
+                    if hasattr(obj, "get_crafting_process"):
+                        cp = obj.get_crafting_process()
+                        if cp:
+                            recipe = getattr(cp, "recipe", None)
+                            if recipe:
+                                for method in ("get_recipe_name", "get_display_name", "name"):
+                                    if hasattr(recipe, method):
+                                        fn = getattr(recipe, method)
+                                        loc_res = None
+                                        try:
+                                            loc_res = fn(getattr(cp, "crafter", None))
+                                        except Exception:
+                                            try:
+                                                loc_res = fn(obj)
+                                            except Exception:
+                                                try:
+                                                    loc_res = fn()
+                                                except Exception:
+                                                    pass
+                                        if loc_res and LocalizationHelperTuning is not None:
+                                            txt = _loc_text(loc_res)
+                                            if txt and not txt.startswith("0x") and not txt.isdigit():
+                                                obj_name = txt.strip()
+                                                break
+                except Exception:
+                    pass
+
+            # Check object catalog name (Direct from TS4 String Tables for any catalog game object)
+            if not obj_name and hasattr(obj, "catalog_name"):
+                try:
+                    cat_name = getattr(obj, "catalog_name", None)
+                    if cat_name and LocalizationHelperTuning is not None:
+                        txt = _loc_text(cat_name)
+                        if txt and not txt.startswith("0x") and not txt.isdigit():
+                            obj_name = txt.strip()
+                except Exception:
+                    pass
+
+            # Check definition catalog name via build_buy engine
+            if not obj_name and hasattr(obj, "definition") and obj.definition is not None:
+                try:
+                    import build_buy
+                    if hasattr(build_buy, "get_object_catalog_name"):
+                        loc_cat = build_buy.get_object_catalog_name(obj.definition.id)
+                        if loc_cat and LocalizationHelperTuning is not None:
+                            txt = _loc_text(loc_cat)
+                            if txt and not txt.startswith("0x") and not txt.isdigit():
+                                obj_name = txt.strip()
+                except Exception:
+                    pass
+
+            # Check display name or hover tip methods
+            if not obj_name:
+                for method_name in ("get_display_name", "display_name", "get_hover_tip"):
+                    if hasattr(obj, method_name):
+                        m = getattr(obj, method_name)
+                        try:
+                            loc_name = m() if callable(m) else m
+                            if loc_name:
+                                if LocalizationHelperTuning is not None:
+                                    raw_text = _loc_text(loc_name)
+                                    if raw_text and not raw_text.startswith("0x") and not raw_text.isdigit():
+                                        obj_name = raw_text.strip()
+                                        break
+                                elif isinstance(loc_name, str):
+                                    obj_name = loc_name.strip()
+                                    break
+                        except Exception:
+                            pass
+
+            # Check definition catalog methods
+            if not obj_name and hasattr(obj, "definition") and obj.definition is not None:
+                defn = obj.definition
+                for method_name in ("get_name", "name"):
+                    if hasattr(defn, method_name):
+                        m = getattr(defn, method_name)
+                        try:
+                            loc_name = m() if callable(m) else m
+                            if loc_name:
+                                if LocalizationHelperTuning is not None:
+                                    raw_text = _loc_text(loc_name)
+                                    if raw_text and not raw_text.startswith("0x") and not raw_text.isdigit():
+                                        obj_name = raw_text.strip()
+                                        break
+                                elif isinstance(loc_name, str):
+                                    obj_name = loc_name.strip()
+                                    break
+                        except Exception:
+                            pass
+
+                # Fallback to definition tuning name
+                if not obj_name:
+                    def_name = getattr(defn, "name", None) or type(obj).__name__
+                    if def_name:
+                        clean_name = str(def_name)
+                        for prefix in ("object_", "drink_", "food_", "prop_", "tool_"):
+                            if clean_name.lower().startswith(prefix):
+                                clean_name = clean_name[len(prefix):]
+                        clean_name = clean_name.replace("_", " ").strip()
+                        if clean_name and not clean_name.isdigit() and not clean_name.startswith("0x"):
+                            obj_name = clean_name
+
+            if obj_name:
+                obj_name_lower = obj_name.lower()
+                if any(k in obj_name_lower for k in ("none", "null", "empty", "invisible", "dummy")):
+                    continue
+
+                # If Russian mode and name is in English / tuning name fallback, translate to Russian
+                if not is_en:
+                    if not any('\u0400' <= ch <= '\u04ff' for ch in obj_name):
+                        nl = obj_name_lower
+                        if nl in HELD_OBJECT_RU_TRANSLATIONS:
+                            obj_name = HELD_OBJECT_RU_TRANSLATIONS[nl]
+                        else:
+                            for k in sorted(HELD_OBJECT_RU_TRANSLATIONS.keys(), key=len, reverse=True):
+                                if k in nl:
+                                    obj_name = HELD_OBJECT_RU_TRANSLATIONS[k]
+                                    break
+
+                return obj_name[:60]
+    except Exception as e:
+        log_exception("Error in get_sim_held_object_name", e)
+    return None
+
+
+def _clean_dish_verb(ui_name: str) -> str:
+    """Strips leading action verbs in Russian and English (cooking, baking, eating, drinking, serving)."""
+    if not ui_name:
+        return ""
+    cand = ui_name.strip()
+    if ":" in cand:
+        cand = cand.split(":", 1)[1].strip()
+    elif "(" in cand and ")" in cand:
+        start = cand.find("(") + 1
+        end = cand.rfind(")")
+        if 0 <= start < end:
+            cand = cand[start:end].strip()
+
+    cand = re.sub(
+        r"^(?:подать|приготовить|сделать|готовить|испечь|сварить|пожарить|запечь|нарезать|замесить|раскатать|создать|смешать|сервировать|взять\s+порцию|взять|разогреть|есть|съесть|поесть|перекусить|выпить|пить|лакомиться|отведать|serve|cook|make|bake|prepare|craft|mix|grab\s+a\s+serving|grab\s+food|grab|heat|eat|drink|sip|consume|have\s+a\s+serving\s+of|have)\s+(?:a\s+|an\s+|the\s+)?",
+        "",
+        cand,
+        flags=re.IGNORECASE
+    ).strip()
+    cand = cand.strip('\"\'«»')
+    return cand
+
+
+def _is_bad_dish_name(name: str) -> bool:
+    """Checks if a string is invalid, empty, or just an appliance/furniture/action word."""
+    if not name or len(name) < 2:
+        return True
+    low = name.lower().strip()
+    bad_action_words = [
+        "чинить", "починить", "отремонтировать", "почистить", "чистить", "убрать", "уборка",
+        "мыть", "помыть", "вымыть", "вытереть", "улучшить", "прочистить", "наладка",
+        "repair", "fix", "clean", "clean_up", "clean up", "upgrade", "sabotage", "tinker",
+        "debug", "prototype", "temp", "placeholder", "inspect", "view", "watch"
+    ]
+    if any(b in low for b in bad_action_words):
+        return True
+    bad_exact = {
+        "верстак", "стол", "плита", "печь", "духовка", "стойка", "мольберт", "доска",
+        "миксер", "вафельница", "бар", "холодильник", "тумба", "столешница", "раковина",
+        "гриль", "кухня", "еда", "блюдо",
+        "table", "bench", "station", "stove", "oven", "easel", "counter", "bar", "mixer",
+        "fridge", "refrigerator", "sink", "grill", "food", "dish",
+        "тарелка", "миска", "чашка", "кружка", "стакан", "бокал", "plate", "bowl", "cup", "mug", "glass",
+        "приготовить", "сделать", "создать", "мастерить", "испечь", "смешать", "подать",
+        "cook", "make", "craft", "bake", "mix", "serve", "prepare",
+    }
+    if low in bad_exact:
+        return True
+    if any(b in low for b in ["debug", "prototype", "temp", "placeholder"]):
+        return True
+    return False
+
+
+def _extract_object_localized_name(obj) -> str:
+    """Extracts localized name from definition or custom name of an in-game object."""
+    if obj is None or LocalizationHelperTuning is None:
+        return ""
+    try:
+        if hasattr(obj, "get_custom_name"):
+            cn = obj.get_custom_name()
+            if cn and is_human_readable_text(str(cn)):
+                return str(cn).strip()
+        defn = getattr(obj, "definition", None) or getattr(obj, "default_definition", None)
+        if defn is not None and hasattr(defn, "name"):
+            raw = _loc_text(defn.name)
+            if raw and is_human_readable_text(str(raw)):
+                return str(raw).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def extract_recipe_display_name(recipe) -> str:
+    """Safely extracts the human-readable localized name of ANY recipe (vanilla or CC)."""
+    if recipe is None:
+        return ""
+    # 0. get_recipe_name() / name (STBL hash resolved through the Russian table)
+    for getter in ("get_recipe_name", "get_display_name"):
+        fn = getattr(recipe, getter, None)
+        if callable(fn):
+            try:
+                t0 = _loc_text(fn())
+                if t0 and is_human_readable_text(t0):
+                    return t0.strip()
+            except Exception:
+                pass
+    try:
+        t0 = _loc_text(getattr(recipe, "name", None))
+        if t0 and is_human_readable_text(t0):
+            return t0.strip()
+    except Exception:
+        pass
+    # Custom content / unknown hash: humanize the tuning name
+    try:
+        hn = _humanize_tuning_name(getattr(recipe, "__name__", "") or "")
+        if hn and len(hn) >= 3:
+            return hn
+    except Exception:
+        pass
+    if LocalizationHelperTuning is None:
+        return ""
+    # 1. get_display_name()
+    if hasattr(recipe, "get_display_name") and callable(getattr(recipe, "get_display_name")):
+        try:
+            loc = recipe.get_display_name()
+            if loc is not None:
+                raw = _loc_text(loc)
+                if raw and is_human_readable_text(str(raw)):
+                    return str(raw).strip()
+        except Exception:
+            pass
+
+    # 2. _display_name
+    if hasattr(recipe, "_display_name"):
+        try:
+            loc = getattr(recipe, "_display_name")
+            if loc is not None:
+                raw = _loc_text(loc)
+                if raw and is_human_readable_text(str(raw)):
+                    return str(raw).strip()
+        except Exception:
+            pass
+
+    # 3. display_name
+    if hasattr(recipe, "display_name"):
+        try:
+            loc = getattr(recipe, "display_name")
+            if loc is not None:
+                raw = _loc_text(loc)
+                if raw and is_human_readable_text(str(raw)):
+                    return str(raw).strip()
+        except Exception:
+            pass
+
+    # 4. recipe_name / name
+    for attr in ["name", "recipe_name"]:
+        if hasattr(recipe, attr):
+            try:
+                loc = getattr(recipe, attr)
+                if loc is not None:
+                    raw = _loc_text(loc)
+                    if raw and is_human_readable_text(str(raw)):
+                        return str(raw).strip()
+            except Exception:
+                pass
+
+    return ""
+
+
+def get_sim_active_recipe_or_dish_name(sim_info, sim_instance, interactions_list) -> str:
+    """
+    Universally extracts the active food/drink/craft recipe name for the Sim.
+    Works for 100% of dishes in The Sims 4 (vanilla AND Custom Content / CC).
+    """
+    candidates_to_check = []
+
+    # 1. Sim instance itself
+    if sim_instance is not None:
+        candidates_to_check.append(sim_instance)
+
+    # 2. Running interactions and their targets
+    if interactions_list:
+        for inter in interactions_list:
+            if inter is not None and inter not in candidates_to_check:
+                candidates_to_check.append(inter)
+                tgt = getattr(inter, "target", None)
+                if tgt is not None and tgt not in candidates_to_check:
+                    candidates_to_check.append(tgt)
+
+    # 3. Queue interactions (visible interactions from the UI icon / pie menu)
+    if sim_instance is not None and hasattr(sim_instance, "queue") and sim_instance.queue is not None:
+        try:
+            if hasattr(sim_instance.queue, "visible_interactions_gen"):
+                for q_i in sim_instance.queue.visible_interactions_gen():
+                    if q_i is not None and q_i not in candidates_to_check:
+                        candidates_to_check.append(q_i)
+                        q_tgt = getattr(q_i, "target", None)
+                        if q_tgt is not None and q_tgt not in candidates_to_check:
+                            candidates_to_check.append(q_tgt)
+        except Exception:
+            pass
+        try:
+            q_run = getattr(sim_instance.queue, "_running", None) or getattr(sim_instance.queue, "running", None)
+            if q_run is not None and q_run not in candidates_to_check:
+                candidates_to_check.append(q_run)
+        except Exception:
+            pass
+        try:
+            if hasattr(sim_instance.queue, "peek_head"):
+                q_head = sim_instance.queue.peek_head()
+                if q_head is not None and q_head not in candidates_to_check:
+                    candidates_to_check.append(q_head)
+        except Exception:
+            pass
+
+    # PASS 1: Check recipe display name from any CraftingProcess or recipe attribute
+    for obj in candidates_to_check:
+        proc = None
+        if hasattr(obj, "get_crafting_process") and callable(getattr(obj, "get_crafting_process")):
+            try:
+                proc = obj.get_crafting_process()
+            except Exception:
+                pass
+        if proc is None and hasattr(obj, "crafting_process"):
+            proc = getattr(obj, "crafting_process", None)
+        if proc is None and hasattr(obj, "process"):
+            proc = getattr(obj, "process", None)
+
+        if proc is not None:
+            # Check proc.recipe
+            rec = getattr(proc, "recipe", None)
+            if rec is not None:
+                d = extract_recipe_display_name(rec)
+                if d and not _is_bad_dish_name(d):
+                    return d
+
+            # Check proc.current_ico / crafted_value
+            for attr in ["current_ico", "crafting_process_target", "crafted_value"]:
+                if hasattr(proc, attr):
+                    item = getattr(proc, attr, None)
+                    if item is not None:
+                        d = _extract_object_localized_name(item)
+                        if d and not _is_bad_dish_name(d):
+                            return d
+
+        # Direct recipe on object / interaction
+        for r_attr in ["recipe", "_recipe"]:
+            if hasattr(obj, r_attr):
+                rec = getattr(obj, r_attr, None)
+                if rec is not None:
+                    d = extract_recipe_display_name(rec)
+                    if d and not _is_bad_dish_name(d):
+                        return d
+
+        # Phase recipe on interaction
+        if hasattr(obj, "phase") and getattr(obj, "phase", None) is not None:
+            phase = getattr(obj, "phase")
+            if hasattr(phase, "recipe"):
+                d = extract_recipe_display_name(getattr(phase, "recipe", None))
+                if d and not _is_bad_dish_name(d):
+                    return d
+
+    # PASS 2: Check interaction UI name from visible interaction or running interaction
+    for obj in candidates_to_check:
+        ui_raw = get_interaction_ui_name(obj)
+        if ui_raw and is_human_readable_text(ui_raw):
+            cand = _clean_dish_verb(ui_raw)
+            if cand and not _is_bad_dish_name(cand):
+                return cand.capitalize()
+
+    # PASS 3: Check target object's definition / custom name (if target is the food bowl, plate, cutting board item)
+    for obj in candidates_to_check:
+        if obj is not None and not getattr(obj, "is_sim", False) and not hasattr(obj, "sim_info") and not hasattr(obj, "affordance"):
+            d = _extract_object_localized_name(obj)
+            if d and not _is_bad_dish_name(d):
+                return d
+            # PASS 4: CC Tuning Definition name fallback for custom food / drink objects
+            try:
+                defn = getattr(obj, "definition", None)
+                if defn is not None:
+                    dname = getattr(defn, "__name__", "") or getattr(defn, "name", "")
+                    if any(k in str(dname).lower() for k in ["food", "recipe", "drink", "dish", "meal", "serving"]):
+                        hn = _humanize_tuning_name(dname)
+                        if hn and not _is_bad_dish_name(hn) and len(hn) >= 3:
+                            return hn
+            except Exception:
+                pass
+
+    return ""
+
+
+_LAST_COOK_DEBUG = [0.0]
+
+
+def _dump_cooking_debug(sim_instance, interactions_list, cook_inter, cook_tgt):
+    """Writes a diagnostic snapshot to ai_mind_reader.log when a dish name could not be resolved."""
+    try:
+        import time as _time
+        now = _time.time()
+        if now - _LAST_COOK_DEBUG[0] < 20:
+            return
+        _LAST_COOK_DEBUG[0] = now
+        lines = ["[COOK-DEBUG] dish name not resolved"]
+
+        def _desc(o):
+            if o is None:
+                return "None"
+            parts = [type(o).__name__, str(getattr(o, "__name__", ""))]
+            for a in ("recipe", "process", "phase", "display_name"):
+                try:
+                    v = getattr(o, a, None)
+                    parts.append("%s=%s" % (a, (getattr(v, "__name__", None) or type(v).__name__) if v is not None else None))
+                except Exception as ex_a:
+                    parts.append("%s=ERR(%s)" % (a, ex_a))
+            try:
+                parts.append("ui=%r" % get_interaction_ui_name(o))
+            except Exception:
+                pass
+            return " | ".join(parts)
+
+        for i in (interactions_list or []):
+            lines.append("  RUN: " + _desc(i) + " -> tgt: " + _desc(getattr(i, "target", None)))
+        try:
+            q = getattr(sim_instance, "queue", None)
+            if q is not None and hasattr(q, "visible_interactions_gen"):
+                for qi in q.visible_interactions_gen():
+                    lines.append("  QUEUE: " + _desc(qi))
+        except Exception as ex_q:
+            lines.append("  QUEUE ERR %s" % ex_q)
+        log("\n".join(lines))
+    except Exception:
+        pass
+
+
+def get_cooking_action_details(sim_info, sim_instance, interactions_list, full_context_text: str) -> str:
+    """
+    Universally extracts cooking, baking, grilling, canning, and food prep details
+    for ANY dish in The Sims 4 (vanilla AND Custom Content / CC).
+    """
+    age_raw_val = getattr(getattr(sim_info, "age", None), "name", "ADULT")
+    if age_raw_val in ("TODDLER", "INFANT", "BABY"):
+        return ""
+
+    is_cooking = False
+    cook_inter = None
+    cook_tgt = None
+
+    # Check running interactions
+    for inter in (interactions_list or []):
+        n = getattr(inter, "__name__", str(inter)).lower()
+        ui = (get_interaction_ui_name(inter) or "").lower()
+        check_str = f"{n} {ui}"
+        # Hard exclusion: repairing, cleaning, upgrading, sabotaging are NEVER cooking
+        if any(k in check_str for k in [
+            "repair", "fix", "clean", "upgrade", "sabotage", "tinker", "salvage",
+            "чинить", "ремонт", "почистить", "уборка", "мыть", "помыть", "улучшить",
+            "take_out", "empty_trash", "wipe", "scrub", "mop", "sweep"
+        ]):
+            continue
+
+        tgt = getattr(inter, "target", None)
+        t = getattr(tgt, "__name__", str(tgt)).lower() if tgt else ""
+
+        is_cook_inter = any(k in n for k in [
+            "cook", "bake", "grill", "fry", "boil", "roast", "canning", "makepizza",
+            "makewaffle", "food_prep", "prepfood", "crafting_interaction", "recipe",
+            "mixingbowl", "cuttingboard"
+        ])
+        is_cook_on_equip = any(k in t for k in ["stove", "oven", "grill", "cuttingboard", "mixingbowl", "counter", "pizzastation", "wafflemaker"]) and any(k in n for k in ["cook", "bake", "craft", "recipe", "prep", "food", "dish", "meal", "serve"])
+
+        if is_cook_inter or is_cook_on_equip:
+            is_cooking = True
+            if cook_inter is None:
+                cook_inter = inter
+                cook_tgt = tgt
+
+    # Also check queue visible interactions if not found in running
+    if not is_cooking and sim_instance is not None and hasattr(sim_instance, "queue") and sim_instance.queue is not None:
+        try:
+            if hasattr(sim_instance.queue, "visible_interactions_gen"):
+                for q_i in sim_instance.queue.visible_interactions_gen():
+                    qn = getattr(q_i, "__name__", str(q_i)).lower()
+                    qui = (get_interaction_ui_name(q_i) or "").lower()
+                    qcheck = f"{qn} {qui}"
+                    if any(k in qcheck for k in [
+                        "repair", "fix", "clean", "upgrade", "sabotage", "tinker", "salvage",
+                        "чинить", "ремонт", "почистить", "уборка", "мыть", "помыть", "улучшить",
+                        "take_out", "empty_trash", "wipe", "scrub", "mop", "sweep"
+                    ]):
+                        continue
+                    qtgt = getattr(q_i, "target", None)
+                    qt = getattr(qtgt, "__name__", str(qtgt)).lower() if qtgt else ""
+                    is_q_cook = any(k in qn for k in ["cook", "bake", "grill", "food_prep", "prepfood", "crafting", "recipe", "mixingbowl", "cuttingboard"])
+                    is_q_equip = any(k in qt for k in ["stove", "oven", "grill", "counter"]) and any(k in qn for k in ["cook", "bake", "craft", "recipe", "prep", "food", "dish", "meal", "serve"])
+                    if is_q_cook or is_q_equip:
+                        is_cooking = True
+                        if cook_inter is None:
+                            cook_inter = q_i
+                            cook_tgt = qtgt
+                        break
+        except Exception:
+            pass
+
+    if not is_cooking:
+        return ""
+
+    # 1. UNIVERSAL RECIPE / DISH EXTRACTOR (works for ALL vanilla and CC recipes)
+    dish_name = get_sim_active_recipe_or_dish_name(sim_info, sim_instance, interactions_list)
+
+    # 2. Categorize action prefix
+    comb = f"{getattr(cook_inter, '__name__', '')} {getattr(cook_tgt, '__name__', '')} {full_context_text}".lower().replace("_", "")
+
+    if dish_name:
+        d_low = dish_name.lower()
+
+        # Canning & Preserving (заготовки, варенье, джем, соленья)
+        if any(k in comb for k in ["canning", "jam", "pickle", "preserve", "консерв"]) or any(k in d_low for k in ["варень", "джем", "консерв", "заготовк", "солень"]):
+            return f"Делает заготовки (консервирует): {dish_name}"
+
+        # Baking (выпечка, торты, пироги, печенье, хлеб, капкейки, брауни, круассаны)
+        if any(k in comb for k in ["bake", "cupcake", "pastry", "печен", "печк", "выпечк"]) or any(k in d_low for k in ["торт", "пирог", "печень", "печенье", "хлеб", "кекс", "капкейк", "булочк", "маффин", "багет", "брауни", "круассан", "ватрушк", "смеси"]):
+            return f"Выпекает: {dish_name}"
+
+        # Grill & Barbecue (гриль, барбекю)
+        if any(k in comb for k in ["grill", "bbq", "barbeque", "гриль"]) or any(k in d_low for k in ["гриль", "шашлык", "стейк", "бургер"]):
+            return f"Жарит на гриле: {dish_name}"
+
+        # Pizza (Пицца)
+        if "pizza" in comb or "пицц" in d_low:
+            return f"Печет пиццу: {dish_name}"
+
+        # Waffles (Вафли)
+        if "waffle" in comb or "вафл" in d_low:
+            return f"Выпекает вафли: {dish_name}"
+
+        # Stand Mixer / Подготовка ингредиентов
+        if any(k in comb for k in ["standmixer", "preppedingredients", "prepfood"]):
+            return f"Подготавливает ингредиенты: {dish_name}"
+
+        # Universal Cooking for ANY meal
+        return f"Готовит блюдо: {dish_name}"
+
+    _dump_cooking_debug(sim_instance, interactions_list, cook_inter, cook_tgt)
+
+    # 3. Fallback to COOKING_DISHES keyword mapping if everything else failed
+    clean_cook_text = full_context_text.replace("_", "").lower()
+    for c_key, c_val in COOKING_DISHES:
+        if c_key in clean_cook_text:
+            return c_val
+
+    # 4. Fallback
+    if any(k in comb for k in ["bake", "baking"]):
+        return "Занимается выпечкой на кухне"
+    if any(k in comb for k in ["grill", "bbq"]):
+        return "Готовит еду на гриле"
+    if any(k in comb for k in ["canning"]):
+        return "Делает заготовки и консервацию"
+    return "Готовит еду на кухне"
+def get_woodworking_action_details(inter, tgt, interactions_list) -> str:
+    """Extracts detailed woodworking craft activity on the carpentry table."""
+    crafted = extract_crafting_item_name(inter, tgt, interactions_list)
+    if not crafted:
+        obj_n = get_object_catalog_name(tgt, inter)
+        if obj_n and not any(w in obj_n.lower() for w in ["столяр", "станок", "верстак", "woodwork"]):
+            crafted = obj_n
+    if crafted:
+        c_low = crafted.lower()
+        if any(f in c_low for f in ["стул", "стол", "полка", "шкаф", "комод", "зеркало", "лавка", "табурет"]):
+            return f"Мастерит мебель на столярном станке: {crafted}"
+        if any(s in c_low for s in ["скульптур", "фигур", "статуэт", "лошад", "слон", "дракон"]):
+            return f"Вырезает деревянную скульптуру на столярном станке: {crafted}"
+        if any(m in c_low for m in ["скрипк", "гитар"]):
+            return f"Мастерит музыкальный инструмент: {crafted}"
+        return f"Мастерит деревянное изделие: {crafted}"
+    return "Мастерит изделие на столярном станке"
+
+
+def get_painting_action_details(inter, tgt, interactions_list, full_context_text: str) -> str:
+    """Extracts detailed painting genre, style, and media (easel, digital sketchpad, street mural)."""
+    n = getattr(inter, "__name__", str(inter)).lower().replace("_", "")
+    t = getattr(tgt, "__name__", str(tgt)).lower().replace("_", "") if tgt else ""
+    combined = f"{n} {t} {full_context_text}".lower().replace("_", "")
+
+    # 1. Digital Sketchpad / Цифровой планшет для рисования
+    if any(sp in combined for sp in ["sketchpad", "digitalsketchpad"]):
+        if any(g in combined for g in ["portrait", "портрет"]):
+            return "Рисует цифровой портрет на планшете"
+        if any(g in combined for g in ["landscape", "пейзаж"]):
+            return "Рисует цифровой пейзаж на планшете"
+        if any(g in combined for g in ["concept", "концепт"]):
+            return "Создает концепт-арт на цифровом планшете"
+        if any(g in combined for g in ["illustration", "иллюстрац"]):
+            return "Рисует цифровую иллюстрацию на планшете"
+        return "Рисует на цифровом графическом планшете"
+
+    # 2. Mural / Street Art / Graffiti (City Living)
+    if any(sa in combined for sa in ["mural", "graffiti", "streetart", "мурал", "граффити"]):
+        if any(g in combined for g in ["graffiti", "граффити"]):
+            return "Рисует уличное граффити из баллончика"
+        return "Расписывает настенный мурал (стрит-арт)"
+
+    # 3. Canvas painting on Easel - check specific genres
+    if any(g in combined for g in ["masterpiece", "шедевр"]):
+        return "Пишет великолепный шедевр на холсте"
+    if any(g in combined for g in ["popart", "попарт", "pop"]):
+        return "Пишет картину в стиле поп-арт на холсте"
+    if any(g in combined for g in ["abstract", "абстракц"]):
+        return "Пишет абстрактную картину на холсте"
+    if any(g in combined for g in ["surrealism", "сюрреализм"]):
+        return "Пишет сюрреалистическую картину на холсте"
+    if any(g in combined for g in ["impressionism", "импрессионизм"]):
+        return "Пишет картину в стиле импрессионизма на холсте"
+    if any(g in combined for g in ["realism", "реализм"]):
+        return "Пишет картину в стиле реализма на холсте"
+    if any(g in combined for g in ["classic", "классик"]):
+        return "Пишет классическую картину на холсте"
+    if any(g in combined for g in ["landscape", "пейзаж"]):
+        return "Пишет пейзаж на холсте"
+    if any(g in combined for g in ["portrait", "портрет"]):
+        return "Пишет портрет на холсте"
+    if any(g in combined for g in ["illustrative", "иллюстратив"]):
+        return "Пишет иллюстрацию на холсте"
+    if any(g in combined for g in ["figure", "натуры"]):
+        return "Пишет картину с натуры на холсте"
+
+    # 4. Try extract_crafting_item_name
+    crafted = extract_crafting_item_name(inter, tgt, interactions_list)
+    if crafted and not any(bad in crafted.lower() for bad in ["мольберт", "холст", "картин", "easel", "canvas"]):
+        return f"Пишет картину на мольберте: {crafted}"
+
+    return "Пишет картину на мольберте"
 
 
 def _get_physical_activity(sim_info, sim_instance, interactions_list, full_context_text: str):
@@ -15319,6 +21155,41 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
             return bmd_act
 
         # =========================================================================
+        # 0.0000. ДЕЙСТВИЯ ПЕРСОНАЖА С ЧЕРТОЙ БЕЗУМНЫЙ (Erratic / Insane Sim Actions)
+        # =========================================================================
+        is_erratic = is_sim_erratic_or_insane(sim_info)
+        for inter in interactions_list:
+            n = getattr(inter, "__name__", str(inter)).lower()
+            ui_name = get_interaction_ui_name(inter)
+            ui_low = ui_name.lower() if ui_name else ""
+            i_tokens = [tok.lower() for tok in get_interaction_identifier_tokens(inter)]
+            comb_erratic = f"{n} {' '.join(i_tokens)} {ui_low}".replace("_", "")
+
+            # 1. Talk to imaginary friends / "Общение с друзьями..."
+            if (
+                any(k in comb_erratic for k in ["erraticsocializewithfriends", "erraticsocial", "erratictalktofriends", "socializewithfriends", "imaginaryfriend"])
+                or "общение с друзьями" in ui_low
+                or (is_erratic and "друзьями" in ui_low and "общение" in ui_low)
+            ):
+                return "Общается с воображаемыми друзьями (галлюцинации безумца / разговаривает сам с собой)"
+
+            # 2. Talk to self / argue with self / tell story to self
+            if any(k in comb_erratic for k in ["erratictalktoself", "insanetalktoself", "talktoself", "разговаривать с собой", "говорит сам с собой"]):
+                return "Разговаривает сам с собой (приступ безумия / бормочет себе под нос)"
+
+            if any(k in comb_erratic for k in ["erraticargueself", "insaneargueself", "argueself", "спорить с собой", "спорит сам с собой"]):
+                return "Яростно спорит сам с собой (галлюцинации безумца / ругается с пустотой)"
+
+            if any(k in comb_erratic for k in ["erratictellstory", "insanetellstory", "tellstorytoself", "историю самому себе"]):
+                return "Рассказывает историю самому себе (бред безумца)"
+
+            if any(k in comb_erratic for k in ["erraticflirtmirror", "insaneflirtmirror", "флиртовать с зеркалом"]):
+                return "Флиртует сам с собой перед зеркалом (приступ безумия и самолюбования)"
+
+            if any(k in comb_erratic for k in ["erraticparanoid", "checkforbugs", "искать жучков"]):
+                return "В приступе паранойи осматривает одежду и ищет скрытых жучков"
+
+        # =========================================================================
         # 0.0. МЛАДЕНЦЫ, МАЛЫШИ, ДЕТИ И РОДИТЕЛЬСКИЙ УХОД (Infant, Toddler & Parenting)
         # =========================================================================
         actor_age = getattr(getattr(sim_info, "age", None), "name", "ADULT")
@@ -15331,10 +21202,14 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
             t = getattr(tgt, "__name__", str(tgt)).lower().replace("_", "") if tgt else ""
             combined = f"{n} {t} {full_context_text}"
 
-            # 0.0. Уборка беспорядка (Clean up mess / Mop floor / Убрать лужу или краску)
+            # 0.0. Уборка луж и беспорядка (Mop puddle / Clean up mess / Mop floor)
             if any(k in combined for k in ["cleanmess", "cleanupmess", "clean_mess", "mopmess", "sweeppuddle", "moppuddle", "clean_up", "cleanup", "mop"]):
-                if any(m in combined for m in ["mess", "flour", "art", "floor", "puddle", "spill", "пачка", "беспорядок", "мука", "краска", "луж"]):
-                    return "Вытирает шваброй и убирает устроенный беспорядок на полу"
+                if any(m in combined for m in ["puddle", "луж", "water"]):
+                    return "Вытирает шваброй лужу на полу"
+                if any(m in combined for m in ["mess", "flour", "art", "spill", "пачка", "беспорядок", "мука", "краска"]):
+                    return "Убирает беспорядок на полу"
+                if "mop" in combined:
+                    return "Моет пол шваброй"
                 return "Делает уборку / наводит чистоту"
 
             # 0.01. Домашнее задание (Homework - школьники и студенты)
@@ -16584,14 +22459,21 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
         # =========================================================================
         # 0.11zp. КАТАЛОГ «ВИНТАЖНЫЙ ГЛАМУР» (SP09: Vintage Glamour Stuff - Butler, Vanity Table, Globe Bar, Hollywood Glamour)
         # =========================================================================
+        is_sim_butler = False
+        try:
+            is_sim_butler = bool("дворецк" in get_sim_domestic_staff_role(sim_info, is_en=False).lower())
+        except Exception:
+            pass
+
         for inter in interactions_list:
             n = getattr(inter, "__name__", str(inter)).lower()
             tgt = getattr(inter, "target", None)
             t = getattr(tgt, "__name__", str(tgt)).lower() if tgt else ""
             combined_sp09 = f"{n} {t} {full_context_text}".lower().replace("_", "")
-            if any(k in combined_sp09 for k in [
+            if is_sim_butler or any(k in combined_sp09 for k in [
                 "butler", "vanitytable", "vanity", "globebar", "vintagelounge",
-                "applymakeup", "playwithmakeup", "touchupmakeup", "checkappearance",
+                "checkdust", "dustcheck", "inspectdust", "standattention", "waitfororders",
+                "ringgong", "dinnerbell", "servetray", "applymakeup", "playwithmakeup", "touchupmakeup", "checkappearance",
                 "pourglobe", "drinkglobe", "spinglobe", "hirebutler", "praisebutler",
                 "reprimandbutler", "orderdrinkfrombutler", "дворецкий", "туалетныйстолик",
                 "глобусбар", "винтажныйгламур", "голливуд", "наноситьмакияж", "краситьсязастоликом",
@@ -17212,6 +23094,10 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
             if "toiletusestanding" in combined or ("standing" in n and "toilet" in combined):
                 return "Справляет нужду стоя (писает в унитаз)"
             if "toiletuse" in combined or "usetoilet" in combined or "toilet" in n:
+                if any(k in combined for k in ["repair", "fix", "salvage", "чинит", "ремонт"]):
+                    return "Чинит унитаз (устраняет поломку или прочищает трубы)"
+                if any(k in combined for k in ["upgrade", "tinker", "handiness", "модерниз", "улучш"]):
+                    return "Модернизирует унитаз: улучшает механику смыва и надежность"
                 if "clean" in combined:
                     return "Моет и чистит унитаз"
                 if "unclog" in combined or "plunge" in combined:
@@ -17373,7 +23259,7 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 try:
                     from sims4.localization import LocalizationHelperTuning
                     if LocalizationHelperTuning is not None and hasattr(inter, "display_name"):
-                        d = LocalizationHelperTuning.get_raw_text(inter.display_name)
+                        d = _loc_text(inter.display_name)
                         if d and is_human_readable_text(str(d)):
                             d_str = str(d).strip()
                             if "смотреть" in d_str.lower():
@@ -17390,25 +23276,22 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 return "Смотрит телевизор"
 
         # =========================================================================
-        # 6. КУЛИНАРИЯ И ГОТОВКА (Cooking & Baking)
+        # 5.9. Приоритетные бытовые задачи: Ремонт и Уборка (Repair & Cleaning)
         # =========================================================================
-        age_raw_val = getattr(getattr(sim_info, "age", None), "name", "ADULT")
-        is_cooking = False
-        if age_raw_val not in ("TODDLER", "INFANT", "BABY"):
-            for inter in interactions_list:
-                n = getattr(inter, "__name__", str(inter)).lower()
-                tgt = getattr(inter, "target", None)
-                t = getattr(tgt, "__name__", str(tgt)).lower() if tgt else ""
-                if any(k in n for k in ["cook", "bake", "stove", "oven", "grill", "cuttingboard", "mixingbowl", "crafting_interaction"]) or any(k in t for k in ["stove", "oven", "grill", "cuttingboard", "mixingbowl"]):
-                    is_cooking = True
-                    break
+        dyn_repair_early = get_dynamic_repair_activity(sim_info, sim_instance, interactions_list, full_context_text)
+        if dyn_repair_early:
+            return dyn_repair_early
 
-            if is_cooking:
-                clean_cook_text = full_context_text.replace("_", "").lower()
-                for c_key, c_val in COOKING_DISHES:
-                    if c_key in clean_cook_text:
-                        return c_val
-                return "Готовит еду на кухне"
+        dyn_clean_early = get_dynamic_cleaning_activity(sim_info, sim_instance, interactions_list, full_context_text)
+        if dyn_clean_early:
+            return dyn_clean_early
+
+        # =========================================================================
+        # 6. КУЛИНАРИЯ И ВЫПЕЧКА (Cooking & Baking)
+        # =========================================================================
+        cook_act = get_cooking_action_details(sim_info, sim_instance, interactions_list, full_context_text)
+        if cook_act:
+            return cook_act
 
         # =========================================================================
         # 7. ЕДА И НАПИТКИ (Eating & Drinking)
@@ -17441,7 +23324,7 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                                     try:
                                         d = proc.recipe.get_display_name()
                                         if d:
-                                            recipe_disp = str(LocalizationHelperTuning.get_raw_text(d)).lower()
+                                            recipe_disp = str(_loc_text(d)).lower()
                                     except Exception:
                                         pass
                     except Exception:
@@ -17451,29 +23334,42 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 tokens_text = f"{n} {t} {recipe_name} {recipe_disp} {full_context_text}".lower()
                 clean_spaced = tokens_text.replace("_", " ")
 
-                # 1. Food dishes checked first if eating or using plate/bowl
+                # 1. Check raw garden produce / fruits / mushrooms / vegetables
+                p_name = extract_plant_name(tgt, inter)
+                if p_name:
+                    return f"Ест свежий урожай / плод ({p_name})"
+
+                # 2. Universal Recipe / Dish / Drink extractor (100% vanilla + DLC + CC)
+                dish_name = get_sim_active_recipe_or_dish_name(sim_info, sim_instance, [inter])
+                if not dish_name:
+                    dish_name = get_sim_active_recipe_or_dish_name(sim_info, sim_instance, interactions_list)
+
+                if dish_name:
+                    if is_drink:
+                        return f"Пьет напиток: {dish_name}"
+                    return f"Ест блюдо: {dish_name}"
+
+                # 3. Check carried object in hands (plate with food / glass with beverage)
+                held = get_sim_held_object_name(sim_info, is_en=False)
+                if held and not _is_bad_dish_name(held):
+                    if is_drink:
+                        return f"Пьет напиток: {held}"
+                    return f"Ест блюдо: {held}"
+
+                # 4. Fallback to keyword matching for legacy custom affordances
                 if is_eat or ("plate" in t or "bowl" in t):
                     for keywords, f_val in FOOD_DISHES:
                         for kw in keywords:
                             if kw in clean_spaced:
                                 return f_val
-
-                    # Check raw garden produce / fruits / mushrooms / vegetables
-                    p_name = extract_plant_name(tgt, inter)
-                    if p_name:
-                        return f"Ест свежий урожай / плод ({p_name})"
-
-                    if not is_drink:
-                        return "Принимает пищу (ест)"
-
-                # 2. Check drinks & beverages (strict boundary for short words like tea)
-                for keywords, d_val in DRINK_BEVERAGES:
-                    for kw in keywords:
-                        if kw == "tea":
-                            if re.search(r"\btea\b", clean_spaced) or "drink_tea" in tokens_text:
+                if is_drink:
+                    for keywords, d_val in DRINK_BEVERAGES:
+                        for kw in keywords:
+                            if kw == "tea":
+                                if re.search(r"\btea\b", clean_spaced) or "drink_tea" in tokens_text:
+                                    return d_val
+                            elif kw in clean_spaced:
                                 return d_val
-                        elif kw in clean_spaced:
-                            return d_val
 
                 if is_drink:
                     return "Пьет напиток"
@@ -17618,7 +23514,7 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 return get_microphone_action_details(interactions_list, full_context_text)
 
             if "woodwork" in combined:
-                return "Мастерит на столярном станке"
+                return get_woodworking_action_details(inter, tgt, interactions_list)
 
         # =========================================================================
         # 13.5. ШАХМАТЫ И НАСТОЛЬНЫЕ ИГРЫ (Chess & Table Games)
@@ -17673,9 +23569,9 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 if any(k in combined for k in ["painting", "easel", "canvas", "artwork", "artpiece", "fineart", "museumart"]):
                     return "Рассматривает и оценивает картину / предмет искусства"
 
-            # Рисование на мольберте (Активное создание картины)
-            if ("easel" in n or "paint" in n or "canvas" in n) and not any(v in n for v in ["view", "look", "admire", "critique"]):
-                return "Рисует картину на мольберте"
+            # Рисование на мольберте / планшете / мурале (Активное создание картины)
+            if any(p in n for p in ["easel", "paint", "canvas", "sketchpad", "mural", "graffiti"]) and not any(v in n for v in ["view", "look", "admire", "critique"]):
+                return get_painting_action_details(inter, tgt, interactions_list, full_context_text)
 
         # =========================================================================
         # 16. СОН И ПОСТЕЛЬ (Sleep & Woohoo)
@@ -17694,20 +23590,18 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
                 return "Лежит и отдыхает в кровати"
 
         # =========================================================================
-        # 17. УБОРКА И БЫТ (Cleaning & Chores)
+        # 17. УБОРКА, СТИРКА И БЫТ (Cleaning, Laundry & Chores)
         # =========================================================================
-        for inter in interactions_list:
-            n = getattr(inter, "__name__", str(inter)).lower().replace("_", "")
-            if "washdishes" in n or "loaddishwasher" in n:
-                return "Моет посуду"
-            if "trash" in n or "emptytrash" in n or "throwaway" in n:
-                if any(p in n for p in ["play", "toddler", "rummage", "make_mess", "makemess"]):
-                    return "Хулиганит: играет с мусором / копается в мусорном ведре"
-                return "Выносит / выбрасывает мусор"
-            if "clean" in n or "mop" in n:
-                return "Убирается / наводит чистоту"
-            if "repair" in n or "fix" in n:
-                return "Ремонтирует сломанный предмет"
+        dyn_clean = get_dynamic_cleaning_activity(sim_info, sim_instance, interactions_list, full_context_text)
+        if dyn_clean:
+            return dyn_clean
+
+        # =========================================================================
+        # 17.1. РЕМОНТ И МОДЕРНИЗАЦИЯ (Repair, Fix & Handiness Upgrades)
+        # =========================================================================
+        dyn_repair = get_dynamic_repair_activity(sim_info, sim_instance, interactions_list, full_context_text)
+        if dyn_repair:
+            return dyn_repair
 
         # =========================================================================
         # 17.5. ПОЧТОВЫЙ ЯЩИК И ПИСЬМА (Mailbox & Mail - Base Game)
@@ -17779,12 +23673,24 @@ def _get_physical_activity(sim_info, sim_instance, interactions_list, full_conte
         # 20. УМНЫЙ FALLBACK: ЛОКАЛИЗОВАННОЕ НАЗВАНИЕ ДЕЙСТВИЯ ИЗ ИГРОВОГО UI
         # =========================================================================
         for inter in interactions_list:
+            if getattr(inter, "is_social", False):
+                continue
+            tgt = getattr(inter, "target", None)
+            if tgt is not None and (getattr(tgt, "is_sim", False) or hasattr(tgt, "sim_info")):
+                continue
             ui_name = get_interaction_ui_name(inter)
             if ui_name and is_human_readable_text(ui_name):
-                ui_low = ui_name.lower()
+                ui_clean = ui_name.strip()
+                if ui_clean.endswith(":") or ui_clean.endswith("с:") or ui_clean.endswith("with:"):
+                    continue
+                ui_low = ui_clean.lower()
+                if any(sk in ui_low for sk in ["поболтать", "общаться", "говорить с", "chat with", "talk to", "socialize"]):
+                    continue
+                if "общение с друзьями" in ui_low:
+                    return "Общается с воображаемыми друзьями (галлюцинации безумца / разговаривает сам с собой)"
                 # Exclude purely generic idle sit/stand/walk strings
                 if not any(g in ui_low for g in ["сидеть", "стоять", "идти сюда", "go here", "sit", "stand", "прочитать мысли", "ai test"]):
-                    return ui_name
+                    return ui_clean
 
     except Exception as e:
         log_exception("Error determining physical activity", e)
@@ -17988,7 +23894,7 @@ def get_holiday_info(sim_info=None) -> str:
                         if loc_name:
                             try:
                                 if LocalizationHelperTuning is not None:
-                                    t_str = LocalizationHelperTuning.get_raw_text(loc_name)
+                                    t_str = _loc_text(loc_name)
                                     if t_str and is_human_readable_text(str(t_str)):
                                         return str(t_str)
                             except Exception:
@@ -18002,7 +23908,7 @@ def get_holiday_info(sim_info=None) -> str:
                             if h_name:
                                 try:
                                     if LocalizationHelperTuning is not None:
-                                        t_str = LocalizationHelperTuning.get_raw_text(h_name)
+                                        t_str = _loc_text(h_name)
                                         if t_str and is_human_readable_text(str(t_str)):
                                             return str(t_str)
                                 except Exception:
@@ -18083,7 +23989,17 @@ def get_family_relation_from_bit(bit_obj_or_name) -> str:
             return "sister_in_law"
         return "in_law"
 
-    # 3. Grand relations (MUST be checked before child/parent to avoid grand_son matching son!)
+    # 3. Grand and Great-Grand relations (MUST be checked before child/parent to avoid grand_son matching son!)
+    if any(k in b_raw for k in [
+        "great_grandchild", "greatgrandchild", "family_great_grandchild", "family_greatgrandchild"
+    ]):
+        return "great_grandchild"
+
+    if any(k in b_raw for k in [
+        "great_grandparent", "greatgrandparent", "family_great_grandparent", "family_greatgrandparent"
+    ]):
+        return "great_grandparent"
+
     if any(k in b_raw for k in [
         "grandchild", "grand_child", "grandson", "grand_son", "granddaughter", "grand_daughter",
         "family_grandchild", "family_grand_child", "family_grandson", "family_grand_son",
@@ -18098,13 +24014,28 @@ def get_family_relation_from_bit(bit_obj_or_name) -> str:
     ]):
         return "grandparent"
 
-    # 4. Step relations (MUST be checked before child/parent/sibling!)
+    # 4. Step and Adoptive relations (MUST be checked before child/parent/sibling!)
+    if any(k in b_raw for k in ["adoptive_child", "adopted_child"]):
+        return "adoptive_child"
+    if any(k in b_raw for k in ["adoptive_parent", "adoptive_father", "adoptive_mother"]):
+        return "adoptive_parent"
+    if any(k in b_raw for k in ["secret_child", "relbit_secret_child"]):
+        return "secret_child"
+    if any(k in b_raw for k in ["secret_parent", "relbit_secret_parent"]):
+        return "secret_parent"
+    if any(k in b_raw for k in ["caregiver", "care_giver"]):
+        return "caregiver"
+    if any(k in b_raw for k in ["care_dependent", "caredependent"]):
+        return "care_dependent"
+
     if any(k in b_raw for k in ["stepchild", "step_child", "step_son", "stepson", "step_daughter", "stepdaughter", "family_step_child"]):
         return "stepchild"
     if any(k in b_raw for k in ["stepparent", "step_parent", "step_father", "stepfather", "step_mother", "stepmother", "family_step_parent"]):
         return "stepparent"
     if any(k in b_raw for k in ["stepsibling", "step_sibling", "step_brother", "stepbrother", "step_sister", "stepsister", "family_step_sibling"]):
         return "stepsibling"
+    if any(k in b_raw for k in ["half_sibling", "half_brother", "half_sister"]):
+        return "half_sibling"
 
     # 5. Immediate family
     if any(k in b_raw for k in [
@@ -18126,6 +24057,10 @@ def get_family_relation_from_bit(bit_obj_or_name) -> str:
         return "parent"
 
     # 6. Extended family
+    if any(k in b_raw for k in ["grandparent_sibling", "great_uncle", "great_aunt"]):
+        return "grandparent_sibling"
+    if any(k in b_raw for k in ["siblings_grandchild", "grand_niece", "grand_nephew"]):
+        return "grand_niece_nephew"
     if "cousin" in b_raw:
         return "cousin"
     if any(k in b_raw for k in ["aunt_uncle", "uncle", "aunt", "family_aunt_uncle"]):
@@ -18138,6 +24073,16 @@ def get_family_relation_from_bit(bit_obj_or_name) -> str:
         return "spouse"
     if any(k in b_raw for k in ["fiance", "engaged"]):
         return "fiance"
+
+    # 8. Ex-partner relations
+    if any(k in b_raw for k in ["divorced", "divorce", "has_ex_spouse", "ex_spouse", "ex_spouses"]):
+        return "ex_spouse"
+    if any(k in b_raw for k in ["broken_engagement", "brokenengagement", "ex_fiance"]):
+        return "ex_fiance"
+    if any(k in b_raw for k in ["widow", "widower", "dead_spouse"]):
+        return "widowed"
+    if any(k in b_raw for k in ["broken_up", "brokenup", "breakup", "ex_boyfriend", "ex_girlfriend", "has_been_boyfriend", "has_been_girlfriend"]):
+        return "broken_up"
 
     return None
 
@@ -18265,6 +24210,81 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
     if sim_parent_ids and target_child_ids and (sim_parent_ids & target_child_ids):
         genealogy_ties.add("grandparent")
 
+    # Multi-generational Ancestor / Descendant BFS (Great-grandparents, Great-grandchildren, 4+ generations)
+    if target_id not in sim_parent_ids and target_id not in sim_child_ids and not (sim_parent_ids & target_parent_ids):
+        sim_mgr = None
+        if services is not None:
+            try:
+                sim_mgr = services.sim_info_manager()
+            except Exception:
+                pass
+
+        if sim_mgr is not None:
+            # 1. Search upwards (Ancestors)
+            curr_ancestors = set(sim_parent_ids)
+            visited_up = set(curr_ancestors) | {sim_id}
+            anc_depth = 1
+            found_anc_depth = 0
+            while curr_ancestors and anc_depth <= 12:
+                anc_depth += 1
+                next_anc = set()
+                for a_id in curr_ancestors:
+                    a_inf = sim_mgr.get(int(a_id)) if hasattr(sim_mgr, "get") else None
+                    if a_inf:
+                        for pa_inf in _get_sim_parent_infos(a_inf, sim_mgr):
+                            pa_id = getattr(pa_inf, "sim_id", None)
+                            if pa_id and pa_id not in visited_up:
+                                visited_up.add(pa_id)
+                                next_anc.add(pa_id)
+                if target_id in next_anc:
+                    found_anc_depth = anc_depth
+                    break
+                curr_ancestors = next_anc
+
+            if found_anc_depth == 2:
+                genealogy_ties.add("grandparent")
+            elif found_anc_depth == 3:
+                genealogy_ties.add("great_grandparent")
+            elif found_anc_depth == 4:
+                genealogy_ties.add("great_great_grandparent")
+            elif found_anc_depth == 5:
+                genealogy_ties.add("great_great_great_grandparent")
+            elif found_anc_depth >= 6:
+                genealogy_ties.add(f"ancestor_{found_anc_depth}")
+
+            # 2. Search downwards (Descendants)
+            if not found_anc_depth:
+                curr_descendants = set(sim_child_ids)
+                visited_down = set(curr_descendants) | {sim_id}
+                desc_depth = 1
+                found_desc_depth = 0
+                while curr_descendants and desc_depth <= 12:
+                    desc_depth += 1
+                    next_desc = set()
+                    for d_id in curr_descendants:
+                        d_inf = sim_mgr.get(int(d_id)) if hasattr(sim_mgr, "get") else None
+                        if d_inf:
+                            for cd_inf in _get_sim_children_infos(d_inf, sim_mgr):
+                                cd_id = getattr(cd_inf, "sim_id", None)
+                                if cd_id and cd_id not in visited_down:
+                                    visited_down.add(cd_id)
+                                    next_desc.add(cd_id)
+                    if target_id in next_desc:
+                        found_desc_depth = desc_depth
+                        break
+                    curr_descendants = next_desc
+
+                if found_desc_depth == 2:
+                    genealogy_ties.add("grandchild")
+                elif found_desc_depth == 3:
+                    genealogy_ties.add("great_grandchild")
+                elif found_desc_depth == 4:
+                    genealogy_ties.add("great_great_grandchild")
+                elif found_desc_depth == 5:
+                    genealogy_ties.add("great_great_great_grandchild")
+                elif found_desc_depth >= 6:
+                    genealogy_ties.add(f"descendant_{found_desc_depth}")
+
     # In-law direct check: Target is married to Sim's child -> Son-in-law / Daughter-in-law!
     if sim_child_ids:
         try:
@@ -18356,11 +24376,19 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
         except Exception:
             pass
 
-    # Strict precedence filtering: Grandchild and In-laws must NEVER be labeled as Child/Parent/Sibling!
-    if "grandchild" in genealogy_ties:
-        genealogy_ties.discard("child")
-    if "grandparent" in genealogy_ties:
-        genealogy_ties.discard("parent")
+    # Strict precedence filtering: Grand/Great-grand/Descendants and In-laws must NEVER be labeled as Child/Parent/Sibling!
+    for grand_tie in ["grandchild", "great_grandchild", "great_great_grandchild", "great_great_great_grandchild"]:
+        if grand_tie in genealogy_ties:
+            genealogy_ties.discard("child")
+    for gp_tie in ["grandparent", "great_grandparent", "great_great_grandparent", "great_great_great_grandparent"]:
+        if gp_tie in genealogy_ties:
+            genealogy_ties.discard("parent")
+    for tie in list(genealogy_ties):
+        if str(tie).startswith("descendant_"):
+            genealogy_ties.discard("child")
+        elif str(tie).startswith("ancestor_"):
+            genealogy_ties.discard("parent")
+
     if "son_in_law" in genealogy_ties or "daughter_in_law" in genealogy_ties:
         genealogy_ties.discard("child")
     if "father_in_law" in genealogy_ties or "mother_in_law" in genealogy_ties:
@@ -18370,10 +24398,30 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
 
     # 1. Blood / Family Relationship Detection
     blood_label = ""
-    if "grandchild" in genealogy_ties:
-        blood_label = "Внучка" if is_female else "Внук"
+    for tie in list(genealogy_ties):
+        if str(tie).startswith("ancestor_"):
+            n = tie.split("_")[1]
+            blood_label = f"Предок в {n}-м колене ({'прабабушка' if is_female else 'прадедушка'})"
+        elif str(tie).startswith("descendant_"):
+            n = tie.split("_")[1]
+            blood_label = f"Потомок в {n}-м колене ({'правнучка' if is_female else 'правнук'})"
+
+    if "great_great_great_grandparent" in genealogy_ties:
+        blood_label = "Прапрапрабабушка" if is_female else "Прапрапрадедушка"
+    elif "great_great_grandparent" in genealogy_ties:
+        blood_label = "Прапрабабушка" if is_female else "Прапрадедушка"
+    elif "great_grandparent" in genealogy_ties:
+        blood_label = "Прабабушка" if is_female else "Прадедушка"
     elif "grandparent" in genealogy_ties:
         blood_label = "Бабушка" if is_female else "Дедушка"
+    elif "great_great_great_grandchild" in genealogy_ties:
+        blood_label = "Прапраправнучка" if is_female else "Прапраправнук"
+    elif "great_great_grandchild" in genealogy_ties:
+        blood_label = "Праправнучка" if is_female else "Праправнук"
+    elif "great_grandchild" in genealogy_ties:
+        blood_label = "Правнучка" if is_female else "Правнук"
+    elif "grandchild" in genealogy_ties:
+        blood_label = "Внучка" if is_female else "Внук"
     elif "son_in_law" in genealogy_ties:
         blood_label = "Зять (Муж дочери)"
     elif "daughter_in_law" in genealogy_ties:
@@ -18388,8 +24436,46 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
         blood_label = "Золовка / Свояченица / Невестка"
     elif "in_law" in genealogy_ties:
         blood_label = "Родственница по браку" if is_female else "Родственник по браку"
+    elif "adoptive_parent" in genealogy_ties:
+        blood_label = "Приёмная мать" if is_female else "Приёмный отец"
+    elif "adoptive_child" in genealogy_ties:
+        blood_label = "Приёмная дочь" if is_female else "Приёмный сын"
+    elif "caregiver" in genealogy_ties:
+        blood_label = "Опекун"
+    elif "care_dependent" in genealogy_ties:
+        blood_label = "Подопечная" if is_female else "Подопечный"
+    elif "secret_parent" in genealogy_ties:
+        blood_label = "Тайная мать" if is_female else "Тайный отец"
+    elif "secret_child" in genealogy_ties:
+        blood_label = "Тайная дочь" if is_female else "Тайный сын"
+    elif "grandparent_sibling" in genealogy_ties:
+        blood_label = "Двоюродная бабушка" if is_female else "Двоюродный дедушка"
+    elif "grand_niece_nephew" in genealogy_ties:
+        blood_label = "Внучатая племянница" if is_female else "Внучатый племянник"
     elif "sibling" in genealogy_ties:
-        blood_label = "Сестра" if is_female else "Брат"
+        if sim_parent_ids and target_parent_ids:
+            common_p = sim_parent_ids & target_parent_ids
+            if len(common_p) == 1:
+                cp_id = list(common_p)[0]
+                cp_inf = None
+                if services is not None:
+                    try:
+                        sim_mgr = services.sim_info_manager()
+                        if sim_mgr:
+                            cp_inf = sim_mgr.get(int(cp_id))
+                    except Exception:
+                        pass
+                cp_gender = getattr(getattr(cp_inf, "gender", None), "name", "MALE") if cp_inf else "MALE"
+                if cp_gender == "MALE":
+                    blood_label = "Единокровная сестра (общий отец)" if is_female else "Единокровный брат (общий отец)"
+                else:
+                    blood_label = "Единоутробная сестра (общая мать)" if is_female else "Единоутробный брат (общая мать)"
+            elif len(common_p) == 0:
+                blood_label = "Сводная сестра" if is_female else "Сводный брат"
+            else:
+                blood_label = "Сестра" if is_female else "Брат"
+        else:
+            blood_label = "Сестра" if is_female else "Брат"
     elif "parent" in genealogy_ties:
         blood_label = "Мать" if is_female else "Отец"
     elif "child" in genealogy_ties:
@@ -18423,6 +24509,76 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
     is_cheating_me = (my_spouse_id is not None and my_spouse_id != target_id)
     is_cheating_target = (target_spouse_id is not None and target_spouse_id != sim_id)
 
+    # Ex-Partners detection if not currently married
+    is_ex = False
+    ex_label = ""
+    ex_dynamic_suffix = ""
+    if any(k in bits_str for k in ["bitter_exes", "bitter_ex"]):
+        ex_dynamic_suffix = " (Враждующие бывшие)"
+    elif any(k in bits_str for k in ["friendly_exes", "friendly_ex"]):
+        ex_dynamic_suffix = " (Остались друзьями)"
+
+    # Check divorced
+    is_divorced = any(k in bits_str for k in ["divorced", "divorce", "has_ex_spouse", "ex_spouse", "ex_spouses"])
+    if not is_divorced and genealogy is not None:
+        for d_attr in ["divorced_spouses", "get_divorced_spouses", "_divorced_spouses", "previous_spouses", "get_previous_spouses"]:
+            if hasattr(genealogy, d_attr):
+                try:
+                    val = getattr(genealogy, d_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        if getattr(item, "sim_id", item) == target_id:
+                            is_divorced = True
+                            break
+                except Exception:
+                    pass
+
+    # Check ex-fiance
+    is_ex_fiance = any(k in bits_str for k in ["broken_engagement", "brokenengagement", "ex_fiance"])
+    if not is_ex_fiance and genealogy is not None:
+        for pf_attr in ["previous_fiances", "get_previous_fiances", "_previous_fiances"]:
+            if hasattr(genealogy, pf_attr):
+                try:
+                    val = getattr(genealogy, pf_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        if getattr(item, "sim_id", item) == target_id:
+                            is_ex_fiance = True
+                            break
+                except Exception:
+                    pass
+
+    # Check widow/widower
+    is_widow = any(k in bits_str for k in ["widow", "widower", "dead_spouse"])
+    if not is_widow and genealogy is not None:
+        for ds_attr in ["dead_spouses", "get_dead_spouses", "_dead_spouses"]:
+            if hasattr(genealogy, ds_attr):
+                try:
+                    val = getattr(genealogy, ds_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        if getattr(item, "sim_id", item) == target_id:
+                            is_widow = True
+                            break
+                except Exception:
+                    pass
+
+    # Check broken up
+    is_broken_up = any(k in bits_str for k in ["broken_up", "brokenup", "breakup", "ex_boyfriend", "ex_girlfriend", "has_been_boyfriend", "has_been_girlfriend"])
+
+    if is_divorced:
+        ex_label = f"Бывшая жена{ex_dynamic_suffix}" if is_female else f"Бывший муж{ex_dynamic_suffix}"
+        is_ex = True
+    elif is_ex_fiance:
+        ex_label = f"Бывшая невеста{ex_dynamic_suffix}" if is_female else f"Бывший жених{ex_dynamic_suffix}"
+        is_ex = True
+    elif is_widow:
+        ex_label = "Покойная жена (Вдова)" if is_female else "Покойный муж (Вдовец)"
+        is_ex = True
+    elif is_broken_up:
+        ex_label = f"Бывшая девушка{ex_dynamic_suffix}" if is_female else f"Бывший парень{ex_dynamic_suffix}"
+        is_ex = True
+
     if is_spouse:
         romantic_label = "Жена" if is_female else "Муж"
     elif any(k in bits_str for k in ["engaged", "fiance"]):
@@ -18438,8 +24594,12 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
             romantic_label = "Любовница" if is_female else "Любовник"
         else:
             romantic_label = "Девушка" if is_female else "Парень"
+    elif any(k in bits_str for k in ["woohoo_partner", "friends_with_benefits"]):
+        romantic_label = "Секс по дружбе (Партнёр по вуху)"
     elif "crush" in bits_str:
         romantic_label = "Симпатия / Влюбленность"
+    elif is_ex:
+        romantic_label = ex_label
     else:
         # Check romance track score and explicit romance relationship bits
         r_score = 0
@@ -18484,8 +24644,12 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
                 romantic_label = "Любовница (интрижка на стороне при живой жене)" if is_female else "Любовник (интрижка на стороне при живом муже)"
             elif is_cheating_target:
                 romantic_label = "Любовница (замужняя интрижка)" if is_female else "Любовник (женатый партнер)"
+            elif any(k in bits_str for k in ["first_kiss", "firstkiss", "have_kissed"]) and r_score < 25:
+                romantic_label = "Первый поцелуй (Симпатия)"
             else:
                 romantic_label = "Романтический интерес"
+        elif is_ex:
+            romantic_label = ex_label
 
     # 3. Friendship / Social Relationship Detection
     friend_label = ""
@@ -18536,9 +24700,24 @@ def get_relationship_between_sims(sim_info, target_info) -> str:
             if friend_label not in classes:
                 classes.append(friend_label)
 
+    # Ex-In-Law check (parents, siblings, children, partners of ex-spouses / ex-partners)
+    ex_in_law_label = ""
+    if not blood_label and not romantic_label and get_genealogy_type_flag("ex_in_laws") and services is not None:
+        try:
+            s_mgr = services.sim_info_manager() if hasattr(services, "sim_info_manager") else None
+            if s_mgr is not None:
+                for ex_rel_inf, ex_rel_lbl in _get_sim_ex_in_laws_infos(sim_info, s_mgr):
+                    if ex_rel_inf and getattr(ex_rel_inf, "sim_id", None) == target_id:
+                        ex_in_law_label = ex_rel_lbl
+                        break
+        except Exception:
+            pass
+
     # Blood / Family tie
     if blood_label and blood_label not in classes:
         classes.append(blood_label)
+    elif ex_in_law_label and ex_in_law_label not in classes:
+        classes.append(ex_in_law_label)
 
     # Incest flag: if both romantic and family ties are present, or explicit incest bit found
     is_incest = False
@@ -18695,6 +24874,12 @@ def get_nearby_sims_info(sim_info, max_sims: int = 5, exclude_sim_ids: set = Non
 
             # Relationship: accurate single gender-appropriate title
             rel_str = get_relationship_between_sims(sim_info, other_info)
+            staff_role = get_sim_domestic_staff_role(other_info, active_sim_info=sim_info, is_en=False)
+            if staff_role:
+                if rel_str and rel_str not in ("Незнакомец / Не знаком", "Знакомый", "Незнакомка / Не знакома"):
+                    rel_str = f"{staff_role}, {rel_str}"
+                else:
+                    rel_str = staff_role
 
             # Mood
             other_mood = get_sim_mood_info(other_info)
@@ -18765,6 +24950,31 @@ def _get_sim_children_infos(s_info, sim_info_mgr):
     c_set = set()
     if s_info is None or sim_info_mgr is None:
         return []
+    s_id = getattr(s_info, "sim_id", None)
+    if services is not None and s_id:
+        try:
+            ft_svc = services.family_tree_service() if hasattr(services, "family_tree_service") else None
+            if ft_svc is not None and hasattr(ft_svc, "family_tree_graph"):
+                graph = ft_svc.family_tree_graph
+                if graph is not None:
+                    if hasattr(graph, "get_children"):
+                        for node in (graph.get_children(s_id) or []):
+                            cid = getattr(node, "sim_id", node)
+                            if cid:
+                                c_set.add(int(cid))
+                    nodes_dict = getattr(graph, "nodes", {}) or {}
+                    if isinstance(nodes_dict, dict):
+                        for cand_node_id, cand_node in nodes_dict.items():
+                            if int(cand_node_id) == int(s_id) or int(cand_node_id) in c_set:
+                                continue
+                            if hasattr(cand_node, "get_parents_edges"):
+                                for edge in (cand_node.get_parents_edges() or []):
+                                    if int(getattr(edge, "target_sim_id", 0)) == int(s_id):
+                                        c_set.add(int(cand_node_id))
+                                        break
+        except Exception as e:
+            log_exception("Error querying family_tree_graph for children", e)
+
     genealogy = getattr(s_info, "genealogy", None)
     if genealogy is not None:
         if hasattr(genealogy, "get_children_sim_ids_gen"):
@@ -18839,68 +25049,122 @@ def _get_sim_parent_infos(s_info, sim_info_mgr):
     p_set = set()
     if s_info is None or sim_info_mgr is None:
         return []
+    s_id = getattr(s_info, "sim_id", None)
     genealogy = getattr(s_info, "genealogy", None)
+
+    # 0. FamilyTreeService & FamilyTreeGraph (exact engine used by game CAS and in-game UI)
+    if services is not None and s_id:
+        try:
+            ft_svc = services.family_tree_service() if hasattr(services, "family_tree_service") else None
+            if ft_svc is not None and hasattr(ft_svc, "family_tree_graph"):
+                graph = ft_svc.family_tree_graph
+                if graph is not None:
+                    # Direct parents from graph
+                    if hasattr(graph, "get_parents"):
+                        for node in (graph.get_parents(s_id) or []):
+                            pid = getattr(node, "sim_id", node)
+                            if pid:
+                                p_set.add(int(pid))
+                    # Reverse check: any node in graph that has s_id as a child edge
+                    nodes_dict = getattr(graph, "nodes", {}) or {}
+                    if isinstance(nodes_dict, dict):
+                        for cand_node_id, cand_node in nodes_dict.items():
+                            if int(cand_node_id) == int(s_id) or int(cand_node_id) in p_set:
+                                continue
+                            if hasattr(cand_node, "get_children_edges"):
+                                for edge in (cand_node.get_children_edges() or []):
+                                    if int(getattr(edge, "target_sim_id", 0)) == int(s_id):
+                                        p_set.add(int(cand_node_id))
+                                        break
+        except Exception as e:
+            log_exception("Error querying family_tree_graph for parents", e)
+
+    # 1. Genealogy direct methods
     if genealogy is not None:
-        if hasattr(genealogy, "get_parent_sim_ids"):
-            try:
-                for pid in genealogy.get_parent_sim_ids():
-                    if pid:
-                        p_set.add(pid)
-            except Exception:
-                pass
-        if hasattr(genealogy, "get_parent_sim_ids_gen"):
-            try:
-                for pid in genealogy.get_parent_sim_ids_gen():
-                    if pid:
-                        p_set.add(pid)
-            except Exception:
-                pass
-        if hasattr(genealogy, "get_parent_relation"):
-            try:
-                for rel_idx in (0, 1):
-                    pid = genealogy.get_parent_relation(rel_idx)
-                    if pid:
-                        p_set.add(pid)
-            except Exception:
-                pass
-        if hasattr(genealogy, "_family_relations") and isinstance(genealogy._family_relations, dict):
-            try:
-                for rel_idx in (0, 1):
-                    pid = genealogy._family_relations.get(rel_idx)
-                    if pid:
-                        p_set.add(pid)
-            except Exception:
-                pass
-        for p_attr in ["_parent_ids", "parent_ids"]:
-            if hasattr(genealogy, p_attr):
+        for m_name in ("get_parent_sim_ids", "get_parent_sim_ids_gen", "get_parent_sim_infos_gen"):
+            if hasattr(genealogy, m_name):
                 try:
-                    for pid in getattr(genealogy, p_attr, []):
+                    val = getattr(genealogy, m_name)()
+                    for item in (val or []):
+                        pid = getattr(item, "sim_id", item)
                         if pid:
-                            p_set.add(pid)
+                            p_set.add(int(pid))
                 except Exception:
                     pass
-    for direct_attr in ["get_parents", "get_parent_sim_infos"]:
-        if hasattr(s_info, direct_attr):
+        # 2. _family_relations dictionary inspection (handles both Enum and integer keys)
+        if hasattr(genealogy, "_family_relations") and isinstance(genealogy._family_relations, dict):
             try:
-                res = getattr(s_info, direct_attr)()
-                if res:
-                    for p in res:
-                        pid = getattr(p, "sim_id", p)
-                        if pid:
-                            p_set.add(pid)
+                for k, pid in genealogy._family_relations.items():
+                    if pid:
+                        k_name = str(getattr(k, "name", k)).upper()
+                        k_val = getattr(k, "value", k)
+                        if k_name in ("MOTHER", "FATHER", "0", "1") or k_val in (0, 1):
+                            p_set.add(int(pid))
             except Exception:
                 pass
+        # 3. get_parent_relation method
+        if hasattr(genealogy, "get_parent_relation"):
+            for rel_idx in (0, 1):
+                try:
+                    pid = genealogy.get_parent_relation(rel_idx, allow_invalid_parent=True)
+                    if pid:
+                        p_set.add(int(pid))
+                except Exception:
+                    try:
+                        pid = genealogy.get_parent_relation(rel_idx)
+                        if pid:
+                            p_set.add(int(pid))
+                    except Exception:
+                        pass
+        for p_attr in ["_parent_ids", "parent_ids", "get_parents", "get_parent_sim_infos"]:
+            if hasattr(genealogy, p_attr):
+                try:
+                    val = getattr(genealogy, p_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        pid = getattr(item, "sim_id", item)
+                        if pid:
+                            p_set.add(int(pid))
+                except Exception:
+                    pass
+
+    # 4. RelationshipService query for parent bits
+    if services is not None and s_id:
+        try:
+            rel_svc = services.relationship_service() if hasattr(services, "relationship_service") else None
+            if rel_svc is not None and hasattr(rel_svc, "get_all_sim_relationships"):
+                for rel in rel_svc.get_all_sim_relationships(s_id):
+                    tid = rel.get_other_sim_id(s_id) if hasattr(rel, "get_other_sim_id") else None
+                    if not tid:
+                        tid = getattr(rel, "sim_id_a", None)
+                        if tid == s_id:
+                            tid = getattr(rel, "sim_id_b", None)
+                    if tid and tid not in p_set:
+                        bits = []
+                        if hasattr(rel, "get_bits"):
+                            bits = rel.get_bits(s_id)
+                        elif hasattr(rel, "_bits"):
+                            bits = list(rel._bits.keys())
+                        for b in bits:
+                            b_str = getattr(b, "__name__", str(b)).lower()
+                            if any(k in b_str for k in ["family_parent", "genealogy_parent", "parentchild_parent"]):
+                                p_set.add(int(tid))
+                                break
+        except Exception:
+            pass
+
+    # 5. Relationship tracker fallback
     rt = getattr(s_info, "relationship_tracker", None)
-    if rt is not None:
+    if rt is not None and s_id:
         try:
             rel_list = []
-            if hasattr(rt, "_relationships"):
+            if hasattr(rt, "_relationships") and isinstance(rt._relationships, dict):
                 rel_list = list(rt._relationships.values())
             elif hasattr(rt, "get_all_relationships"):
                 rel_list = list(rt.get_all_relationships())
             for rel in rel_list:
                 tid = getattr(rel, "sim_id_a", None)
-                if tid == s_info.sim_id:
+                if tid == s_id:
                     tid = getattr(rel, "sim_id_b", None)
                 if tid and tid not in p_set:
                     bits = []
@@ -18911,10 +25175,61 @@ def _get_sim_parent_infos(s_info, sim_info_mgr):
                     for b in bits:
                         b_str = getattr(b, "__name__", str(b)).lower()
                         if any(k in b_str for k in ["family_parent", "genealogy_parent", "parentchild_parent"]):
-                            p_set.add(tid)
+                            p_set.add(int(tid))
                             break
         except Exception:
             pass
+
+    # 6. Household & cohabitants reverse check: any sim in household that has s_info as child
+    try:
+        household = getattr(s_info, "household", None)
+        cand_sims = []
+        if household is not None:
+            sims_val = getattr(household, "sim_infos", None)
+            if sims_val is None and hasattr(household, "get_sim_infos"):
+                sims_val = household.get_sim_infos()
+            if sims_val:
+                cand_sims.extend(sims_val)
+        if services is not None and hasattr(services, "active_household"):
+            act_hh = services.active_household()
+            if act_hh is not None:
+                act_sims = getattr(act_hh, "sim_infos", None) or (act_hh.get_sim_infos() if hasattr(act_hh, "get_sim_infos") else [])
+                if act_sims:
+                    cand_sims.extend(act_sims)
+
+        for cand in cand_sims:
+            if cand is None:
+                continue
+            cand_id = getattr(cand, "sim_id", None)
+            if not cand_id or cand_id == s_id or cand_id in p_set:
+                continue
+            cand_gen = getattr(cand, "genealogy", None)
+            if cand_gen is not None:
+                for c_meth in ("get_children_sim_ids_gen", "get_child_sim_infos_gen"):
+                    if hasattr(cand_gen, c_meth):
+                        try:
+                            for c_item in getattr(cand_gen, c_meth)():
+                                c_id = getattr(c_item, "sim_id", c_item)
+                                if c_id == s_id:
+                                    p_set.add(int(cand_id))
+                                    break
+                        except Exception:
+                            pass
+            if cand_id in p_set:
+                continue
+            cand_rt = getattr(cand, "relationship_tracker", None)
+            if cand_rt is not None and hasattr(cand_rt, "get_all_bits") and s_id:
+                try:
+                    for b in cand_rt.get_all_bits(s_id):
+                        b_str = getattr(b, "__name__", str(b)).lower()
+                        if any(k in b_str for k in ["family_son_daughter", "family_child", "genealogy_child", "parentchild_child"]):
+                            p_set.add(int(cand_id))
+                            break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     res_list = []
     for pid in p_set:
         inf = _get_info_by_id(pid, sim_info_mgr)
@@ -19084,6 +25399,303 @@ def _get_sim_spouses_and_partners_infos(s_info, sim_info_mgr):
     return partners
 
 
+def _get_sim_ex_partners_infos(s_info, sim_info_mgr):
+    """
+    Returns list of tuples: (other_sim_info, ex_type, ex_dynamic)
+    ex_type: 'ex_spouse', 'ex_fiance', 'broken_up', 'widowed'
+    ex_dynamic: 'bitter', 'friendly', 'neutral'
+    """
+    exes = []
+    seen = set()
+    if s_info is None or sim_info_mgr is None:
+        return []
+
+    # Current spouse id to avoid counting current spouse as ex
+    current_spouse_id = getattr(s_info, "spouse_sim_id", None)
+    if current_spouse_id:
+        seen.add(current_spouse_id)
+
+    # 1. Direct ex_spouse_sim_id attribute on sim_info
+    for ex_attr in ["ex_spouse_sim_id", "ex_spouse_id"]:
+        ex_id = getattr(s_info, ex_attr, None)
+        if ex_id and ex_id not in seen and ex_id != s_info.sim_id:
+            ex_inf = _get_info_by_id(ex_id, sim_info_mgr)
+            if ex_inf:
+                exes.append((ex_inf, "ex_spouse", "neutral"))
+                seen.add(ex_id)
+
+    # 2. Genealogy tracker (divorced_spouses, dead_spouses, previous_spouses, previous_fiances)
+    gen = getattr(s_info, "genealogy", None)
+    if gen is not None:
+        # Divorced spouses
+        for d_attr in ["divorced_spouses", "get_divorced_spouses", "_divorced_spouses", "previous_spouses", "get_previous_spouses"]:
+            if hasattr(gen, d_attr):
+                try:
+                    val = getattr(gen, d_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        d_id = getattr(item, "sim_id", item)
+                        if d_id and d_id not in seen and d_id != s_info.sim_id:
+                            d_inf = _get_info_by_id(d_id, sim_info_mgr)
+                            if d_inf:
+                                exes.append((d_inf, "ex_spouse", "neutral"))
+                                seen.add(d_id)
+                except Exception:
+                    pass
+
+        # Previous fiances
+        for pf_attr in ["previous_fiances", "get_previous_fiances", "_previous_fiances"]:
+            if hasattr(gen, pf_attr):
+                try:
+                    val = getattr(gen, pf_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        pf_id = getattr(item, "sim_id", item)
+                        if pf_id and pf_id not in seen and pf_id != s_info.sim_id:
+                            pf_inf = _get_info_by_id(pf_id, sim_info_mgr)
+                            if pf_inf:
+                                exes.append((pf_inf, "ex_fiance", "neutral"))
+                                seen.add(pf_id)
+                except Exception:
+                    pass
+
+        # Dead spouses (widowed)
+        for ds_attr in ["dead_spouses", "get_dead_spouses", "_dead_spouses"]:
+            if hasattr(gen, ds_attr):
+                try:
+                    val = getattr(gen, ds_attr)
+                    items = val() if callable(val) else val
+                    for item in (items or []):
+                        ds_id = getattr(item, "sim_id", item)
+                        if ds_id and ds_id not in seen and ds_id != s_info.sim_id:
+                            ds_inf = _get_info_by_id(ds_id, sim_info_mgr)
+                            if ds_inf:
+                                exes.append((ds_inf, "widowed", "neutral"))
+                                seen.add(ds_id)
+                except Exception:
+                    pass
+
+    # 3. RelationshipService and Relationship Tracker scan for relationship bits
+    candidates_to_check = []  # list of (tid, bits)
+
+    # 3a. Official RelationshipService (The Sims 4 service architecture)
+    if services is not None and hasattr(s_info, "sim_id"):
+        try:
+            rel_svc = services.relationship_service() if hasattr(services, "relationship_service") else None
+            if rel_svc is not None and hasattr(rel_svc, "get_all_sim_relationships"):
+                for rel in rel_svc.get_all_sim_relationships(s_info.sim_id):
+                    tid = rel.get_other_sim_id(s_info.sim_id) if hasattr(rel, "get_other_sim_id") else None
+                    if not tid:
+                        tid = getattr(rel, "sim_id_a", None)
+                        if tid == s_info.sim_id:
+                            tid = getattr(rel, "sim_id_b", None)
+                    if tid and tid not in seen and tid != s_info.sim_id:
+                        bits = []
+                        if hasattr(rel, "get_bits"):
+                            bits = list(rel.get_bits(s_info.sim_id) or [])
+                        elif hasattr(rel, "_bits"):
+                            bits = list(rel._bits.keys())
+                        candidates_to_check.append((tid, bits))
+        except Exception as e:
+            log_exception("Error querying relationship_service in _get_sim_ex_partners_infos", e)
+
+    # 3b. Direct sim_info_mgr scan via relationship_tracker.get_all_bits (proven in Section 13)
+    rt = getattr(s_info, "relationship_tracker", None)
+    if rt is not None and hasattr(rt, "get_all_bits"):
+        try:
+            all_sim_infos = []
+            if hasattr(sim_info_mgr, "get_all"):
+                all_sim_infos = list(sim_info_mgr.get_all())
+            elif hasattr(sim_info_mgr, "values"):
+                all_sim_infos = list(sim_info_mgr.values())
+            elif hasattr(sim_info_mgr, "objects"):
+                all_sim_infos = list(sim_info_mgr.objects.values())
+
+            for r_inf in all_sim_infos:
+                if r_inf is None:
+                    continue
+                r_id = getattr(r_inf, "sim_id", None)
+                if not r_id or r_id == s_info.sim_id or r_id in seen:
+                    continue
+                try:
+                    b_list = rt.get_all_bits(r_id)
+                    if b_list:
+                        candidates_to_check.append((r_id, list(b_list)))
+                except Exception:
+                    pass
+        except Exception as e:
+            log_exception("Error scanning sim_info_mgr bits in _get_sim_ex_partners_infos", e)
+
+    # 3c. Evaluate bits for all found candidates
+    for tid, bits in candidates_to_check:
+        if not tid or tid in seen or tid == s_info.sim_id:
+            continue
+        try:
+            bits_names = [getattr(b, "__name__", str(b)).lower() for b in bits]
+            bits_str = " ".join(bits_names)
+
+            # Determine dynamic
+            ex_dyn = "neutral"
+            if any(k in bits_str for k in ["bitter_exes", "bitter_ex"]):
+                ex_dyn = "bitter"
+            elif any(k in bits_str for k in ["friendly_exes", "friendly_ex"]):
+                ex_dyn = "friendly"
+
+            # Check family relation bit helper if available
+            f_rel_types = []
+            for b in bits:
+                fr = get_family_relation_from_bit(b)
+                if fr:
+                    f_rel_types.append(fr)
+
+            # Check ex types
+            if "ex_spouse" in f_rel_types or any(k in bits_str for k in ["divorced", "divorce", "has_ex_spouse", "ex_spouse", "ex_spouses"]):
+                t_inf = _get_info_by_id(tid, sim_info_mgr)
+                if t_inf:
+                    exes.append((t_inf, "ex_spouse", ex_dyn))
+                    seen.add(tid)
+            elif "ex_fiance" in f_rel_types or any(k in bits_str for k in ["broken_engagement", "brokenengagement", "ex_fiance"]):
+                t_inf = _get_info_by_id(tid, sim_info_mgr)
+                if t_inf:
+                    exes.append((t_inf, "ex_fiance", ex_dyn))
+                    seen.add(tid)
+            elif "widowed" in f_rel_types or any(k in bits_str for k in ["widow", "widower", "dead_spouse"]):
+                t_inf = _get_info_by_id(tid, sim_info_mgr)
+                if t_inf:
+                    exes.append((t_inf, "widowed", ex_dyn))
+                    seen.add(tid)
+            elif "broken_up" in f_rel_types or any(k in bits_str for k in ["broken_up", "brokenup", "breakup", "ex_boyfriend", "ex_girlfriend", "has_been_boyfriend", "has_been_girlfriend"]):
+                t_inf = _get_info_by_id(tid, sim_info_mgr)
+                if t_inf:
+                    exes.append((t_inf, "broken_up", ex_dyn))
+                    seen.add(tid)
+        except Exception:
+            pass
+
+    return exes
+
+
+_EX_IN_LAWS_CACHE = {}
+
+
+def _get_sim_ex_in_laws_infos(s_info, sim_info_mgr):
+    """
+    Returns list of tuples: (relative_sim_info, formatted_relationship_label)
+    Finds parents, siblings, non-shared children, and new spouses of all ex-partners.
+    e.g. (parent_inf, "Мать бывшей жены (Белла Гот)")
+    """
+    ex_in_laws = []
+    if s_info is None or sim_info_mgr is None:
+        return ex_in_laws
+
+    import time
+    s_id = getattr(s_info, "sim_id", None)
+    now_t = time.time()
+    if s_id and s_id in _EX_IN_LAWS_CACHE:
+        cached_time, cached_res = _EX_IN_LAWS_CACHE[s_id]
+        if (now_t - cached_time) < 15.0:
+            return list(cached_res)
+
+    try:
+        direct_exes = _get_sim_ex_partners_infos(s_info, sim_info_mgr)
+        if not direct_exes:
+            return ex_in_laws
+
+        seen_ids = {s_info.sim_id}
+        for ex_inf, _, _ in direct_exes:
+            if ex_inf:
+                ex_id = getattr(ex_inf, "sim_id", None)
+                if ex_id:
+                    seen_ids.add(ex_id)
+
+        # Active sim's own children (so shared children are not labeled as ex's children)
+        my_children = _get_sim_children_infos(s_info, sim_info_mgr)
+        my_children_ids = {getattr(c, "sim_id", None) for c in my_children if c}
+        seen_ids.update(my_children_ids)
+
+        for ex_inf, ex_type, _ in direct_exes:
+            if not ex_inf:
+                continue
+
+            ex_id = getattr(ex_inf, "sim_id", None)
+            if not ex_id:
+                continue
+
+            ex_first = getattr(ex_inf, "first_name", "")
+            ex_last = getattr(ex_inf, "last_name", "")
+            ex_full = f"{ex_first} {ex_last}".strip() or "Бывший партнер"
+
+            ex_gender = getattr(getattr(ex_inf, "gender", None), "name", "FEMALE")
+            is_ex_female = (ex_gender == "FEMALE")
+
+            if ex_type == "ex_spouse":
+                ex_title = "бывшей жены" if is_ex_female else "бывшего мужа"
+            elif ex_type == "ex_fiance":
+                ex_title = "бывшей невесты" if is_ex_female else "бывшего жениха"
+            elif ex_type == "widowed":
+                ex_title = "покойной жены" if is_ex_female else "покойного мужа"
+            else:
+                ex_title = "бывшей девушки" if is_ex_female else "бывшего парня"
+
+            ex_tag = f" ({ex_full})"
+
+            # 1. Parents of ex
+            ex_parents = _get_sim_parent_infos(ex_inf, sim_info_mgr)
+            for p_inf in ex_parents:
+                p_id = getattr(p_inf, "sim_id", None)
+                if not p_id or p_id in seen_ids:
+                    continue
+                p_gender = getattr(getattr(p_inf, "gender", None), "name", "MALE")
+                p_rel = "Отец" if p_gender == "MALE" else "Мать"
+                ex_in_laws.append((p_inf, f"{p_rel} {ex_title}{ex_tag}"))
+                seen_ids.add(p_id)
+
+            # 2. Siblings of ex
+            ex_siblings = _get_sim_sibling_infos(ex_inf, sim_info_mgr)
+            for sib_inf in ex_siblings:
+                sib_id = getattr(sib_inf, "sim_id", None)
+                if not sib_id or sib_id in seen_ids:
+                    continue
+                sib_gender = getattr(getattr(sib_inf, "gender", None), "name", "MALE")
+                sib_rel = "Брат" if sib_gender == "MALE" else "Сестра"
+                ex_in_laws.append((sib_inf, f"{sib_rel} {ex_title}{ex_tag}"))
+                seen_ids.add(sib_id)
+
+            # 3. Non-shared children of ex
+            ex_children = _get_sim_children_infos(ex_inf, sim_info_mgr)
+            for ch_inf in ex_children:
+                ch_id = getattr(ch_inf, "sim_id", None)
+                if not ch_id or ch_id in seen_ids:
+                    continue
+                ch_gender = getattr(getattr(ch_inf, "gender", None), "name", "MALE")
+                ch_rel = "Сын" if ch_gender == "MALE" else "Дочь"
+                ex_in_laws.append((ch_inf, f"{ch_rel} {ex_title}{ex_tag}"))
+                seen_ids.add(ch_id)
+
+            # 4. New partner / spouse of ex
+            ex_partners = _get_sim_spouses_and_partners_infos(ex_inf, sim_info_mgr)
+            for part_inf, ptype in ex_partners:
+                part_id = getattr(part_inf, "sim_id", None)
+                if not part_id or part_id in seen_ids:
+                    continue
+                part_gender = getattr(getattr(part_inf, "gender", None), "name", "MALE")
+                if ptype == "spouse":
+                    part_rel = "Новый муж" if part_gender == "MALE" else "Новая жена"
+                elif ptype == "fiance":
+                    part_rel = "Новый жених" if part_gender == "MALE" else "Новая невеста"
+                else:
+                    part_rel = "Новый парень" if part_gender == "MALE" else "Новая девушка"
+                ex_in_laws.append((part_inf, f"{part_rel} {ex_title}{ex_tag}"))
+                seen_ids.add(part_id)
+
+    except Exception as e:
+        log_exception("Error getting ex in-laws infos", e)
+
+    if s_id:
+        _EX_IN_LAWS_CACHE[s_id] = (now_t, list(ex_in_laws))
+    return ex_in_laws
+
+
 DEATH_CAUSE_TRANSLATIONS = {
     "OLD_AGE": "старость",
     "FIRE": "пожар / сгорел",
@@ -19198,23 +25810,112 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     label = "Парень" if p_gender == "MALE" else "Девушка"
                     add_family_member(1, label, p_inf)
 
-        # 2. Direct Children of sim_info
+        # 1b. Direct Ex-Spouses & Ex-Partners of sim_info
+        if get_genealogy_type_flag("ex_partners"):
+            direct_exes = _get_sim_ex_partners_infos(sim_info, sim_info_mgr)
+            for ex_inf, ex_type, ex_dyn in direct_exes:
+                ex_gender = getattr(getattr(ex_inf, "gender", None), "name", "FEMALE")
+                is_ex_female = (ex_gender == "FEMALE")
+                dyn_suff = ""
+                if ex_dyn == "bitter":
+                    dyn_suff = " (Враждующие бывшие)"
+                elif ex_dyn == "friendly":
+                    dyn_suff = " (Остались друзьями)"
+
+                if ex_type == "ex_spouse":
+                    label = f"Бывшая жена{dyn_suff}" if is_ex_female else f"Бывший муж{dyn_suff}"
+                elif ex_type == "ex_fiance":
+                    label = f"Бывшая невеста{dyn_suff}" if is_ex_female else f"Бывший жених{dyn_suff}"
+                elif ex_type == "widowed":
+                    label = "Покойная жена (Вдова)" if is_ex_female else "Покойный муж (Вдовец)"
+                else:
+                    label = f"Бывшая девушка{dyn_suff}" if is_ex_female else f"Бывший парень{dyn_suff}"
+                add_family_member(1, label, ex_inf)
+
+        # 2. Direct Children of sim_info (biological, adoptive, secret)
         direct_children = _get_sim_children_infos(sim_info, sim_info_mgr)
         if get_genealogy_type_flag("children"):
             for c_inf in direct_children:
-                add_family_member(2, "Ребенок", c_inf)
+                c_gender = getattr(getattr(c_inf, "gender", None), "name", "MALE")
+                is_c_male = (c_gender == "MALE")
+                c_bits_names = []
+                if rel_tracker is not None:
+                    try:
+                        c_bits = rel_tracker.get_all_bits(c_inf.sim_id)
+                        c_bits_names = [getattr(b, "__name__", str(b)).lower() for b in c_bits]
+                    except Exception:
+                        pass
+                c_bits_str = " ".join(c_bits_names)
+                if any(k in c_bits_str for k in ["adoptive_child", "adopted"]):
+                    lbl = "Приёмный сын" if is_c_male else "Приёмная дочь"
+                elif "secret_child" in c_bits_str:
+                    lbl = "Тайный сын" if is_c_male else "Тайная дочь"
+                else:
+                    lbl = "Сын" if is_c_male else "Дочь"
+                add_family_member(2, lbl, c_inf)
 
-        # 3. Direct Parents of sim_info
+        # 3. Direct Parents of sim_info (biological, adoptive, step)
         direct_parents = _get_sim_parent_infos(sim_info, sim_info_mgr)
         if get_genealogy_type_flag("parents"):
             for p_inf in direct_parents:
-                add_family_member(3, "Родитель", p_inf)
+                p_gender = getattr(getattr(p_inf, "gender", None), "name", "MALE")
+                is_p_male = (p_gender == "MALE")
+                p_bits_names = []
+                if rel_tracker is not None:
+                    try:
+                        p_bits = rel_tracker.get_all_bits(p_inf.sim_id)
+                        p_bits_names = [getattr(b, "__name__", str(b)).lower() for b in p_bits]
+                    except Exception:
+                        pass
+                p_bits_str = " ".join(p_bits_names)
+                if any(k in p_bits_str for k in ["adoptive_parent", "adoptive_father", "adoptive_mother"]):
+                    lbl = "Приёмный отец" if is_p_male else "Приёмная мать"
+                elif "secret_parent" in p_bits_str:
+                    lbl = "Тайный отец" if is_p_male else "Тайная мать"
+                else:
+                    lbl = "Отец" if is_p_male else "Мать"
+                add_family_member(3, lbl, p_inf)
 
-        # 4. Direct Siblings of sim_info
+            # Step-parents (spouse of biological parent who is not sim's biological parent)
+            direct_p_ids = {p.sim_id for p in direct_parents if getattr(p, "sim_id", None)}
+            for p_inf in direct_parents:
+                for p_sp_inf, p_sp_type in _get_sim_spouses_and_partners_infos(p_inf, sim_info_mgr):
+                    p_sp_id = getattr(p_sp_inf, "sim_id", None)
+                    if not p_sp_id or p_sp_id in direct_p_ids or p_sp_id == sim_info.sim_id:
+                        continue
+                    p_sp_gender = getattr(getattr(p_sp_inf, "gender", None), "name", "MALE")
+                    is_p_sp_male = (p_sp_gender == "MALE")
+                    step_lbl = "Отчим" if is_p_sp_male else "Мачеха"
+                    add_family_member(3, step_lbl, p_sp_inf)
+
+        # 4. Direct Siblings of sim_info (Full, Half, Step)
         direct_siblings = _get_sim_sibling_infos(sim_info, sim_info_mgr)
         if get_genealogy_type_flag("siblings"):
+            sim_parent_map = {p.sim_id: p for p in direct_parents if getattr(p, "sim_id", None)}
             for s_inf in direct_siblings:
-                add_family_member(4, "Сиблинг", s_inf)
+                s_id = getattr(s_inf, "sim_id", None)
+                if not s_id or s_id == sim_info.sim_id:
+                    continue
+                s_gender = getattr(getattr(s_inf, "gender", None), "name", "MALE")
+                s_is_male = (s_gender == "MALE")
+
+                sib_parents = {p.sim_id: p for p in _get_sim_parent_infos(s_inf, sim_info_mgr) if getattr(p, "sim_id", None)}
+                common_p = set(sim_parent_map.keys()) & set(sib_parents.keys())
+
+                if len(common_p) >= 2:
+                    label = "Родной брат" if s_is_male else "Родная сестра"
+                elif len(common_p) == 1:
+                    cp_id = list(common_p)[0]
+                    cp_inf = sim_parent_map.get(cp_id)
+                    cp_gender = getattr(getattr(cp_inf, "gender", None), "name", "MALE") if cp_inf else "MALE"
+                    if cp_gender == "MALE":
+                        label = "Единокровный брат (общий отец)" if s_is_male else "Единокровная сестра (общий отец)"
+                    else:
+                        label = "Единоутробный брат (общая мать)" if s_is_male else "Единоутробная сестра (общая мать)"
+                else:
+                    label = "Сводный брат" if s_is_male else "Сводная сестра"
+
+                add_family_member(4, label, s_inf)
 
         # 5. Direct Grandparents of sim_info
         if get_genealogy_type_flag("grandparents"):
@@ -19227,6 +25928,52 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     title = "Дедушка" if gp_g == "MALE" else "Бабушка"
                     add_family_member(5, f"{title} ({side})", gp_inf)
 
+        # 5b. Deep Ancestors (3-е, 4-е, 5-е поколение и основатели династии)
+        max_dynasty_depth = get_genealogy_max_depth()
+        if max_dynasty_depth >= 3 and (get_genealogy_type_flag("ancestors_extended") or get_genealogy_type_flag("grandparents")):
+            current_ancestor_layer = []
+            visited_ancestors = {sim_info.sim_id}
+            for p_inf in direct_parents:
+                p_id = getattr(p_inf, "sim_id", None)
+                if p_id:
+                    visited_ancestors.add(p_id)
+                p_g = getattr(getattr(p_inf, "gender", None), "name", "MALE")
+                side = "линия отца" if p_g == "MALE" else "линия матери"
+                for gp_inf in _get_sim_parent_infos(p_inf, sim_info_mgr):
+                    gp_id = getattr(gp_inf, "sim_id", None)
+                    if gp_id:
+                        visited_ancestors.add(gp_id)
+                        current_ancestor_layer.append((gp_inf, 2, side))
+
+            curr_anc_depth = 2
+            while current_ancestor_layer and curr_anc_depth < max_dynasty_depth:
+                curr_anc_depth += 1
+                next_ancestor_layer = []
+                for anc_inf, anc_depth, anc_side in current_ancestor_layer:
+                    parents_of_anc = _get_sim_parent_infos(anc_inf, sim_info_mgr)
+                    for panc_inf in parents_of_anc:
+                        panc_id = getattr(panc_inf, "sim_id", None)
+                        if not panc_id or panc_id in visited_ancestors:
+                            continue
+                        visited_ancestors.add(panc_id)
+                        next_ancestor_layer.append((panc_inf, curr_anc_depth, anc_side))
+
+                        panc_g = getattr(getattr(panc_inf, "gender", None), "name", "MALE")
+                        is_panc_male = (panc_g == "MALE")
+
+                        if curr_anc_depth == 3:
+                            title = f"Прадедушка ({anc_side})" if is_panc_male else f"Прабабушка ({anc_side})"
+                        elif curr_anc_depth == 4:
+                            title = f"Прапрадедушка ({anc_side})" if is_panc_male else f"Прапрабабушка ({anc_side})"
+                        elif curr_anc_depth == 5:
+                            title = f"Прапрапрадедушка ({anc_side})" if is_panc_male else f"Прапрапрабабушка ({anc_side})"
+                        else:
+                            role = "прадедушка" if is_panc_male else "прабабушка"
+                            title = f"Предок в {curr_anc_depth}-м колене ({role}, {anc_side})"
+
+                        add_family_member(5, title, panc_inf)
+                current_ancestor_layer = next_ancestor_layer
+
         # 6. Direct Grandchildren of sim_info
         if get_genealogy_type_flag("grandchildren"):
             for c_inf in direct_children:
@@ -19237,6 +25984,49 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     title = "Внук" if gc_g == "MALE" else "Внучка"
                     sub = f"сын {'сына' if c_g == 'MALE' else 'дочери'}" if gc_g == "MALE" else f"дочь {'сына' if c_g == 'MALE' else 'дочери'}"
                     add_family_member(6, f"{title} ({sub})", gc_inf)
+
+        # 6b. Deep Descendants (3-е, 4-е, 5-е поколение и потомки династии)
+        if max_dynasty_depth >= 3 and (get_genealogy_type_flag("descendants_extended") or get_genealogy_type_flag("grandchildren")):
+            current_descendant_layer = []
+            visited_descendants = {sim_info.sim_id}
+            for c_inf in direct_children:
+                c_id = getattr(c_inf, "sim_id", None)
+                if c_id:
+                    visited_descendants.add(c_id)
+                for gc_inf in _get_sim_children_infos(c_inf, sim_info_mgr):
+                    gc_id = getattr(gc_inf, "sim_id", None)
+                    if gc_id:
+                        visited_descendants.add(gc_id)
+                        current_descendant_layer.append((gc_inf, 2))
+
+            curr_desc_depth = 2
+            while current_descendant_layer and curr_desc_depth < max_dynasty_depth:
+                curr_desc_depth += 1
+                next_descendant_layer = []
+                for desc_inf, desc_depth in current_descendant_layer:
+                    children_of_desc = _get_sim_children_infos(desc_inf, sim_info_mgr)
+                    for cdesc_inf in children_of_desc:
+                        cdesc_id = getattr(cdesc_inf, "sim_id", None)
+                        if not cdesc_id or cdesc_id in visited_descendants:
+                            continue
+                        visited_descendants.add(cdesc_id)
+                        next_descendant_layer.append((cdesc_inf, curr_desc_depth))
+
+                        cdesc_g = getattr(getattr(cdesc_inf, "gender", None), "name", "MALE")
+                        is_cdesc_male = (cdesc_g == "MALE")
+
+                        if curr_desc_depth == 3:
+                            title = "Правнук" if is_cdesc_male else "Правнучка"
+                        elif curr_desc_depth == 4:
+                            title = "Праправнук" if is_cdesc_male else "Праправнучка"
+                        elif curr_desc_depth == 5:
+                            title = "Прапраправнук" if is_cdesc_male else "Прапраправнучка"
+                        else:
+                            role = "правнук" if is_cdesc_male else "правнучка"
+                            title = f"Потомок в {curr_desc_depth}-м колене ({role})"
+
+                        add_family_member(6, title, cdesc_inf)
+                current_descendant_layer = next_descendant_layer
 
         # 7. Spouses of Children (Невестка, Зять, Жена сына, Муж дочери) AND their relatives (Сваты, братья/сестры невестки/зятя)
         for c_inf in direct_children:
@@ -19331,7 +26121,25 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     title = "Племянник" if sc_is_male else "Племянница"
                     add_family_member(9, f"{title} ({sub})", sc_inf)
 
-        # 10. Spouse's Parents & Siblings (Тесть, Тёща, Свёкор, Свекровь, Шурин, Деверь, Золовка, Свояченица)
+                    # Spouses of nephews / nieces
+                    for scp_inf, scp_type in _get_sim_spouses_and_partners_infos(sc_inf, sim_info_mgr):
+                        scp_id = getattr(scp_inf, "sim_id", None)
+                        if not scp_id or scp_id == sim_info.sim_id:
+                            continue
+                        scp_g = getattr(getattr(scp_inf, "gender", None), "name", "FEMALE")
+                        scp_title = "Жена племянника" if scp_g == "FEMALE" else "Муж племянницы"
+                        add_family_member(9, scp_title, scp_inf)
+
+                    # Children of nephews / nieces (Внучатые племянники)
+                    for sc_c_inf in _get_sim_children_infos(sc_inf, sim_info_mgr):
+                        sc_c_id = getattr(sc_c_inf, "sim_id", None)
+                        if not sc_c_id or sc_c_id == sim_info.sim_id:
+                            continue
+                        sc_c_g = getattr(getattr(sc_c_inf, "gender", None), "name", "MALE")
+                        sc_c_title = "Внучатый племянник" if sc_c_g == "MALE" else "Внучатая племянница"
+                        add_family_member(9, sc_c_title, sc_c_inf)
+
+        # 10. Spouse's Parents & Siblings (Тесть, Тёща, Свёкор, Свекровь, Шурин, Деверь, Золовка, Свояченица, Свояк)
         if get_genealogy_type_flag("spouse_in_laws"):
             my_gender = getattr(getattr(sim_info, "gender", None), "name", "FEMALE")
             sim_is_male = (my_gender == "MALE")
@@ -19363,7 +26171,23 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                             label = "Деверь (Брат мужа)" if sps_is_male else "Золовка (Сестра мужа)"
                         add_family_member(10, label, sps_inf)
 
-        # 11. Aunts, Uncles, Cousins (Дяди, Тети, Кузены)
+                        # Husband of sister-in-law (Свояк)
+                        if not sps_is_male and sim_is_male:
+                            for sps_sp_inf, _ in _get_sim_spouses_and_partners_infos(sps_inf, sim_info_mgr):
+                                sps_sp_id = getattr(sps_sp_inf, "sim_id", None)
+                                if not sps_sp_id or sps_sp_id == sim_info.sim_id:
+                                    continue
+                                sps_sp_g = getattr(getattr(sps_sp_inf, "gender", None), "name", "MALE")
+                                if sps_sp_g == "MALE":
+                                    add_family_member(10, "Свояк (Муж сестры жены)", sps_sp_inf)
+
+        # 10b. Ex-Partner's Relatives (Родители, братья/сестры, дети и партнеры бывших супругов/партнеров)
+        if get_genealogy_type_flag("ex_in_laws"):
+            ex_in_laws_list = _get_sim_ex_in_laws_infos(sim_info, sim_info_mgr)
+            for ex_rel_inf, ex_rel_lbl in ex_in_laws_list:
+                add_family_member(10, ex_rel_lbl, ex_rel_inf)
+
+        # 11. Aunts, Uncles, Cousins, and Extended Lineage
         if get_genealogy_type_flag("extended"):
             for p_inf in direct_parents:
                 p_name = getattr(p_inf, "first_name", "Родитель")
@@ -19382,6 +26206,16 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     sub = f"{'брат' if ps_is_male else 'сестра'} {p_title} ({p_name})"
                     add_family_member(11, f"{title} ({sub})", ps_inf)
 
+                    # Spouses of uncles and aunts (Дядя/Тётя по браку)
+                    for psp_inf, psp_type in _get_sim_spouses_and_partners_infos(ps_inf, sim_info_mgr):
+                        psp_id = getattr(psp_inf, "sim_id", None)
+                        if not psp_id or psp_id == sim_info.sim_id:
+                            continue
+                        psp_g = getattr(getattr(psp_inf, "gender", None), "name", "MALE")
+                        psp_is_male = (psp_g == "MALE")
+                        psp_title = "Дядя по браку" if psp_is_male else "Тётя по браку"
+                        add_family_member(11, f"{psp_title} [супруг(а): {getattr(ps_inf, 'first_name', '')}]", psp_inf)
+
                     cousins = _get_sim_children_infos(ps_inf, sim_info_mgr)
                     for cou_inf in cousins:
                         cou_id = getattr(cou_inf, "sim_id", None)
@@ -19391,6 +26225,36 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                         cou_is_male = (cou_gender == "MALE")
                         c_title = "Двоюродный брат (Кузен)" if cou_is_male else "Двоюродная сестра (Кузина)"
                         add_family_member(11, f"{c_title}", cou_inf)
+
+                        # Spouses of cousins
+                        for coup_inf, coup_type in _get_sim_spouses_and_partners_infos(cou_inf, sim_info_mgr):
+                            coup_id = getattr(coup_inf, "sim_id", None)
+                            if not coup_id or coup_id == sim_info.sim_id:
+                                continue
+                            coup_g = getattr(getattr(coup_inf, "gender", None), "name", "FEMALE")
+                            coup_title = "Муж кузины" if (coup_g == "MALE") else "Жена кузена"
+                            add_family_member(11, coup_title, coup_inf)
+
+                        # Children of cousins (Двоюродные племянники)
+                        for cou_child in _get_sim_children_infos(cou_inf, sim_info_mgr):
+                            cou_c_id = getattr(cou_child, "sim_id", None)
+                            if not cou_c_id or cou_c_id == sim_info.sim_id:
+                                continue
+                            cou_c_g = getattr(getattr(cou_child, "gender", None), "name", "MALE")
+                            c_sub_title = "Двоюродный племянник" if cou_c_g == "MALE" else "Двоюродная племянница"
+                            add_family_member(11, c_sub_title, cou_child)
+
+            # Grandparents' siblings (Двоюродные дедушки и бабушки)
+            if get_genealogy_type_flag("extended") or get_genealogy_type_flag("grandparents"):
+                for p_inf in direct_parents:
+                    for gp_inf in _get_sim_parent_infos(p_inf, sim_info_mgr):
+                        for gps_inf in _get_sim_sibling_infos(gp_inf, sim_info_mgr):
+                            gps_id = getattr(gps_inf, "sim_id", None)
+                            if not gps_id or gps_id == sim_info.sim_id:
+                                continue
+                            gps_g = getattr(getattr(gps_inf, "gender", None), "name", "MALE")
+                            gps_title = "Двоюродный дедушка" if gps_g == "MALE" else "Двоюродная бабушка"
+                            add_family_member(11, gps_title, gps_inf)
 
         # 12. Grandchildren's Spouses
         if get_genealogy_type_flag("child_spouses") or get_genealogy_type_flag("extended"):
@@ -19448,6 +26312,12 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                         add_family_member(5, "Дедушка/Бабушка", r_info)
                     elif rel_type == "grandchild" and get_genealogy_type_flag("grandchildren"):
                         add_family_member(6, "Внук/Внучка", r_info)
+                    elif rel_type == "great_grandparent" and (get_genealogy_type_flag("ancestors_extended") or get_genealogy_type_flag("grandparents")):
+                        label = "Прадедушка" if g_name == "MALE" else "Прабабушка"
+                        add_family_member(5, label, r_info)
+                    elif rel_type == "great_grandchild" and (get_genealogy_type_flag("descendants_extended") or get_genealogy_type_flag("grandchildren")):
+                        label = "Правнук" if g_name == "MALE" else "Правнучка"
+                        add_family_member(6, label, r_info)
                     elif rel_type == "cousin" and get_genealogy_type_flag("extended"):
                         label = "Двоюродный брат (Кузен)" if g_name == "MALE" else "Двоюродная сестра (Кузина)"
                         add_family_member(11, label, r_info)
@@ -19478,6 +26348,44 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                     elif rel_type == "in_law" and get_genealogy_type_flag("spouse_in_laws"):
                         label = "Родственница по браку" if g_name == "FEMALE" else "Родственник по браку"
                         add_family_member(13, label, r_info)
+                    elif rel_type == "ex_spouse" and get_genealogy_type_flag("ex_partners"):
+                        label = "Бывшая жена" if g_name == "FEMALE" else "Бывший муж"
+                        add_family_member(1, label, r_info)
+                    elif rel_type == "ex_fiance" and get_genealogy_type_flag("ex_partners"):
+                        label = "Бывшая невеста" if g_name == "FEMALE" else "Бывший жених"
+                        add_family_member(1, label, r_info)
+                    elif rel_type == "widowed" and get_genealogy_type_flag("ex_partners"):
+                        label = "Покойная жена (Вдова)" if g_name == "FEMALE" else "Покойный муж (Вдовец)"
+                        add_family_member(1, label, r_info)
+                    elif rel_type == "broken_up" and get_genealogy_type_flag("ex_partners"):
+                        label = "Бывшая девушка" if g_name == "FEMALE" else "Бывший парень"
+                        add_family_member(1, label, r_info)
+                    elif rel_type == "adoptive_parent" and get_genealogy_type_flag("parents"):
+                        label = "Приёмный отец" if g_name == "MALE" else "Приёмная мать"
+                        add_family_member(3, label, r_info)
+                    elif rel_type == "adoptive_child" and get_genealogy_type_flag("children"):
+                        label = "Приёмный сын" if g_name == "MALE" else "Приёмная дочь"
+                        add_family_member(2, label, r_info)
+                    elif rel_type == "secret_parent" and get_genealogy_type_flag("parents"):
+                        label = "Тайный отец" if g_name == "MALE" else "Тайная мать"
+                        add_family_member(3, label, r_info)
+                    elif rel_type == "secret_child" and get_genealogy_type_flag("children"):
+                        label = "Тайный сын" if g_name == "MALE" else "Тайная дочь"
+                        add_family_member(2, label, r_info)
+                    elif rel_type == "caregiver":
+                        add_family_member(3, "Опекун", r_info)
+                    elif rel_type == "care_dependent":
+                        label = "Подопечная" if g_name == "FEMALE" else "Подопечный"
+                        add_family_member(2, label, r_info)
+                    elif rel_type == "grandparent_sibling" and (get_genealogy_type_flag("extended") or get_genealogy_type_flag("grandparents")):
+                        label = "Двоюродный дедушка" if g_name == "MALE" else "Двоюродная бабушка"
+                        add_family_member(11, label, r_info)
+                    elif rel_type == "grand_niece_nephew" and get_genealogy_type_flag("sibling_family"):
+                        label = "Внучатый племянник" if g_name == "MALE" else "Внучатая племянница"
+                        add_family_member(9, label, r_info)
+                    elif rel_type == "half_sibling" and get_genealogy_type_flag("siblings"):
+                        label = "Неполнородный брат" if g_name == "MALE" else "Неполнородная сестра"
+                        add_family_member(4, label, r_info)
                     else:
                         bits_names = [getattr(b, "__name__", str(b)).lower() for b in bits]
                         bits_str = " ".join(bits_names)
@@ -19528,6 +26436,10 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                                 label = "Любовница [замужняя женщина / измена её мужу]" if is_female else "Любовник [женатый мужчина / измена его жене]"
                             elif any(k in bits_str for k in ["lovers", "affair", "cheating"]):
                                 label = "Любовница" if is_female else "Любовник"
+                            elif any(k in bits_str for k in ["woohoo_partner", "friends_with_benefits"]):
+                                label = "Секс по дружбе"
+                            elif "crush" in bits_str:
+                                label = "Симпатия / Влюбленность"
                             else:
                                 label = "Девушка" if is_female else "Парень"
                             add_family_member(1, label, r_info)
@@ -19669,6 +26581,9 @@ def get_sim_family_info(sim_info, max_relatives: int = None) -> list:
                         qual_str = "Лично ещё не знакомы"
 
             details = [status_str]
+            r_staff_role = get_sim_domestic_staff_role(r_info, active_sim_info=sim_info)
+            if r_staff_role:
+                details.append(f"Служит в доме: {r_staff_role}")
             if r_age and r_age not in ("Взрослый", "Молодой"):
                 details.append(r_age)
             if qual_str:
@@ -20886,6 +27801,55 @@ def get_pet_current_activity(sim_info) -> str:
     return "Лениво осматривается по сторонам, прислушиваясь к звукам в доме" if is_cat else "Стоит на месте, навострив уши и виляя хвостом"
 
 
+def is_family_or_partner_relationship(rel_label: str) -> bool:
+    """
+    Checks if a relationship label string from get_relationship_between_sims indicates
+    a family, blood relative, in-law, adoptive/step, or romantic relationship.
+    """
+    if not rel_label:
+        return False
+    l_low = rel_label.lower()
+    KINSHIP_AND_ROMANCE_ROOTS = (
+        # Immediate family & siblings
+        "мать", "отец", "родител", "сын", "дочь", "дочк",
+        "брат", "сестр", "сиблинг",
+        "единокровн", "единоутробн", "сводн",
+        # Generations & descendants
+        "дедушк", "бабушк", "внук", "внучк",
+        "прадедушк", "прабабушк", "правнук", "правнучк",
+        "предок", "потомок",
+        # Extended
+        "дядя", "тетя", "тётя", "кузен", "кузина", "двоюродн",
+        "племянни", "внучат",
+        # Step & Adoptive & Special
+        "пасынок", "падчериц", "отчим", "мачех",
+        "приёмн", "приемн", "опекун", "подопечн",
+        "тайн",
+        # In-laws & Marital family
+        "невестк", "снох", "зять", "свёкор", "свекров", "тесть", "тёщ",
+        "девер", "шурин", "золовк", "своячениц", "свояк", "сват", "по браку",
+        "родственни",
+        # Spouses & Romantic partners
+        "муж", "жена", "супруг", "жених", "невест", "парень", "девушк",
+        "любовни", "партнёр", "партнер", "секс по дружбе", "вуху", "влюблен", "романтич",
+        # Ex-partners
+        "бывш", "вдов", "покойн",
+        # Incest
+        "инцест",
+        # English equivalents just in case
+        "mother", "father", "parent", "son", "daughter", "child",
+        "brother", "sister", "sibling", "half-brother", "half-sister", "step-brother", "step-sister",
+        "grandmother", "grandfather", "grandparent", "grandchild", "grandson", "granddaughter",
+        "great-grand", "great_grand", "ancestor", "descendant",
+        "aunt", "uncle", "cousin", "niece", "nephew",
+        "stepchild", "stepson", "stepdaughter", "stepparent", "stepfather", "stepmother",
+        "in-law", "in_law", "inlaw",
+        "spouse", "husband", "wife", "fianc", "boyfriend", "girlfriend", "partner", "lover",
+        "ex-", "widow"
+    )
+    return any(root in l_low for root in KINSHIP_AND_ROMANCE_ROOTS)
+
+
 def get_household_roommates_info(sim_info) -> list:
     """
     Returns list of roommates / housemates who live in the same household with sim_info,
@@ -20949,7 +27913,7 @@ def get_household_roommates_info(sim_info) -> list:
                 continue
 
             other_id = getattr(other_info, "sim_id", None)
-            if not other_id:
+            if not other_id or other_id == my_id:
                 continue
 
             # 1. Check spouse
@@ -20958,7 +27922,43 @@ def get_household_roommates_info(sim_info) -> list:
             if getattr(other_info, "spouse_sim_id", None) == my_id:
                 continue
 
-            # 2. Check genealogy
+            # Exclude domestic staff / live-in servants (Butler, Maid, Nanny, etc.)
+            if get_sim_domestic_staff_role(other_info, active_sim_info=sim_info):
+                continue
+
+            # 2. Complete relationship check between sims (catches all kinship, half/step/adoptive/ex-partners)
+            rel_label = get_relationship_between_sims(sim_info, other_info)
+            if is_family_or_partner_relationship(rel_label):
+                continue
+
+            # 2b. Exclude relatives of ex-partners (parents, siblings, etc. of ex-wife/husband)
+            if get_genealogy_type_flag("ex_in_laws") and services is not None:
+                try:
+                    s_mgr = services.sim_info_manager() if hasattr(services, "sim_info_manager") else None
+                    if s_mgr is not None:
+                        is_ex_in_law_sim = False
+                        for ex_rel_inf, _ in _get_sim_ex_in_laws_infos(sim_info, s_mgr):
+                            if ex_rel_inf and getattr(ex_rel_inf, "sim_id", None) == other_id:
+                                is_ex_in_law_sim = True
+                                break
+                        if is_ex_in_law_sim:
+                            continue
+                except Exception:
+                    pass
+
+            # 3. Direct shared parents check (half / full / step siblings fallback)
+            target_genealogy = getattr(other_info, "genealogy", None)
+            if genealogy is not None and target_genealogy is not None:
+                sim_parent_ids = set()
+                target_parent_ids = set()
+                if hasattr(genealogy, "get_parent_sim_ids"):
+                    sim_parent_ids.update(genealogy.get_parent_sim_ids() or ())
+                if hasattr(target_genealogy, "get_parent_sim_ids"):
+                    target_parent_ids.update(target_genealogy.get_parent_sim_ids() or ())
+                if sim_parent_ids and target_parent_ids and (sim_parent_ids & target_parent_ids):
+                    continue
+
+            # 4. Check genealogy direct parent/child/sibling ties
             is_family = False
             if genealogy is not None:
                 if hasattr(genealogy, "get_parent_sim_ids") and other_id in (genealogy.get_parent_sim_ids() or ()):
@@ -20979,7 +27979,7 @@ def get_household_roommates_info(sim_info) -> list:
             if is_family:
                 continue
 
-            # 3. Check relationship bits & romance tracks
+            # 5. Check relationship bits & romance tracks
             bits = []
             if rel_tracker is not None:
                 try:
@@ -21038,8 +28038,6 @@ def get_household_roommates_info(sim_info) -> list:
             r_age_raw = getattr(getattr(other_info, "age", None), "name", "ADULT")
             r_age = AGE_TRANSLATIONS.get(r_age_raw, "Взрослый")
 
-            # Social relation label
-            rel_label = get_relationship_between_sims(sim_info, other_info)
             if not rel_label or rel_label == "Незнакомец / Не знаком":
                 rel_label = "Соседка по дому" if is_female else "Сосед по дому"
 
@@ -21069,6 +28067,493 @@ def get_household_roommates_info(sim_info) -> list:
         log_exception("Error getting household roommates info", e)
 
     return roommates
+
+def _detect_staff_role_from_traits(sim_info):
+    if sim_info is None:
+        return None
+    tracker = getattr(sim_info, "trait_tracker", None)
+    if tracker is None:
+        return None
+    traits = getattr(tracker, "traits", None) or []
+    for t in traits:
+        t_name = getattr(t, "__name__", str(t)).lower()
+        guid = getattr(t, "guid64", 0)
+        if "butler" in t_name or guid == 145804:
+            return "butler"
+        if "maid" in t_name:
+            return "maid"
+        if "nanny" in t_name:
+            return "nanny"
+        if "gardener" in t_name:
+            return "gardener"
+        if "repair" in t_name or "handyman" in t_name:
+            return "repairman"
+    return None
+
+
+def _detect_staff_role_from_buffs(sim_info):
+    if sim_info is None:
+        return None
+    buff_tracker = getattr(sim_info, "Buffs", None) or getattr(sim_info, "buff_component", None)
+    if buff_tracker is None:
+        return None
+    try:
+        if hasattr(buff_tracker, "get_all_buffs"):
+            for b in buff_tracker.get_all_buffs():
+                b_name = getattr(b, "__name__", str(b)).lower()
+                if "butler" in b_name:
+                    return "butler"
+                if "maid" in b_name:
+                    return "maid"
+                if "nanny" in b_name:
+                    return "nanny"
+    except Exception:
+        pass
+    return None
+
+
+def _detect_staff_role_from_situations(sim_info):
+    if services is None or sim_info is None:
+        return None
+    try:
+        sit_mgr = services.get_zone_situation_manager()
+        if sit_mgr is None:
+            return None
+        target_id = getattr(sim_info, "sim_id", None)
+        if not target_id:
+            return None
+
+        for sit in sit_mgr.get_all():
+            sit_name = sit.__class__.__name__.lower()
+            matched_role = None
+            if "butler" in sit_name:
+                matched_role = "butler"
+            elif "maid" in sit_name:
+                matched_role = "maid"
+            elif "nanny" in sit_name:
+                matched_role = "nanny"
+            elif "gardener" in sit_name:
+                matched_role = "gardener"
+            elif "repair" in sit_name:
+                matched_role = "repairman"
+
+            if not matched_role:
+                continue
+
+            if hasattr(sit, "service_sim"):
+                try:
+                    s_sim = sit.service_sim()
+                    if s_sim is not None:
+                        s_id = getattr(s_sim, "sim_id", None) or getattr(getattr(s_sim, "sim_info", None), "sim_id", None)
+                        if s_id and int(s_id) == int(target_id):
+                            return matched_role
+                except Exception:
+                    pass
+            elif hasattr(sit, "all_sims_in_situation_gen"):
+                try:
+                    for s in sit.all_sims_in_situation_gen():
+                        s_id = getattr(s, "sim_id", None) or getattr(getattr(s, "sim_info", None), "sim_id", None)
+                        if s_id and int(s_id) == int(target_id):
+                            return matched_role
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+_VERIFIED_HOUSEHOLD_STAFF = {}
+
+
+def _get_role_from_service_record(rec):
+    if rec is None:
+        return None
+    try:
+        tuning = getattr(rec, "service_tuning", None)
+        if tuning is None and hasattr(services, "get_instance_manager"):
+            try:
+                import sims4.resources
+                mgr = services.get_instance_manager(sims4.resources.Types.SERVICE_NPC)
+                if mgr:
+                    tuning = mgr.get(getattr(rec, "service_id", None) or getattr(rec, "_service_id", None))
+            except Exception:
+                pass
+        tuning_str = f"{getattr(tuning, '__name__', '')} {str(rec)}".lower()
+        if "butler" in tuning_str:
+            return "butler"
+        if "maid" in tuning_str:
+            return "maid"
+        if "nanny" in tuning_str:
+            return "nanny"
+        if "gardener" in tuning_str:
+            return "gardener"
+        if "repair" in tuning_str:
+            return "repairman"
+    except Exception:
+        pass
+    return None
+
+
+def _detect_staff_role_from_household_records(sim_info, household=None):
+    if household is None and services is not None:
+        try:
+            household = services.active_household()
+        except Exception:
+            household = None
+    if household is None or sim_info is None:
+        return None
+    target_id = getattr(sim_info, "sim_id", None)
+    if not target_id:
+        return None
+    try:
+        h_id = getattr(household, "id", None)
+        records = getattr(household, "_service_npc_record", None) or getattr(household, "_service_npc_records", None) or {}
+        if isinstance(records, dict):
+            for rec in records.values():
+                if not getattr(rec, "hired", False):
+                    continue
+
+                rec_role = _get_role_from_service_record(rec)
+                if not rec_role:
+                    continue
+
+                # Check if we have a verified active staff ID for this household & role
+                if h_id and (h_id, rec_role) in _VERIFIED_HOUSEHOLD_STAFF:
+                    if int(target_id) == int(_VERIFIED_HOUSEHOLD_STAFF[(h_id, rec_role)]):
+                        return rec_role
+                    else:
+                        continue
+
+                # Check preferred IDs with smart scoring
+                pref_ids = getattr(rec, "_preferred_service_sim_ids", None) or getattr(rec, "preferred_sim_ids", None)
+                if pref_ids:
+                    if len(pref_ids) > 1 and services is not None:
+                        sim_mgr = services.sim_info_manager()
+                        best_id = None
+                        best_score = -1
+                        for pid in pref_ids:
+                            p_info = sim_mgr.get(pid) if sim_mgr else None
+                            if p_info:
+                                score = 0
+                                if hasattr(p_info, "get_sim_instance") and p_info.get_sim_instance():
+                                    score += 100
+                                rel = get_relationship_between_sims(sim_info, p_info)
+                                if rel and "незнаком" not in rel.lower():
+                                    score += 50
+                                if score > best_score:
+                                    best_score = score
+                                    best_id = pid
+                        if best_id:
+                            if int(target_id) == int(best_id):
+                                return rec_role
+                            else:
+                                continue
+
+                    if int(target_id) in [int(x) for x in pref_ids]:
+                        return rec_role
+
+                if hasattr(rec, "get_preferred_sim_id"):
+                    assigned_id = None
+                    try:
+                        assigned_id = rec.get_preferred_sim_id(household)
+                    except Exception:
+                        try:
+                            assigned_id = rec.get_preferred_sim_id()
+                        except Exception:
+                            assigned_id = None
+                    if assigned_id and int(target_id) == int(assigned_id):
+                        return rec_role
+    except Exception:
+        pass
+    return None
+
+
+def get_sim_domestic_staff_role(target_info, active_sim_info=None, is_en=False) -> str:
+    """
+    Returns localized role string if target_info is a household domestic staff/servant.
+    E.g. 'Дворецкий семьи' / 'Family Butler', 'Горничная' / 'Maid', 'Няня семьи' / 'Family Nanny'.
+    Returns empty string '' if target_info is not domestic staff.
+    """
+    if target_info is None:
+        return ""
+
+    household = getattr(active_sim_info, "household", None) if active_sim_info else None
+    if household is None and services is not None:
+        try:
+            household = services.active_household()
+        except Exception:
+            household = None
+
+    # Priority 1: Check active situations on lot or household hired records
+    role_key = (
+        _detect_staff_role_from_situations(target_info)
+        or _detect_staff_role_from_household_records(target_info, household)
+    )
+
+    # Priority 2: If target is the ACTIVE sim itself (player is playing as butler/maid)
+    if not role_key and active_sim_info is not None:
+        target_id = getattr(target_info, "sim_id", None)
+        active_id = getattr(active_sim_info, "sim_id", None)
+        if target_id and active_id and target_id == active_id:
+            role_key = _detect_staff_role_from_traits(target_info) or _detect_staff_role_from_buffs(target_info)
+
+    if not role_key:
+        return ""
+
+    ROLES_RU = {
+        "butler": "Дворецкий семьи",
+        "maid": "Горничная",
+        "nanny": "Няня семьи",
+        "gardener": "Садовник",
+        "repairman": "Мастер по ремонту",
+    }
+    ROLES_EN = {
+        "butler": "Family Butler",
+        "maid": "Maid",
+        "nanny": "Family Nanny",
+        "gardener": "Gardener",
+        "repairman": "Repair Technician",
+    }
+
+    return ROLES_EN.get(role_key, "Domestic Staff") if is_en else ROLES_RU.get(role_key, "Домашняя прислуга")
+
+
+def get_household_livein_staff_info(sim_info, is_en=False) -> list:
+    """
+    Returns list of formatted descriptions for domestic staff / live-in servants currently hired by household.
+    Specifically detects the single active Butler (Vintage Glamour SP09), Live-in Nannies, Maids, Gardeners.
+    Works BOTH when at home lot and when traveling / away from home.
+    E.g. 'Цюбаса Таканаси (Дворецкий семьи — проживает в доме / на службе семьи, Взрослый, Мужской, Занятие: отдыхает)'
+    """
+    staff_entries = []
+    if sim_info is None or services is None:
+        return staff_entries
+
+    try:
+        active_id = getattr(sim_info, "sim_id", None)
+        active_role = get_sim_domestic_staff_role(sim_info, is_en=is_en)
+
+        # If the active Sim itself is domestic staff (e.g. playing as the Butler)
+        if active_role:
+            if is_en:
+                return [f"{active_role} (You are in service of this household)"]
+            else:
+                return [f"{active_role} (Вы состоите на службе и проживаете в доме семьи)"]
+
+        seen_staff_ids = set()
+        filled_roles = set()
+        candidates = []
+        household = getattr(sim_info, "household", None) or services.active_household()
+        h_id = getattr(household, "id", None) if household else None
+
+        # 1. Collect from active lot situations (Butler, Nanny, Maid, etc. currently active on lot)
+        sit_mgr = services.get_zone_situation_manager()
+        if sit_mgr is not None:
+            for sit in sit_mgr.get_all():
+                sit_name = sit.__class__.__name__.lower()
+                matched_role = None
+                if "butler" in sit_name:
+                    matched_role = "butler"
+                elif "maid" in sit_name:
+                    matched_role = "maid"
+                elif "nanny" in sit_name:
+                    matched_role = "nanny"
+                elif "gardener" in sit_name:
+                    matched_role = "gardener"
+                elif "repair" in sit_name:
+                    matched_role = "repairman"
+
+                if not matched_role or matched_role in filled_roles:
+                    continue
+
+                if hasattr(sit, "service_sim"):
+                    try:
+                        s_sim = sit.service_sim()
+                        s_info = getattr(s_sim, "sim_info", None) if s_sim else None
+                        if s_info:
+                            s_id = getattr(s_info, "sim_id", None)
+                            if s_id and s_id != active_id and s_id not in seen_staff_ids:
+                                seen_staff_ids.add(s_id)
+                                filled_roles.add(matched_role)
+                                candidates.append((s_info, matched_role))
+                                if h_id:
+                                    _VERIFIED_HOUSEHOLD_STAFF[(h_id, matched_role)] = int(s_id)
+                    except Exception:
+                        pass
+
+        # 2. Check household hired service records (Works both at home and when away from home!)
+        # ONLY picks the single assigned preferred sim for each hired service record!
+        if household:
+            try:
+                records = getattr(household, "_service_npc_record", None) or getattr(household, "_service_npc_records", None) or {}
+                if isinstance(records, dict):
+                    sim_mgr = services.sim_info_manager()
+                    for rec in records.values():
+                        rec_role = _get_role_from_service_record(rec)
+                        if not rec_role:
+                            continue
+
+                        # If service was cancelled/fired by household, clear verified cache and skip
+                        if not getattr(rec, "hired", False):
+                            if h_id:
+                                _VERIFIED_HOUSEHOLD_STAFF.pop((h_id, rec_role), None)
+                            continue
+
+                        if rec_role in filled_roles:
+                            # Already filled by active lot situation!
+                            continue
+
+                        fired_ids = set(getattr(rec, "_fired_service_sim_ids", None) or getattr(rec, "fired_sim_ids", None) or ())
+
+                        # Find the assigned Sim ID
+                        assigned_id = None
+
+                        # Check verified staff first, ensuring the sim is not dead or fired
+                        if h_id and (h_id, rec_role) in _VERIFIED_HOUSEHOLD_STAFF:
+                            v_id = _VERIFIED_HOUSEHOLD_STAFF[(h_id, rec_role)]
+                            v_info = sim_mgr.get(v_id) if sim_mgr else None
+                            if v_info and not getattr(v_info, "is_dead", False) and v_id not in fired_ids:
+                                assigned_id = v_id
+                            else:
+                                _VERIFIED_HOUSEHOLD_STAFF.pop((h_id, rec_role), None)
+
+                        # Check preferred IDs with smart scoring (excluding dead and fired sims)
+                        if not assigned_id:
+                            pref_ids = getattr(rec, "_preferred_service_sim_ids", None) or getattr(rec, "preferred_sim_ids", None)
+                            if pref_ids:
+                                valid_prefs = [pid for pid in pref_ids if pid not in fired_ids]
+                                if len(valid_prefs) > 1 and sim_mgr:
+                                    best_id = None
+                                    best_score = -1
+                                    for pid in valid_prefs:
+                                        p_info = sim_mgr.get(pid)
+                                        if p_info and not getattr(p_info, "is_dead", False):
+                                            score = 0
+                                            if hasattr(p_info, "get_sim_instance") and p_info.get_sim_instance():
+                                                score += 100
+                                            rel = get_relationship_between_sims(sim_info, p_info)
+                                            if rel and "незнаком" not in rel.lower():
+                                                score += 50
+                                            if score > best_score:
+                                                best_score = score
+                                                best_id = pid
+                                    assigned_id = best_id or (valid_prefs[0] if valid_prefs else None)
+                                elif valid_prefs:
+                                    assigned_id = valid_prefs[0]
+
+                        if not assigned_id and hasattr(rec, "get_preferred_sim_id"):
+                            try:
+                                candidate_id = rec.get_preferred_sim_id(household)
+                            except Exception:
+                                try:
+                                    candidate_id = rec.get_preferred_sim_id()
+                                except Exception:
+                                    candidate_id = None
+                            if candidate_id and candidate_id not in fired_ids:
+                                assigned_id = candidate_id
+
+                        if assigned_id and assigned_id != active_id and assigned_id not in seen_staff_ids:
+                            s_info = sim_mgr.get(assigned_id) if sim_mgr else None
+                            if s_info and not getattr(s_info, "is_dead", False):
+                                seen_staff_ids.add(assigned_id)
+                                filled_roles.add(rec_role)
+                                candidates.append((s_info, rec_role))
+                                if h_id:
+                                    _VERIFIED_HOUSEHOLD_STAFF[(h_id, rec_role)] = int(assigned_id)
+            except Exception:
+                pass
+
+        # Determine if active sim is currently at the home lot or traveling / away from home
+        is_at_home = True
+        try:
+            curr_zone = services.current_zone_id() if hasattr(services, "current_zone_id") else None
+            home_zone = getattr(household, "home_zone_id", None) if household else None
+            if curr_zone and home_zone and curr_zone != home_zone:
+                is_at_home = False
+        except Exception:
+            pass
+
+        # Format candidate entries
+        for c_info, c_role in candidates:
+            role_title = get_sim_domestic_staff_role(c_info, active_sim_info=sim_info, is_en=is_en)
+            if not role_title:
+                ROLES_RU = {
+                    "butler": "Дворецкий семьи",
+                    "maid": "Горничная",
+                    "nanny": "Няня семьи",
+                    "gardener": "Садовник",
+                    "repairman": "Мастер по ремонту",
+                }
+                ROLES_EN = {
+                    "butler": "Family Butler",
+                    "maid": "Maid",
+                    "nanny": "Family Nanny",
+                    "gardener": "Gardener",
+                    "repairman": "Repair Technician",
+                }
+                role_title = ROLES_EN.get(c_role, "Domestic Staff") if is_en else ROLES_RU.get(c_role, "Домашняя прислуга")
+            if not role_title:
+                continue
+
+            c_first = getattr(c_info, "first_name", "") or "Сим"
+            c_last = getattr(c_info, "last_name", "") or ""
+            c_full = f"{c_first} {c_last}".strip()
+
+            c_gender_raw = getattr(getattr(c_info, "gender", None), "name", "MALE")
+            c_is_female = (c_gender_raw == "FEMALE")
+            if is_en:
+                c_gender = "Female" if c_is_female else "Male"
+            else:
+                c_gender = "Женский" if c_is_female else "Мужской"
+
+            c_age_raw = getattr(getattr(c_info, "age", None), "name", "ADULT")
+            if is_en:
+                c_age = c_age_raw.capitalize()
+            else:
+                c_age = AGE_TRANSLATIONS.get(c_age_raw, "Взрослый")
+
+            # Check if this staff member is instanced on current lot
+            c_instance = c_info.get_sim_instance() if hasattr(c_info, "get_sim_instance") else None
+            is_on_current_lot = (c_instance is not None)
+
+            duty_desc = ""
+            if "butler" in role_title.lower() or "дворецк" in role_title.lower():
+                if not is_at_home and not is_on_current_lot:
+                    duty_desc = "live-in domestic staff, in service of the household (at the family estate)" if is_en else "проживает в доме / на службе семьи (находится дома в поместье)"
+                else:
+                    duty_desc = "live-in domestic staff, in service of the household" if is_en else "проживает в доме / на службе семьи"
+            elif "maid" in role_title.lower() or "горничн" in role_title.lower():
+                duty_desc = "daily cleaning and housekeeping" if is_en else "уборка и поддержание чистоты"
+            elif "nanny" in role_title.lower() or "нян" in role_title.lower():
+                duty_desc = "childcare and supervision" if is_en else "присмотр и забота о детях"
+            elif "gardener" in role_title.lower() or "садовник" in role_title.lower():
+                duty_desc = "garden care and maintenance" if is_en else "уход за растениями и садом"
+
+            # Check if domestic staff is also a family member / relative
+            rel_with_active = get_relationship_between_sims(sim_info, c_info)
+            rel_note = ""
+            if rel_with_active and not any(k in rel_with_active.lower() for k in ["незнаком", "знаком", "дворецк", "прислуг"]):
+                rel_note = f"Родственная связь: {rel_with_active}" if not is_en else f"Family relative: {rel_with_active}"
+
+            details = [f"{role_title} — {duty_desc}" if duty_desc else role_title]
+            if rel_note:
+                details.append(rel_note)
+            details.append(f"{c_age}, {c_gender}")
+
+            if not is_en:
+                if is_on_current_lot:
+                    c_activity = get_current_activity(c_info)
+                    if c_activity:
+                        details.append(f"Занятие: {c_activity}")
+                elif not is_at_home:
+                    details.append("Занятие: Находится дома в поместье семьи")
+
+            staff_entries.append(f"{c_full} ({', '.join(details)})")
+
+    except Exception as e:
+        log_exception("Error getting household livein staff info", e)
+
+    return staff_entries
 
 
 def get_household_pets_info(sim_info) -> list:
@@ -21188,15 +28673,23 @@ def build_pet_prompt(sim_info) -> str:
                 weather_ru=weather,
                 custom_lore=p_lore,
                 flags_func=get_context_flag,
+                sim_info=sim_info,
             )
             log(f"Generated Pet Context Prompt (EN) for {first_name} ({species_name}):\n{prompt}")
             return prompt
         except Exception as e_pet_en:
             log_exception("Error in build_pet_prompt_en", e_pet_en)
 
+    trapped_tag = ""
+    try:
+        from ai_thought_reader.trapped_detector import get_sim_trapped_status
+        trapped_tag = get_sim_trapped_status(sim_info, is_en=False)
+    except Exception:
+        pass
+
     lines = [
         f"Информация о домашнем животном ({species_name}):",
-        f"- Кличка: {first_name}",
+        f"- Кличка: {first_name}{trapped_tag}",
         f"- Вид: {species_name}",
         f"- Возраст и пол: {age_gender}",
     ]
@@ -21206,7 +28699,8 @@ def build_pet_prompt(sim_info) -> str:
         lines.append(f"- Время года: {season}")
         lines.append(f"- Погода: {weather}")
     lines.append(f"- Текущее действие: {activity}")
-    lines.append(f"- Текущее настроение: {mood}")
+    if get_context_flag("mood"):
+        lines.append(f"- Текущее настроение: {mood}")
     lines.append(f"- Состояние потребностей: {motives}")
     lines.append(f"- Черты характера и повадки: {traits}")
 
@@ -21335,21 +28829,83 @@ def build_sim_prompt(sim_info) -> str:
     pregnancy = get_sim_pregnancy_info(sim_info)
     fame_info = get_sim_fame_and_reputation_info(sim_info)
 
+    trapped_tag = ""
+    try:
+        from ai_thought_reader.trapped_detector import get_sim_trapped_status
+        trapped_tag = get_sim_trapped_status(sim_info, is_en=False)
+    except Exception:
+        pass
+
     # Build prompt blocks
     lines = [
         "Информация о персонаже:",
-        f"- Имя: {full_name}",
-        f"- Возраст и пол: {age}, {gender}",
-        f"- Раса: {sim_race}",
+        f"- Имя: {full_name}{trapped_tag}",
     ]
+
+    if get_context_flag("age_gender"):
+        lines.append(f"- Возраст и пол: {age}, {gender}")
+
+    if get_context_flag("occult"):
+        lines.append(f"- Раса: {sim_race}")
 
     if get_context_flag("world_time"):
         lines.append(f"- Время в игре: {world_time}")
+
     if get_context_flag("weather"):
         lines.append(f"- Время года: {season}")
         lines.append(f"- Погода: {weather}")
-    if get_context_flag("world_time") and holiday:
-        lines.append(f"- Праздник: {holiday}")
+
+    active_event = None
+    if get_context_flag("events"):
+        if holiday:
+            lines.append(f"- Праздник: {holiday}")
+        active_event = get_active_social_event_info(sim_info, is_en=False)
+        if active_event and isinstance(active_event, dict):
+            ev_name = active_event.get("event_name", "")
+            ev_role = active_event.get("role")
+            is_part = active_event.get("is_participant", False)
+            is_on_lot = active_event.get("is_on_lot", True)
+            is_hh_mem = active_event.get("is_household_member", False)
+            is_resid = active_event.get("is_residential", True)
+            if ev_name:
+                if is_part and ev_role:
+                    lines.append(f"- Активное мероприятие: {ev_name} (Роль: {ev_role})")
+                elif is_part:
+                    lines.append(f"- Активное мероприятие: {ev_name} (Участник)")
+                elif not is_on_lot:
+                    lines.append(
+                        f"- Мероприятие поблизости (на участке): {ev_name} "
+                        f"(Персонаж НЕ приглашён и не участвует — просто проходит мимо по улице / гуляет по району)"
+                    )
+                elif is_hh_mem:
+                    lines.append(
+                        f"- Мероприятие в доме: {ev_name} "
+                        f"(Член семьи / жилец дома — праздник проходит у него дома, но персонаж не записан как официальный участник)"
+                    )
+                elif is_resid:
+                    lines.append(
+                        f"- Активное мероприятие на участке: {ev_name} "
+                        f"(Незваный визитёр — не член семьи и НЕ был приглашён на праздник, просто пришёл на жилой участок во время вечеринки)"
+                    )
+                else:
+                    lines.append(
+                        f"- Мероприятие в заведении: {ev_name} "
+                        f"(Посетитель заведения — пришёл на общественный участок по своим делам, не был приглашён и не относится к чужому празднику)"
+                    )
+        elif active_event:
+            lines.append(f"- Текущее мероприятие / Праздник: {active_event}")
+
+    fire_hazard = None
+    labor_hazard = None
+    if get_context_flag("emergencies"):
+        fire_hazard = get_fire_hazard_context(sim_info, is_en=False)
+        if fire_hazard:
+            f_sum = fire_hazard.get("summary", str(fire_hazard)) if isinstance(fire_hazard, dict) else str(fire_hazard)
+            lines.append(f"- Чрезвычайная ситуация (ПОЖАР): {f_sum}")
+        labor_hazard = get_sim_labor_hazard_context(sim_info, is_en=False)
+        if labor_hazard:
+            l_sum = labor_hazard.get("summary", str(labor_hazard)) if isinstance(labor_hazard, dict) else str(labor_hazard)
+            lines.append(f"- Чрезвычайная ситуация (СХВАТКИ И РОДЫ): {l_sum}")
 
     if get_context_flag("clothing"):
         lines.append(f"- Одежда: {clothing_info}")
@@ -21380,7 +28936,11 @@ def build_sim_prompt(sim_info) -> str:
         "сестра", "брат", "мать", "мама", "отец", "папа", "дочь", "дочка", "сын",
         "бабушка", "дедушка", "внук", "внучка", "тетя", "тётя", "дядя",
         "двоюродн", "кузен", "кузина", "падчерица", "пасынок", "мачеха", "отчим",
-        "сводн", "родственни", "племянни", "инцест"
+        "сводн", "единоутробн", "единокровн", "родственни", "племянни", "инцест",
+        "прадедушк", "прабабушк", "правнук", "правнучк", "предок", "потомок",
+        "приёмн", "приемн", "опекун", "подопечн", "тайн",
+        "невестк", "снох", "зять", "свёкор", "свекров", "тесть", "тёщ",
+        "девер", "шурин", "золовк", "своячениц", "свояк", "сват"
     ]
 
     # Check active incest only if incest context flag is enabled
@@ -21533,27 +29093,34 @@ def build_sim_prompt(sim_info) -> str:
                 nearby_sims_ru=nearby_sims or [],
                 roommates_ru=get_household_roommates_info(sim_info) if get_context_flag("roommates") else [],
                 household_pets_ru=get_household_pets_info(sim_info) if get_context_flag("pets") else [],
+                livein_staff_ru=get_household_livein_staff_info(sim_info, is_en=False) if get_context_flag("livein_staff") else [],
                 sex_info=sex_info,
                 social_info=social_info,
                 is_active_intimate_incest=is_active_intimate_incest,
                 flags_func=get_context_flag,
                 sim_id=sim_id,
+                sim_info=sim_info,
             )
             log(f"Generated Context Prompt (EN) for {full_name}:\n{prompt}")
             return prompt
         except Exception as e_sim_en:
             log_exception("Error in build_sim_prompt_en, falling back to standard prompt", e_sim_en)
 
-    if sex_info:
-        lines.append(f"- Текущее действие: {sex_info['action']}")
-        partner_label = sex_info.get("partner_label", "Партнёр")
-        lines.append(f"- {partner_label}: {sex_info['partners']}")
-        if sex_info.get("group_type"):
-            lines.append(f"- Формат интима: {sex_info['group_type']}")
-        lines.append(f"- Тип близости / Поза: {sex_info['pose']}")
-        lines.append(f"- Место и Приватность: {sex_info['location_and_privacy']}")
-    else:
-        lines.append(f"- Текущее действие: {activity}")
+    if get_context_flag("activity"):
+        if sex_info:
+            lines.append(f"- Текущее действие: {sex_info['action']}")
+            partner_label = sex_info.get("partner_label", "Партнёр")
+            lines.append(f"- {partner_label}: {sex_info['partners']}")
+            if sex_info.get("group_type"):
+                lines.append(f"- Формат интима: {sex_info['group_type']}")
+            lines.append(f"- Тип близости / Поза: {sex_info['pose']}")
+            lines.append(f"- Место и Приватность: {sex_info['location_and_privacy']}")
+        else:
+            held_obj = get_sim_held_object_name(sim_info, is_en=False)
+            act_str = activity
+            if held_obj and "в руках" not in act_str.lower() and held_obj.lower() not in act_str.lower():
+                act_str = f"{act_str.rstrip('.')}. В руках держит: {held_obj}"
+            lines.append(f"- Текущее действие: {act_str}")
 
 
     # If in social dialog, add rich interpersonal context
@@ -21610,6 +29177,16 @@ def build_sim_prompt(sim_info) -> str:
         else:
             lines.append("- Соседи по дому: Нет соседей (проживает только с семьёй или один)")
 
+    # Household Domestic Staff block (Live-in Butler, Maid, Nanny, etc.)
+    if get_context_flag("livein_staff"):
+        livein_staff = get_household_livein_staff_info(sim_info, is_en=False)
+        if livein_staff:
+            lines.append("- Домашний персонал / Прислуга в доме:")
+            for staff_entry in livein_staff:
+                lines.append(f"  • {staff_entry}")
+        else:
+            lines.append("- Домашний персонал / Прислуга: В доме нет постоянной прислуги или дворецкого")
+
     # Household Pets block (Pets living in the family)
     if get_context_flag("pets"):
         household_pets = get_household_pets_info(sim_info)
@@ -21620,17 +29197,20 @@ def build_sim_prompt(sim_info) -> str:
         else:
             lines.append("- Домашние питомцы в семье: Нет домашних животных")
 
-    lines.append(f"- Текущее настроение: {mood}")
+    if get_context_flag("mood"):
+        lines.append(f"- Текущее настроение: {mood}")
 
     if get_context_flag("location"):
         lines.append(f"- Текущая локация: {location}")
 
-    lines.append(f"- Состояние потребностей: {motives_str}")
-    lines.append(f"- Черты характера: {traits_str}")
+    if get_context_flag("needs"):
+        lines.append(f"- Состояние потребностей: {motives_str}")
+    if get_context_flag("traits"):
+        lines.append(f"- Черты характера: {traits_str}")
 
     # Custom Sim Lore / Biography (Injected strictly after traits)
     sim_id = getattr(sim_info, "sim_id", None)
-    if sim_id:
+    if sim_id and get_context_flag("lore"):
         custom_lore = get_custom_sim_lore(sim_id)
         if custom_lore:
             lines.append(f"- Дополнительные сведения о персонаже (личная биография): {custom_lore}")
@@ -21643,12 +29223,29 @@ def build_sim_prompt(sim_info) -> str:
 
     if get_context_flag("career"):
         lines.append(f"- Профессия и должность: {career}")
+        edu_info = get_sim_education_info(sim_info, is_en=False)
+        edu_str = edu_info if edu_info else "Нет высшего образования"
+        lines.append(f"- Высшее образование / Диплом: {edu_str}")
+        lot_role = get_sim_active_lot_role(sim_info, is_en=False)
+        if lot_role:
+            lines.append(f"- Роль / Занятость на участке: {lot_role}")
 
     if get_context_flag("aspiration"):
         lines.append(f"- Жизненная цель: {aspiration}")
 
     if get_context_flag("funds"):
         lines.append(f"- Бюджет семьи: {funds}")
+
+    if get_context_flag("clubs"):
+        clubs_info = get_sim_clubs_info(sim_info, is_en=False)
+        if not clubs_info:
+            lines.append("- Членство в клубах: Не состоит в клубах")
+        elif len(clubs_info) == 1:
+            lines.append(f"- Членство в клубах: {clubs_info[0]}")
+        else:
+            lines.append(f"- Членство в клубах (всего {len(clubs_info)}):")
+            for c_str in clubs_info:
+                lines.append(f"  • {c_str}")
 
     if get_context_flag("memory") and sim_id:
         try:
@@ -21658,6 +29255,34 @@ def build_sim_prompt(sim_info) -> str:
                 lines.append(f"- {mem_text}")
         except Exception as e_mem:
             log_exception("Error formatting memories in thought context", e_mem)
+
+    if get_context_flag("recent_dialogs"):
+        try:
+            from ai_social_pc.conversation_log import format_recent_conversations_for_prompt
+            conv_log_ru = format_recent_conversations_for_prompt(sim_id or sim_info, is_en=False)
+            if conv_log_ru:
+                lines.append(conv_log_ru)
+        except Exception as e_clog:
+            log_exception("Error formatting conversation log in thought context", e_clog)
+
+    try:
+        from ai_thought_reader.last_thought_tracker import get_sim_last_thought_context
+        lt_ru = get_sim_last_thought_context(sim_info, is_en=False)
+        if lt_ru:
+            lines.append(lt_ru)
+    except Exception as e_lt:
+        log_exception("Error formatting last thought in thought context", e_lt)
+
+    # Home / Small Business Context (EP18 Businesses & Hobbies / Get to Work) - placed strictly at the end of context
+    try:
+        from ai_thought_reader.config import get_experimental_flag
+        if get_experimental_flag("home_business_context"):
+            from ai_thought_reader.business_context import get_business_prompt_block
+            biz_block = get_business_prompt_block(sim_info, is_en=False)
+            if biz_block and biz_block.strip():
+                lines.append(biz_block.strip())
+    except Exception as e_biz:
+        log_exception("Error adding business context to prompt", e_biz)
 
     lines.append("")
 
@@ -21684,15 +29309,22 @@ def build_sim_prompt(sim_info) -> str:
             lines.append("")
 
     # Dynamic Age-Specific Rule & Examples
-    age_rule = AGE_INSTRUCTION_RULES.get(age_raw, "")
-    if age_rule:
-        lines.append(age_rule)
-        lines.append("")
+    try:
+        from ai_thought_reader.config import get_age_instructions_enabled
+        age_instr_active = get_age_instructions_enabled()
+    except Exception:
+        age_instr_active = True
+
+    if age_instr_active:
+        age_rule = AGE_INSTRUCTION_RULES.get(age_raw, "")
+        if age_rule:
+            lines.append(age_rule)
+            lines.append("")
 
     # Dynamic Classic Insane Trait Guidance (Experimental Flag)
     try:
-        from ai_thought_reader.config import get_experimental_flag
-        has_classic_insane = get_experimental_flag("classic_insane_trait")
+        import ai_thought_reader.config as _cfg_mod_insane
+        has_classic_insane = _cfg_mod_insane.get_experimental_flag("classic_insane_trait")
     except Exception:
         has_classic_insane = False
 
@@ -21704,8 +29336,37 @@ def build_sim_prompt(sim_info) -> str:
         )
         lines.append("")
 
+
+    if get_context_flag("emergencies"):
+        if fire_hazard and isinstance(fire_hazard, dict) and fire_hazard.get("full_context"):
+            lines.append(
+                f"ВАЖНО (ПОЖАР НА УЧАСТКЕ): {fire_hazard['full_context']}\n"
+                f"Персонаж находится в зоне смертельной опасности! В его мыслях должен доминировать сильный страх, шок, паника за себя и близких, "
+                f"мысли об эвакуации, вызове пожарных или попытках потушить огонь."
+            )
+            lines.append("")
+        if labor_hazard and isinstance(labor_hazard, dict) and labor_hazard.get("full_context"):
+            lines.append(
+                f"ВАЖНО (СХВАТКИ И РОДЫ — РЕБЕНОК РОЖДАЕТСЯ ПРЯМО СЕЙЧАС): {labor_hazard['full_context']}\n"
+                f"Категорически запрещено думать о повседневных делах, работе, уборке или спокойном быте. "
+                f"Все мысли персонажа должны быть захвачены происходящими родами, физической болью схваток и отношением к рождению ребенка сообразно его личности, ситуации и чувствам."
+            )
+            lines.append("")
+
+    if get_context_flag("events"):
+        party_guidance = get_party_event_guidance(active_event or sim_info, is_en=False)
+        if party_guidance:
+            lines.append(party_guidance)
+            lines.append("")
+
     # Incest / Taboo dynamic instruction (triggers for sex, romance, or flirt between relatives)
-    if is_active_intimate_incest and get_context_flag("incest"):
+    try:
+        from ai_thought_reader.config import get_special_situations_enabled
+        special_situations_active = get_special_situations_enabled()
+    except Exception:
+        special_situations_active = False
+
+    if special_situations_active and is_active_intimate_incest and get_context_flag("incest"):
         lines.append(
             "ВАЖНО (Запретная связь / Инцест): Персонаж сейчас находится в романтической или интимной близости со своим кровным/близким родственником (отмечено [ИНЦЕСТ]). "
             "Отрази психологическую сложность запретной близости: осознание табу, тайное влечение, стыд, неловкость, трепет или безудержную страсть от запретности происходящего."
@@ -21746,5 +29407,4 @@ def build_sim_prompt(sim_info) -> str:
     prompt = "\n".join(lines)
     log(f"Generated Context Prompt for {full_name}:\n{prompt}")
     return prompt
-
 

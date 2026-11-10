@@ -1,3 +1,4 @@
+import time
 from ai_social_pc import __version__
 from ai_social_pc.logger import log, log_exception
 from ai_social_pc.injector import inject
@@ -107,15 +108,25 @@ def on_zone_load():
         except Exception as e_fa:
             log_exception("Error starting friend autonomy alarm", e_fa)
 
-        # 8. Verify and hook Direct Dialogue interaction (9834006893958795493)
+        # 8. Verify and hook Direct Dialogue interactions (regular & WickedWhims intimacy)
         try:
-            from ai_social_pc.direct_dialogue import SYNAPSE_DIRECT_DIALOGUE_TUNING_ID, hook_direct_dialogue_affordance
+            from ai_social_pc.direct_dialogue import (
+                SYNAPSE_DIRECT_DIALOGUE_TUNING_ID,
+                SYNAPSE_DIRECT_DIALOGUE_WW_TUNING_ID,
+                hook_direct_dialogue_affordance,
+            make_custom_mixers_sub_interactions_only,
+            )
             aff_mgr = services.affordance_manager()
             if aff_mgr is not None:
                 dd_aff = aff_mgr.get(SYNAPSE_DIRECT_DIALOGUE_TUNING_ID)
                 if dd_aff is not None:
-                    hook_direct_dialogue_affordance(dd_aff)
+                    hook_direct_dialogue_affordance(dd_aff, is_ww=False)
                     log(f"[ZONE] Found and hooked Direct Dialogue affordance: {dd_aff} ({SYNAPSE_DIRECT_DIALOGUE_TUNING_ID})")
+                dd_ww_aff = aff_mgr.get(SYNAPSE_DIRECT_DIALOGUE_WW_TUNING_ID)
+                if dd_ww_aff is not None:
+                    hook_direct_dialogue_affordance(dd_ww_aff, is_ww=True)
+                    log(f"[ZONE] Found and hooked WW Intimate Dialogue affordance: {dd_ww_aff} ({SYNAPSE_DIRECT_DIALOGUE_WW_TUNING_ID})")
+                make_custom_mixers_sub_interactions_only()
         except Exception as e_dd:
             log_exception("Error checking direct dialogue affordance", e_dd)
 
@@ -125,9 +136,26 @@ def on_zone_load():
             hook_travel_commands()
         except Exception as e_th:
             log_exception("Error initializing travel hook", e_th)
+
+        # 10. Hook vanilla social mixer interactions for autonomous living dialogue
+        try:
+            from ai_social_pc.autonomous_director import hook_vanilla_social_mixer
+            hook_vanilla_social_mixer()
+        except Exception as e_vsm:
+            log_exception("Error initializing vanilla social mixer hook", e_vsm)
+
+        # 11. Notify Autonomous Director about zone load for grace period protection (1 minute real time)
+        try:
+            from ai_social_pc.autonomous_director import on_director_zone_load
+            on_director_zone_load()
+        except Exception as e_dzl:
+            log_exception("Error initializing director zone load grace period", e_dzl)
     except Exception as e:
         log_exception("Error in on_zone_load", e)
 
+
+_last_event_memory_loop_time = 0.0
+_last_director_loop_time = 0.0
 
 # Inject into Zone loading screen finished
 if zone is not None and hasattr(zone, "Zone"):
@@ -142,6 +170,7 @@ if zone is not None and hasattr(zone, "Zone"):
 
     @inject(zone.Zone, "update")
     def _on_zone_update(original, self, *args, **kwargs):
+        global _last_event_memory_loop_time, _last_director_loop_time
         result = original(self, *args, **kwargs)
         try:
             process_main_thread_queue()
@@ -151,11 +180,32 @@ if zone is not None and hasattr(zone, "Zone"):
             on_zone_update_check()
         except Exception as e:
             log_exception("Error in _on_zone_update", e)
+
         try:
-            from ai_social_pc.event_memory_manager import process_event_memory_checks
-            process_event_memory_checks()
-        except Exception as e_ev:
-            log_exception("Error in process_event_memory_checks", e_ev)
+            now_t = time.time()
+            if (now_t - _last_event_memory_loop_time) >= 4.0:
+                _last_event_memory_loop_time = now_t
+                try:
+                    from ai_social_pc.event_memory_manager import process_event_memory_checks
+                    process_event_memory_checks()
+                except Exception as e_ev:
+                    log_exception("Error in process_event_memory_checks", e_ev)
+
+            if (now_t - _last_director_loop_time) >= 4.0:
+                _last_director_loop_time = now_t
+                try:
+                    from ai_social_pc.autonomous_director import on_director_zone_update_tick
+                    on_director_zone_update_tick()
+                except Exception as e_dir:
+                    log_exception("Error in on_director_zone_update_tick", e_dir)
+
+                try:
+                    from ai_social_pc.simplified_dialogue import on_simplified_dialogue_tick
+                    on_simplified_dialogue_tick()
+                except Exception as e_simp:
+                    log_exception("Error in on_simplified_dialogue_tick", e_simp)
+        except Exception as e_loop:
+            log_exception("Error in _on_zone_update periodic loop", e_loop)
         return result
 
     @inject(zone.Zone, "on_teardown")
@@ -217,16 +267,42 @@ if RelationshipService is not None:
                 self.send_relationship_info(sim_id_b, target_sim_id=sim_id_a)
             except Exception:
                 pass
+            try:
+                from ai_social_pc.autonomous_director import record_sim_romance_action
+                aff_action = ""
+                sim_mgr = getattr(services, "sim_info_manager", lambda: None)() if services is not None else None
+                if sim_mgr:
+                    for check_sid in (sim_id_a, sim_id_b):
+                        inf = sim_mgr.get(check_sid)
+                        inst = getattr(inf, "get_sim_instance", lambda: None)() if inf else None
+                        if inst and hasattr(inst, "get_running_and_queued_interactions"):
+                            for inter in inst.get_running_and_queued_interactions():
+                                aff = getattr(inter, "affordance", None)
+                                a_n = (getattr(aff, "__name__", "") or str(aff) or "").lower()
+                                if any(rk in a_n for rk in ["kiss", "makeout", "peck", "smooch", "hug", "embrace", "cuddle", "flirt"]):
+                                    aff_action = a_n
+                                    break
+                        if aff_action:
+                            break
+                record_sim_romance_action(sim_id_a, sim_id_b, aff_action or "flirt")
+            except Exception as ex_rec:
+                log_exception("Error in romance action tracker injection", ex_rec)
         return result
 
     @inject(RelationshipService, "add_relationship_bit")
     def _injected_add_relationship_bit(original, self, sim_id_a, sim_id_b, bit_to_add, *args, **kwargs):
         result = original(self, sim_id_a, sim_id_b, bit_to_add, *args, **kwargs)
         try:
-            from_load = kwargs.get("from_load", False) if "from_load" in kwargs else (args[0] if len(args) > 0 else False)
+            from_load = kwargs.get("from_load", False)
+            if not from_load and len(args) >= 2:
+                from_load = bool(args[1])
             if not from_load:
                 from ai_social_pc.event_memory_manager import on_relationship_bit_added
                 on_relationship_bit_added(sim_id_a, sim_id_b, bit_to_add)
+                b_name = (getattr(bit_to_add, "__name__", str(bit_to_add)) or "").lower()
+                if any(rk in b_name for rk in ["flirt", "kiss", "romance", "lovebirds", "sweethearts", "lovers", "affair"]):
+                    from ai_social_pc.autonomous_director import record_sim_romance_action
+                    record_sim_romance_action(sim_id_a, sim_id_b, f"bit_{b_name}")
         except Exception as e_bit:
             log_exception("Error in relationship bit event memory hook", e_bit)
         return result

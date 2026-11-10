@@ -231,6 +231,14 @@ def execute_post_chat_action(action_actor_name: str, action_type: str, actor_sim
                 execute_post_chat_action(p, action_type, actor_sim_info, recipient_sim_info, feedback_fn=feedback_fn)
             return
 
+    try:
+        from ai_social_pc.child_safety import is_do_action_allowed
+        if not is_do_action_allowed(actor_sim_info, recipient_sim_info, clean_action):
+            log(f"[CHILD SAFETY] Action '{clean_action}' is restricted.")
+            return
+    except Exception:
+        pass
+
     # Resolve actor sim_info
     guest_info = None
     host_info = actor_sim_info
@@ -262,6 +270,15 @@ def execute_post_chat_action(action_actor_name: str, action_type: str, actor_sim
     # Fallback to recipient if still undetermined
     if guest_info is None and recipient_sim_info is not None:
         guest_info = recipient_sim_info
+
+    if guest_info is not None or host_info is not None:
+        try:
+            from ai_social_pc.child_safety import is_do_action_allowed
+            if not is_do_action_allowed(guest_info, host_info, clean_action):
+                log(f"[CHILD SAFETY] Action '{clean_action}' is restricted for minor.")
+                return
+        except Exception:
+            pass
 
     # Dispatch specific action
     if clean_action == "visit_lot":
@@ -315,6 +332,11 @@ def execute_post_chat_action(action_actor_name: str, action_type: str, actor_sim
             log(f"[ACTION EXECUTOR] {err_msg}", level="WARN")
             return
         _handle_wicked_sex(guest_info, host_info, feedback_fn=feedback_fn)
+    elif clean_action in ("stop_sex", "end_sex", "stop_intimacy"):
+        _handle_stop_sex(guest_info, host_info, feedback_fn=feedback_fn)
+    elif clean_action in ("leave", "ai_leave", "go_home", "leave_lot", "ask_to_leave", "dismiss", "kick_out", "send_home"):
+        target = guest_info if (guest_info is not None and getattr(guest_info, "sim_id", 0) != getattr(host_info, "sim_id", 0)) else (guest_info or host_info or actor_sim_info)
+        _handle_leave(target, host_info or actor_sim_info, feedback_fn=feedback_fn)
     else:
         log(f"[ACTION EXECUTOR] Action '{clean_action}' is not supported yet.", level="WARN")
 
@@ -1122,7 +1144,7 @@ def _handle_money_action(actor_name: str, action_clean: str, host_sim_info: Any,
                 funds.modify_funds(-amount)
 
             new_bal = getattr(funds, "money", cur_money - amount)
-            title = "💸 Денежный перевод" if not is_en else "💸 Money Transfer"
+            title = "[$] Денежный перевод" if not is_en else "[$] Money Transfer"
             msg = (
                 f"Вы перевели {other_name} {amount:,} §.\nНовый баланс семьи: {new_bal:,} §."
                 if not is_en else
@@ -1143,7 +1165,7 @@ def _handle_money_action(actor_name: str, action_clean: str, host_sim_info: Any,
                 funds.modify_funds(amount)
 
             new_bal = getattr(funds, "money", cur_money + amount)
-            title = "💸 Денежный перевод" if not is_en else "💸 Money Transfer"
+            title = "[$] Денежный перевод" if not is_en else "[$] Money Transfer"
             msg = (
                 f"{other_name} перевел(а) вам {amount:,} §!\nНовый баланс семьи: {new_bal:,} §."
                 if not is_en else
@@ -1530,3 +1552,276 @@ def _execute_wicked_sex_now(guest_sim_info: Any, host_sim_info: Any, feedback_fn
             _out(f"Error launching sex picker dialog: {e_picker}", level="ERROR")
 
 
+def _handle_stop_sex(guest_sim_info: Any, host_sim_info: Any, feedback_fn: Any = None):
+    """
+    Stops an active WickedWhims sex interaction between host and/or guest.
+    """
+    def _msg_out(text: str, level: str = "INFO"):
+        log(f"[ACTION EXECUTOR] {text}", level=level)
+        if feedback_fn:
+            try:
+                feedback_fn(f"[ACTION DO] {text}")
+            except Exception:
+                pass
+
+    try:
+        from wickedwhims.sex.integral.sex_handlers.active_sex.active_sex_handlers import get_active_sex_instances
+        active_instances = get_active_sex_instances() or []
+        g_id = getattr(guest_sim_info, "sim_id", 0) if guest_sim_info else 0
+        h_id = getattr(host_sim_info, "sim_id", 0) if host_sim_info else 0
+
+        stopped_any = False
+        for inst in active_instances:
+            if not inst or not hasattr(inst, "is_sim_id_in_instance"):
+                continue
+            if (g_id and inst.is_sim_id_in_instance(g_id)) or (h_id and inst.is_sim_id_in_instance(h_id)):
+                if hasattr(inst, "stop"):
+                    inst.stop()
+                    stopped_any = True
+                elif hasattr(inst, "end_sex"):
+                    inst.end_sex()
+                    stopped_any = True
+
+        if stopped_any:
+            _msg_out(f"Successfully stopped active sex scene involving Sims ({g_id}, {h_id}).")
+        else:
+            _msg_out(f"No active sex instance found to stop for Sims ({g_id}, {h_id}).", level="WARN")
+    except Exception as e:
+        log_exception("Error in _handle_stop_sex", e)
+
+
+
+
+def is_sim_at_home_lot(sim_info) -> bool:
+    """
+    Determines if the given Sim is currently on their active residential home lot.
+    """
+    if sim_info is None or services is None:
+        return True
+    try:
+        current_zone = services.current_zone()
+        if current_zone is None:
+            return True
+
+        sim_hh_id = getattr(sim_info, "household_id", 0)
+        household = getattr(sim_info, "household", None)
+        if household is None and sim_hh_id:
+            hh_mgr = services.household_manager()
+            if hh_mgr is not None:
+                try:
+                    household = hh_mgr.get(sim_hh_id)
+                except Exception:
+                    household = None
+        if not sim_hh_id and household:
+            sim_hh_id = getattr(household, "id", 0)
+
+        home_zone_id = getattr(household, "home_zone_id", 0) if household else 0
+        current_zone_id = getattr(current_zone, "id", 0) or (services.current_zone_id() if hasattr(services, "current_zone_id") else 0)
+
+        lot = getattr(current_zone, "lot", None)
+        lot_owner_hh_id = getattr(lot, "owner_household_id", 0) if lot else 0
+        if not lot_owner_hh_id and lot and hasattr(lot, "get_household_owner_id"):
+            try:
+                lot_owner_hh_id = lot.get_household_owner_id()
+            except Exception:
+                lot_owner_hh_id = 0
+
+        active_hh_id = services.active_household_id() if hasattr(services, "active_household_id") else 0
+        is_owner_active = False
+        if lot and hasattr(lot, "is_owner_household_active"):
+            try:
+                is_owner_active = lot.is_owner_household_active()
+            except Exception:
+                is_owner_active = False
+
+        if sim_hh_id and lot_owner_hh_id and sim_hh_id == lot_owner_hh_id:
+            return True
+        if home_zone_id and current_zone_id and home_zone_id == current_zone_id:
+            return True
+        if is_owner_active and sim_hh_id and active_hh_id and sim_hh_id == active_hh_id:
+            return True
+    except Exception as e:
+        log_exception("Error in is_sim_at_home_lot", e)
+    return False
+
+
+def _handle_leave(target_sim_info: Any, actor_sim_info: Any = None, feedback_fn: Any = None) -> bool:
+    """
+    Handles sending a Sim home:
+    - If the target is the active player Sim:
+        * If already at home: does nothing, reports they are already home.
+        * If on another lot: sends the player Sim home.
+    - If the target is a visiting NPC on the lot:
+        * Cancels their interactions, removes visiting situations, pushes make_sim_leave / leave lot affordance.
+    """
+    is_en = _is_en()
+    def _msg_out(text: str, level: str = "INFO"):
+        log(f"[ACTION EXECUTOR] [LEAVE] {text}", level=level)
+        if feedback_fn:
+            try:
+                feedback_fn(text)
+            except Exception:
+                pass
+
+    if target_sim_info is None and actor_sim_info is not None:
+        target_sim_info = actor_sim_info
+
+    if target_sim_info is None:
+        _msg_out("Error: Target Sim not specified." if is_en else "Ошибка: Персонаж не указан.", level="WARN")
+        return False
+
+    target_name = f"{getattr(target_sim_info, 'first_name', '')} {getattr(target_sim_info, 'last_name', '')}".strip() or "Sim"
+    active_info = services.active_sim_info() if hasattr(services, "active_sim_info") else None
+    active_hh_id = getattr(active_info, "household_id", 0) if active_info else 0
+    target_hh_id = getattr(target_sim_info, "household_id", 0)
+
+    is_active_sim_family = (
+        (active_info is not None and getattr(active_info, "sim_id", 0) == getattr(target_sim_info, "sim_id", 0))
+        or (active_hh_id and target_hh_id and active_hh_id == target_hh_id)
+    )
+
+    # 1. CASE: Target is active Sim / player household
+    if is_active_sim_family:
+        if is_sim_at_home_lot(target_sim_info):
+            _msg_out(
+                f"Sim {target_name} is already at home! Command cannot be used on active Sim at home." if is_en
+                else f"Игровой персонаж {target_name} уже находится у себя дома! Дома с игровым персонажем команда не работает. Чтобы прогнать гостя, укажите имя: ai_leave <Имя>",
+                level="INFO"
+            )
+            return False
+
+        # Active Sim is away from home -> Send home!
+        _msg_out(
+            f"Sending active Sim {target_name} home from current lot..." if is_en
+            else f"Отправляем игрового персонажа {target_name} домой с текущего участка...",
+            level="INFO"
+        )
+        target_sim = target_sim_info.get_sim_instance(allow_hidden_flags=ALL_HIDDEN_REASONS) if hasattr(target_sim_info, "get_sim_instance") else None
+        pushed = False
+        if target_sim is not None:
+            # Cancel current interactions
+            try:
+                for inter in list(target_sim.get_all_running_and_queued_interactions()):
+                    inter.cancel(True, "Player commanded ai_leave")
+            except Exception:
+                pass
+
+            # Push sim_GoHome affordance
+            try:
+                aff_mgr = services.affordance_manager() if hasattr(services, "affordance_manager") else None
+                if aff_mgr is not None:
+                    go_home_aff = aff_mgr.get(13982)
+                    if go_home_aff is None:
+                        for aff in aff_mgr.types.values():
+                            if getattr(aff, "__name__", "").lower() in ("sim_gohome", "gohome"):
+                                go_home_aff = aff
+                                break
+                    if go_home_aff is not None:
+                        from interactions.context import InteractionContext
+                        from interactions.priority import Priority
+                        client = services.client_manager().get_first_client() if hasattr(services, "client_manager") else None
+                        ctx = InteractionContext(target_sim, InteractionContext.SOURCE_SCRIPT, Priority.Critical, client=client)
+                        pushed = target_sim.push_super_affordance(go_home_aff, None, ctx)
+                        _msg_out(f"Pushed sim_GoHome affordance: {pushed}")
+            except Exception as e_gh:
+                log_exception("Error pushing go home affordance", e_gh)
+
+        # Safe fallback if affordance could not be pushed directly
+        if not pushed:
+            try:
+                home_zone_id = getattr(target_sim_info, "vacation_or_home_zone_id", 0) or (getattr(target_sim_info, "household", None) and getattr(target_sim_info.household, "home_zone_id", 0))
+                if home_zone_id and hasattr(services, "travel_to_zone"):
+                    services.travel_to_zone(home_zone_id, (target_sim_info.sim_id,))
+                    _msg_out(f"Dispatched direct travel to home zone: {home_zone_id}")
+                    pushed = True
+            except Exception as e_tr:
+                log_exception("Error traveling home via zone", e_tr)
+
+        show_chat_notification(
+            "Домой" if not is_en else "Heading Home",
+            f"{target_name} отправляется домой." if not is_en else f"{target_name} is heading back home.",
+            sim_info=target_sim_info
+        )
+        return pushed
+
+    # 2. CASE: Target is NPC visitor
+    npc_inst = target_sim_info.get_sim_instance(allow_hidden_flags=ALL_HIDDEN_REASONS) if hasattr(target_sim_info, "get_sim_instance") else None
+    if npc_inst is None:
+        _msg_out(
+            f"Sim {target_name} is not present on the current lot." if is_en
+            else f"Персонаж {target_name} не находится на текущем участке.",
+            level="WARN"
+        )
+        return False
+
+    _msg_out(
+        f"Dismissing guest {target_name} and asking them to leave the lot..." if is_en
+        else f"Прогоняем гостя {target_name} и отправляем его домой...",
+        level="INFO"
+    )
+
+    # A. Cancel running interactions
+    try:
+        for inter in list(npc_inst.get_all_running_and_queued_interactions()):
+            inter.cancel(True, "Player commanded NPC to leave")
+    except Exception:
+        pass
+
+    # B. Terminate visiting situations in ZoneSituationManager
+    sit_mgr = services.get_zone_situation_manager() if hasattr(services, "get_zone_situation_manager") else None
+    if sit_mgr is None and hasattr(services, "current_zone"):
+        sit_mgr = getattr(services.current_zone(), "situation_manager", None)
+
+    if sit_mgr is not None:
+        try:
+            sim_sits = sit_mgr.get_situations_sim_is_in(npc_inst) or []
+            for sit in sim_sits:
+                sit_name = f"{getattr(sit, '__class__', type(sit)).__name__}".lower()
+                if any(k in sit_name for k in ("visit", "invite", "wagon", "hangout", "date", "guest", "welcome", "npc_visiting")):
+                    _msg_out(f"Ending visiting situation: {sit_name} (ID: {getattr(sit, 'id', 0)})")
+                    sit_mgr.destroy_situation_by_id(sit.id)
+        except Exception as e_sit:
+            log_exception("Error ending situations for leaving sim", e_sit)
+
+        # C. Call EA situation_manager make_sim_leave
+        try:
+            if hasattr(sit_mgr, "make_sim_leave_now_must_run"):
+                sit_mgr.make_sim_leave_now_must_run(npc_inst)
+                _msg_out("Called sit_mgr.make_sim_leave_now_must_run.")
+            elif hasattr(sit_mgr, "make_sim_leave"):
+                sit_mgr.make_sim_leave(npc_inst)
+                _msg_out("Called sit_mgr.make_sim_leave.")
+        except Exception as e_msl:
+            log_exception("Error in make_sim_leave", e_msl)
+
+    # D. Push leave lot super affordance as guaranteed route to portal
+    try:
+        aff_mgr = services.affordance_manager() if hasattr(services, "affordance_manager") else None
+        if aff_mgr is not None:
+            leave_aff = aff_mgr.get(24236) # npc_leave_lot_now
+            if leave_aff is None:
+                leave_aff = aff_mgr.get(24308) # leave_lot_must_run
+            if leave_aff is None:
+                leave_aff = aff_mgr.get(24224) # sim_LeaveLot
+            if leave_aff is None:
+                for aff in aff_mgr.types.values():
+                    a_name = getattr(aff, "__name__", "").lower()
+                    if a_name in ("npc_leave_lot_now", "leave_lot_must_run", "sim_leavelot", "npc_leave"):
+                        leave_aff = aff
+                        break
+            if leave_aff is not None:
+                from interactions.context import InteractionContext
+                from interactions.priority import Priority
+                ctx = InteractionContext(npc_inst, InteractionContext.SOURCE_SCRIPT, Priority.Critical)
+                res_push = npc_inst.push_super_affordance(leave_aff, None, ctx)
+                _msg_out(f"Pushed leave lot affordance ({getattr(leave_aff, '__name__', '')}): {res_push}")
+    except Exception as e_aff:
+        log_exception("Error pushing leave affordance", e_aff)
+
+    # E. Notification
+    show_chat_notification(
+        "Прощание" if not is_en else "Goodbye",
+        f"{target_name} прощается и уходит домой." if not is_en else f"{target_name} says goodbye and heads home.",
+        sim_info=target_sim_info
+    )
+    return True

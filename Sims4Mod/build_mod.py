@@ -72,6 +72,12 @@ def compile_package(mod_info):
                         zf.write(temp_pyc, rel_pyc)
                         if mod_info["sub_dir"] == "balloons" and file == "synapse_balloons.py":
                             zf.write(temp_pyc, "synapse_balloons.pyc")
+                    elif file in ("ru_strings.json", "en_strings.json"):
+                        # Game string table (STBL hash -> Russian text) used by context.py
+                        data_path = os.path.join(root, file)
+                        rel_data = os.path.relpath(data_path, SRC_BASE).replace("\\", "/")
+                        zf.write(data_path, rel_data)
+                        print(f"[DATA] {rel_data}")
 
         if os.path.exists(out_file):
             os.remove(out_file)
@@ -122,8 +128,13 @@ def sync_package():
 
             if SYNAPSE_MODS_DIR and os.path.exists(os.path.dirname(SYNAPSE_MODS_DIR)):
                 game_pkg = os.path.join(SYNAPSE_MODS_DIR, pkg_name)
-                shutil.copy2(pkg_src, game_pkg)
-                print(f"[PACKAGE] Deployed to Sims 4 Mods:\n  -> {game_pkg}")
+                try:
+                    shutil.copy2(pkg_src, game_pkg)
+                    print(f"[PACKAGE] Deployed to Sims 4 Mods:\n  -> {game_pkg}")
+                except PermissionError:
+                    print(f"[NOTE] {pkg_name} is locked by running The Sims 4 (package already deployed).")
+                except Exception as e_pkg:
+                    print(f"[WARN] Could not copy {pkg_name}: {e_pkg}")
         else:
             print(f"[WARN] Package file not found: {pkg_src}")
 
@@ -138,6 +149,11 @@ def build_all():
 
     for mod in MODULES_TO_BUILD:
         compile_package(mod)
+    try:
+        from compile_balloons_package import compile_and_deploy
+        compile_and_deploy()
+    except Exception as e_bp:
+        print(f"[NOTE] compile_balloons_package skipped: {e_bp}")
     sync_package()
     print(f"\n[DONE] All scripts successfully built into: {BUILD_DIR}\n")
 

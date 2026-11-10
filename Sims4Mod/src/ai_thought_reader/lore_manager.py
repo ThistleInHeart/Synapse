@@ -151,3 +151,123 @@ def delete_custom_sim_lore(sim_id) -> bool:
         commit_lore_data_to_disk()
         log(f"[LORE] Deleted lore for Sim {sim_id} in memory and committed to disk.")
     return True
+
+
+RACE_FILE_PATH = os.path.expanduser(r"~\Documents\Electronic Arts\The Sims 4\ai_sim_races.json")
+
+_WORKING_RACE_CACHE: Optional[Dict[str, str]] = None
+_ACTIVE_RACE_SAVE_ID: Optional[str] = None
+_IS_RACE_DIRTY: bool = False
+_RACE_LOCK = threading.RLock()
+
+
+def _read_race_disk_file() -> Dict[str, Any]:
+    if os.path.exists(RACE_FILE_PATH):
+        try:
+            with open(RACE_FILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "saves" not in data or not isinstance(data["saves"], dict):
+                        data["saves"] = {}
+                    return data
+        except Exception as e:
+            log_exception("Failed to read ai_sim_races.json from disk", e)
+    return {"saves": {}}
+
+
+def load_race_data() -> Dict[str, str]:
+    global _WORKING_RACE_CACHE, _ACTIVE_RACE_SAVE_ID, _IS_RACE_DIRTY
+    with _RACE_LOCK:
+        current_save = get_current_save_id()
+
+        if _WORKING_RACE_CACHE is not None and _ACTIVE_RACE_SAVE_ID == current_save:
+            return _WORKING_RACE_CACHE
+
+        _ACTIVE_RACE_SAVE_ID = current_save
+        _IS_RACE_DIRTY = False
+        disk_data = _read_race_disk_file()
+
+        save_entry = disk_data.get("saves", {}).get(current_save, {})
+        if isinstance(save_entry, dict):
+            _WORKING_RACE_CACHE = {str(k): str(v) for k, v in save_entry.items()}
+        else:
+            _WORKING_RACE_CACHE = {}
+
+        log(f"[RACE] Initialized in-memory race for save '{current_save}': {len(_WORKING_RACE_CACHE)} sim(s)")
+        return _WORKING_RACE_CACHE
+
+
+def mark_race_dirty():
+    global _IS_RACE_DIRTY
+    _IS_RACE_DIRTY = True
+
+
+def commit_race_data_to_disk():
+    global _IS_RACE_DIRTY
+    with _RACE_LOCK:
+        current_save = _ACTIVE_RACE_SAVE_ID or get_current_save_id()
+        if _WORKING_RACE_CACHE is None:
+            return
+
+        if not _IS_RACE_DIRTY:
+            return
+
+        try:
+            disk_data = _read_race_disk_file()
+            if "saves" not in disk_data or not isinstance(disk_data["saves"], dict):
+                disk_data["saves"] = {}
+
+            disk_data["saves"][current_save] = _WORKING_RACE_CACHE
+
+            temp_path = RACE_FILE_PATH + ".tmp"
+            os.makedirs(os.path.dirname(RACE_FILE_PATH), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(disk_data, f, ensure_ascii=False, indent=2)
+
+            os.replace(temp_path, RACE_FILE_PATH)
+
+            _IS_RACE_DIRTY = False
+            log(f"[RACE] Committed custom races for {len(_WORKING_RACE_CACHE)} sim(s) in save '{current_save}' to disk successfully.")
+        except Exception as e:
+            log_exception("Failed to commit ai_sim_races.json to disk", e)
+
+
+def reset_working_race_cache():
+    global _WORKING_RACE_CACHE, _ACTIVE_RACE_SAVE_ID, _IS_RACE_DIRTY
+    with _RACE_LOCK:
+        _WORKING_RACE_CACHE = None
+        _ACTIVE_RACE_SAVE_ID = None
+        _IS_RACE_DIRTY = False
+        log("[RACE] Race cache reset on zone unload.")
+
+
+def get_custom_sim_race(sim_id) -> str:
+    if not sim_id:
+        return ""
+    data = load_race_data()
+    return str(data.get(str(sim_id), "")).strip()
+
+
+def set_custom_sim_race(sim_id, race_text: str) -> bool:
+    if not sim_id:
+        return False
+    data = load_race_data()
+    clean_text = str(race_text).strip()
+    data[str(sim_id)] = clean_text
+    mark_race_dirty()
+    commit_race_data_to_disk()
+    log(f"[RACE] Updated race in memory and committed to disk for Sim {sim_id}: '{clean_text}'")
+    return True
+
+
+def delete_custom_sim_race(sim_id) -> bool:
+    if not sim_id:
+        return False
+    data = load_race_data()
+    s_id = str(sim_id)
+    if s_id in data:
+        del data[s_id]
+        mark_race_dirty()
+        commit_race_data_to_disk()
+        log(f"[RACE] Deleted race for Sim {sim_id} in memory and committed to disk.")
+    return True

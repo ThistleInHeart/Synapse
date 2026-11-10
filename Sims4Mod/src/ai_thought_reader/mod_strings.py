@@ -4,11 +4,6 @@
 
 MOD_STRINGS = {
     "en": {
-        "_metadata": {
-            "language": "en",
-            "display_name": "English",
-            "description": "Core UI strings for The Sims 4 mod (Synapse)"
-        },
         "AUTONOMY_DESC_TEXT": "Configure background timer-based thought generation for active and nearby Sims:",
         "AUTONOMY_INTERVAL_DESC": "Current interval: {minutes} min. Click to change.",
         "AUTONOMY_INTERVAL_TITLE": "Generation Interval",
@@ -148,15 +143,19 @@ MOD_STRINGS = {
         "MENU_DESC": "Select a category to configure:",
         "MENU_DIAGNOSTICS": "[+] Connection Status & Diagnostics",
         "MENU_DIAGNOSTICS_DESC": "Check bridge connection and test thought generation",
+        "MENU_DIRECT_FLAGS": "[+] Context Components [Dialogue]",
+        "MENU_DIRECT_FLAGS_DESC": "Configure context components for live face-to-face dialogue",
         "MENU_EXPERIMENTAL": "[+] Experimental Features",
         "MENU_EXPERIMENTAL_DESC": "Experimental options (alien male pregnancy, dialogue pause, Insane trait, WickedWhims mode)",
         "MENU_FLAGS": "[+] Context Components",
         "MENU_FLAGS_DESC": "Choose which Sim data is included in thought generation",
         "MENU_GENEALOGY": "[+] Genealogy Settings",
         "MENU_GENEALOGY_DESC": "Configure family tracking (limits and relationship types)",
+        "MENU_INTIMATE_FLAGS": "[+] Context Components [Intimate WW]",
+        "MENU_INTIMATE_FLAGS_DESC": "Configure context components for WickedWhims intimate dialogue",
         "MENU_JOURNAL": "[+] Recent Thoughts Journal",
         "MENU_JOURNAL_DESC": "View recently generated thoughts for Sims",
-        "MENU_LANGUAGE": "🌐 Interface & Context Language / Язык",
+        "MENU_LANGUAGE": "[LANG] Interface & Context Language / Язык",
         "MENU_LANGUAGE_DESC": "Switch mod and context language (English / Русский)",
         "MENU_LORE": "[+] Personal Biography / Lore",
         "MENU_LORE_DESC": "Configure custom biography and lore for any Sim",
@@ -190,7 +189,12 @@ MOD_STRINGS = {
         "WW_MODE_BED_PICKER": "Bed (with pose picker)",
         "WW_MODE_BED_PICKER_DESC": "Finds a bed and opens WickedWhims pose selector",
         "WW_MODE_NEARBY_PICKER": "Nearby object (with pose picker)",
-        "WW_MODE_NEARBY_PICKER_DESC": "Finds nearest object and opens pose selector"
+        "WW_MODE_NEARBY_PICKER_DESC": "Finds nearest object and opens pose selector",
+        "_metadata": {
+            "language": "en",
+            "display_name": "English",
+            "description": "Core UI strings for The Sims 4 mod (Synapse)"
+        }
     },
     "ru": {
         "_metadata": {
@@ -337,15 +341,19 @@ MOD_STRINGS = {
         "MENU_DESC": "Выберите нужный раздел для настройки:",
         "MENU_DIAGNOSTICS": "[+] Статус связи и диагностика",
         "MENU_DIAGNOSTICS_DESC": "Проверить подключение к мосту и протестировать генерацию",
+        "MENU_DIRECT_FLAGS": "[+] Компоненты контекста [диалог]",
+        "MENU_DIRECT_FLAGS_DESC": "Включение и отключение частей контекста для живого диалога симов",
         "MENU_EXPERIMENTAL": "[+] Экспериментальные функции",
         "MENU_EXPERIMENTAL_DESC": "Экспериментальные параметры (мужская беременность, пауза диалога, черта «Безумный», режим WickedWhims)",
         "MENU_FLAGS": "[+] Компоненты контекста",
         "MENU_FLAGS_DESC": "Настроить, какие данные о персонаже учитываются при генерации мыслей",
         "MENU_GENEALOGY": "[+] Настройка генеалогии",
         "MENU_GENEALOGY_DESC": "Настроить учет родственников (лимит и типы родства)",
+        "MENU_INTIMATE_FLAGS": "[+] Компоненты контекста [интим WW]",
+        "MENU_INTIMATE_FLAGS_DESC": "Включение и отключение частей контекста для интимного общения WickedWhims",
         "MENU_JOURNAL": "[+] Журнал недавних мыслей",
         "MENU_JOURNAL_DESC": "Просмотреть последние сгенерированные мысли персонажей",
-        "MENU_LANGUAGE": "🌐 Язык интерфейса и контекста / Language",
+        "MENU_LANGUAGE": "[LANG] Язык интерфейса и контекста / Language",
         "MENU_LANGUAGE_DESC": "Переключить язык мода и контекста (English / Русский)",
         "MENU_LORE": "[+] Личная биография / Лор",
         "MENU_LORE_DESC": "Настроить кастомную биографию и лор для любого персонажа",

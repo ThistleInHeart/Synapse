@@ -23,6 +23,9 @@ from ai_social_pc.ui_chat import (
     get_recipient_display_name,
     is_sim_online,
     show_messenger_root_menu,
+    show_direct_messages_menu,
+    show_direct_messages_delete_menu,
+    show_direct_messages_autonomy_menu,
     show_groups_menu,
     prompt_create_group,
     prompt_edit_groups,
@@ -166,8 +169,6 @@ def start_pc_chat_session(actor_sim_info, computer_obj=None, preselected_contact
 
                 # 1. Immediately append player's message to conversation history
                 from ai_social_pc.chat_manager import add_session_message, send_chat_message_async
-                a_id = getattr(actor_sim_info, "sim_id", 0) if not isinstance(actor_sim_info, dict) else 0
-                r_id = getattr(chosen_contact, "sim_id", 0) if not isinstance(chosen_contact, dict) else chosen_contact.get("id", -1)
                 a_name = get_recipient_display_name(actor_sim_info)
                 add_session_message(a_id, r_id, sender=a_name, text=clean_text, sender_id=a_id)
 
@@ -246,6 +247,37 @@ def start_pc_chat_session(actor_sim_info, computer_obj=None, preselected_contact
         # Open text input dialog
         _open_input_for_contact()
 
+    def _open_direct_messages_flow():
+        def _on_chat():
+            show_contact_picker(
+                actor_sim_info,
+                _on_contact_picked,
+                on_cancel=_open_direct_messages_flow,
+            )
+
+        def _on_delete():
+            show_direct_messages_delete_menu(
+                actor_sim_info,
+                on_back=_open_direct_messages_flow,
+            )
+
+        def _on_autonomy():
+            show_direct_messages_autonomy_menu(
+                actor_sim_info,
+                on_back=_open_direct_messages_flow,
+            )
+
+        def _on_back():
+            start_pc_chat_session(actor_sim_info)
+
+        show_direct_messages_menu(
+            actor_sim_info,
+            on_chat=_on_chat,
+            on_delete=_on_delete,
+            on_autonomy=_on_autonomy,
+            on_back=_on_back,
+        )
+
     def _open_groups_flow():
         def _on_select_group(group_data):
             open_group_chat_session(actor_sim_info, group_data)
@@ -283,7 +315,7 @@ def start_pc_chat_session(actor_sim_info, computer_obj=None, preselected_contact
     else:
         show_messenger_root_menu(
             actor_sim_info,
-            on_direct_chat=lambda: show_contact_picker(actor_sim_info, _on_contact_picked),
+            on_direct_chat=_open_direct_messages_flow,
             on_groups=_open_groups_flow,
         )
 

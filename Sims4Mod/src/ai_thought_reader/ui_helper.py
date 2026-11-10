@@ -92,24 +92,35 @@ def show_sim_thought_notification(sim_info, thought: str):
     default_name = "Sim" if is_en else "Сим"
     sim_name = f"{sim_info.first_name} {sim_info.last_name}".strip() if sim_info else default_name
     title = f"Thoughts: {sim_name}" if is_en else f"Мысли: {sim_name}"
-    formatted_thought = f"\"{thought}\"" if is_en else f"«{thought}»"
-    show_notification(title, formatted_thought, sim_info=sim_info, is_error=False)
+    formatted_thought = f'"{thought}"' if is_en else f"«{thought}»"
+
+    try:
+        from ai_thought_reader.config import get_display_flag
+        show_notif = get_display_flag("thought_notification", True)
+        show_bal = get_display_flag("thought_balloon", True)
+    except Exception:
+        show_notif = True
+        show_bal = True
+
+    if show_notif:
+        show_notification(title, formatted_thought, sim_info=sim_info, is_error=False)
 
     # Synapse AI Balloon (Phase 3.1: Thought Balloon over Sim's head)
-    try:
+    if show_bal:
         try:
-            import synapse_balloons
-        except ImportError:
-            from balloons import synapse_balloons
-        if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
-            synapse_balloons.show_sim_balloon(
-                sim_info_or_id=sim_info,
-                text=thought,
-                balloon_type="thought",
-                name=getattr(sim_info, "first_name", None),
-            )
-    except Exception as ex_balloon:
-        log(f"[BALLOON] Could not display thought balloon: {ex_balloon}")
+            try:
+                import synapse_balloons
+            except ImportError:
+                from balloons import synapse_balloons
+            if synapse_balloons is not None and hasattr(synapse_balloons, "show_sim_balloon"):
+                synapse_balloons.show_sim_balloon(
+                    sim_info_or_id=sim_info,
+                    text=thought,
+                    balloon_type="thought",
+                    name=getattr(sim_info, "first_name", None),
+                )
+        except Exception as ex_balloon:
+            log(f"[BALLOON] Could not display thought balloon: {ex_balloon}")
 
 
 def show_error_notification(error_msg: str):

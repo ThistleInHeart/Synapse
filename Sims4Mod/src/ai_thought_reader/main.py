@@ -10,6 +10,8 @@ from ai_thought_reader.lore_manager import (
     load_lore_data,
     commit_lore_data_to_disk,
     reset_working_lore_cache,
+    commit_race_data_to_disk,
+    reset_working_race_cache,
 )
 from ai_thought_reader.main_thread import process_main_thread_queue
 
@@ -59,7 +61,7 @@ SIM_DEFINITION_IDS = (
 )
 
 S4S_AFFORDANCE_ID = 18298976728462081835
-WW_AFFORDANCE_IDS = (12182240539294674680, 15699576483586314424)
+WW_AFFORDANCE_IDS = (12182240539294674680, 15699576483586314424, 14829301847263549182)
 ALL_AFFORDANCE_IDS = (S4S_AFFORDANCE_ID,) + WW_AFFORDANCE_IDS
 
 
@@ -273,10 +275,12 @@ if zone is not None and hasattr(zone, "Zone"):
             log("[ZONE] Zone teardown detected. Flushing dirty lore cache to disk before unload...")
             try:
                 commit_lore_data_to_disk()
+                commit_race_data_to_disk()
             except Exception as e_flush:
                 log_exception("Error flushing lore cache on zone teardown", e_flush)
 
             reset_working_lore_cache()
+            reset_working_race_cache()
         except Exception as ex_td:
             log_exception("Error during zone teardown cleanup in AIThoughtReader", ex_td)
         return original(self, *args, **kwargs)

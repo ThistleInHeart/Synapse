@@ -198,6 +198,12 @@ class AIReadThoughtsInteraction(ImmediateSuperInteraction):
                             add_recent_thought(sim_name, thought)
                         except Exception:
                             pass
+                        if sim_id:
+                            try:
+                                from ai_thought_reader.last_thought_tracker import record_sim_thought
+                                record_sim_thought(sim_id, thought)
+                            except Exception:
+                                pass
                         show_sim_thought_notification(sim_info, thought)
                     else:
                         log(f"[INTERACTION ERROR] {thought}", level="ERROR")

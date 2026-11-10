@@ -297,20 +297,38 @@ def add_memory(
 
 
 def remove_memories_by_types(actor_id: int, recipient_id: int, event_types: List[str]) -> int:
-    """Removes memories matching specific event types for this pair of Sims."""
+    """Removes memories matching specific event types for this pair of Sims (both pair and personal keys)."""
     all_memories = load_memories()
-    key = _get_pair_key(actor_id, recipient_id)
-    removed_count = 0
-    if key in all_memories:
-        types_set = set(event_types)
-        orig_list = all_memories[key]
-        filtered = [m for m in orig_list if m.get("event_type") not in types_set]
-        removed_count = len(orig_list) - len(filtered)
-        if removed_count > 0:
-            all_memories[key] = filtered
-            mark_memories_dirty()
-            log(f"[MEMORY] Removed {removed_count} conflicting memories of types {event_types} for key {key}")
-    return removed_count
+    keys_to_check = [_get_pair_key(actor_id, recipient_id)]
+    if actor_id:
+        keys_to_check.append(f"sim_{int(actor_id)}")
+    if recipient_id:
+        keys_to_check.append(f"sim_{int(recipient_id)}")
+
+    types_set = set(event_types)
+    total_removed = 0
+
+    for k in keys_to_check:
+        if k in all_memories:
+            orig_list = all_memories[k]
+            if k.startswith("sim_"):
+                other_id = int(recipient_id) if k == f"sim_{int(actor_id)}" else int(actor_id)
+                filtered = [
+                    m for m in orig_list 
+                    if not (m.get("event_type") in types_set and (m.get("recipient_id") in (other_id, 0) or m.get("actor_id") in (other_id, 0)))
+                ]
+            else:
+                filtered = [m for m in orig_list if m.get("event_type") not in types_set]
+            
+            diff = len(orig_list) - len(filtered)
+            if diff > 0:
+                all_memories[k] = filtered
+                total_removed += diff
+                log(f"[MEMORY] Removed {diff} conflicting memories of types {event_types} for key {k}")
+
+    if total_removed > 0:
+        mark_memories_dirty()
+    return total_removed
 
 
 def clear_memories_for_sim(sim_id: int) -> int:
@@ -503,7 +521,9 @@ def format_memories_for_prompt(actor_id: int, recipient_id: int) -> Optional[str
     lines = [header]
     for m in all_combined:
         mem_actor = m.get("actor_id")
-        if mem_actor is not None and mem_actor != 0 and mem_actor != actor_id:
+        mem_recip = m.get("recipient_id")
+        # Personal memories (recipient_id == 0) only belong to the actor
+        if mem_recip == 0 and mem_actor is not None and mem_actor != 0 and mem_actor != actor_id:
             continue
         s = (m.get("summary_en", "") if is_en and m.get("summary_en") else m.get("summary", "")).strip()
         if not s:
