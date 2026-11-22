@@ -22,6 +22,8 @@ import sys
 
 import os
 
+import io
+
 import json
 
 import ssl
@@ -29,6 +31,10 @@ import ssl
 import re
 
 import time
+
+import base64
+
+import hashlib
 
 import threading
 
@@ -45,6 +51,14 @@ import urllib.error
 import urllib.parse
 
 from typing import Tuple, List, Dict, Optional, Any
+
+try:
+    from PIL import Image as PILImage, ImageOps as PILImageOps
+    HAS_PIL = True
+except ImportError:
+    PILImage = None
+    PILImageOps = None
+    HAS_PIL = False
 
 
 
@@ -334,6 +348,15 @@ def get_custom_prompts_map(cfg: dict, dict_key: str, lang_code: str = None) -> d
 
 
 
+def _create_ssl_context():
+    """Creates an SSL context using certifi CA bundle when available (critical on macOS)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 class ConnectionManager:
 
     """
@@ -356,19 +379,20 @@ class ConnectionManager:
 
             try:
 
-                self.urllib3_pool = urllib3.PoolManager(
-
+                pool_kwargs = dict(
                     num_pools=12,
-
                     maxsize=10,
-
                     block=False,
-
                     timeout=urllib3.Timeout(total=timeout, connect=15.0),
-
                     retries=urllib3.Retry(total=2, backoff_factor=0.2, raise_on_status=False)
-
                 )
+                try:
+                    import certifi
+                    pool_kwargs["cert_reqs"] = "CERT_REQUIRED"
+                    pool_kwargs["ca_certs"] = certifi.where()
+                except Exception:
+                    pass
+                self.urllib3_pool = urllib3.PoolManager(**pool_kwargs)
 
                 self.backend = f"urllib3 v{getattr(urllib3, '__version__', 'standard')}"
 
@@ -406,7 +430,9 @@ class ConnectionManager:
 
         try:
 
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            ctx = _create_ssl_context() if str(url).lower().startswith("https://") else None
+
+            with urllib.request.urlopen(req, context=ctx, timeout=self.timeout) as resp:
 
                 return resp.status, resp.read(), resp.headers.get("Content-Encoding", "")
 
@@ -460,7 +486,9 @@ class ConnectionManager:
 
             req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
-            resp = urllib.request.urlopen(req, timeout=self.timeout)
+            ctx = _create_ssl_context() if str(url).lower().startswith("https://") else None
+
+            resp = urllib.request.urlopen(req, context=ctx, timeout=self.timeout)
 
             return resp.status, resp, "stream"
 
@@ -546,7 +574,7 @@ class ConnectionManager:
 
 
 
-GLOBAL_HTTP_POOL = ConnectionManager(timeout=115.0)
+GLOBAL_HTTP_POOL = ConnectionManager(timeout=340.0)
 
 
 
@@ -562,85 +590,1000 @@ from http.server import BaseHTTPRequestHandler
 
 
 
-CONFIG_FILE_PATH = os.path.expanduser(r"~\Documents\Electronic Arts\The Sims 4\ai_mod_config.json")
+CONFIG_FILE_PATH = os.path.join(os.path.expanduser("~"), "Documents", "Electronic Arts", "The Sims 4", "ai_mod_config.json")
 
 DEFAULT_PORT = 8765
 
+SIMGRAM_MEDIA_DIR = os.path.join(os.path.dirname(CONFIG_FILE_PATH), "synapse_simgram_media")
+
+MAX_VISION_IMAGES = 6
+MAX_VISION_IMAGE_DIM = 1536
+MAX_UI_PHOTO_DIM = 1920
+UI_PHOTO_JPEG_QUALITY = 95
+MAX_RAW_IMAGE_BYTES = 5 * 1024 * 1024
+
+_ALLOWED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+_EXCLUDED_TS4_SUBDIRS = frozenset({
+    "mods",
+    "saves",
+    "tray",
+    "content",
+    "cachestr",
+    "onlinethumbnailcache",
+    "mod_logs",
+    "recorded videos",
+    "записанные видеоролики",
+    "videocamerastates",
+    "configoverride",
+    "custom music",
+    "synapse_simgram_media",
+})
+_KNOWN_TS4_SCREENSHOT_DIR_NAMES = (
+    "Screenshots",
+    "Снимки экрана",
+    "Captures d'écran",
+    "Capturas de pantalla",
+    "Screens",
+    "Bildschirmfotos",
+    "Zrzuty ekranu",
+    "Schermopnamen",
+    "Skärmdumpar",
+    "Skærmbilleder",
+    "Skjermbilder",
+    "Kuvakaappaukset",
+    "スクリーンショット",
+    "스크린샷",
+    "螢幕擷取畫面",
+    "屏幕截图",
+)
 
 
-DIRECTOR_TELEMETRY_LOGS = []
-
-DIRECTOR_LOGS_LOCK = threading.Lock()
-
-_director_log_id_counter = 0
-
-
-
-def add_director_telemetry(event_type: str, title: str, details: list = None, level: str = "INFO", raw_data: dict = None) -> dict:
-
-    """Appends an event to the director telemetry buffer for real-time monitoring."""
-
-    global _director_log_id_counter
-
-    import datetime
-
-    with DIRECTOR_LOGS_LOCK:
-
-        _director_log_id_counter += 1
-
-        item = {
-
-            "id": _director_log_id_counter,
-
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
-
-            "type": event_type,
-
-            "title": title,
-
-            "details": details or [],
-
-            "level": level,
-
-            "data": raw_data or {}
-
-        }
-
-        DIRECTOR_TELEMETRY_LOGS.append(item)
-
-        if len(DIRECTOR_TELEMETRY_LOGS) > 1000:
-
-            del DIRECTOR_TELEMETRY_LOGS[0:200]
+def _get_sims4_user_dirs() -> List[str]:
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.dirname(CONFIG_FILE_PATH),
+        os.path.join(home, "Documents", "Electronic Arts", "The Sims 4"),
+        os.path.join(home, "OneDrive", "Documents", "Electronic Arts", "The Sims 4"),
+    ]
+    seen = set()
+    out: List[str] = []
+    for path in candidates:
+        if not path:
+            continue
+        rp = os.path.realpath(path)
+        if rp not in seen and os.path.isdir(rp):
+            seen.add(rp)
+            out.append(rp)
+    if not out:
+        out.append(os.path.realpath(os.path.dirname(CONFIG_FILE_PATH)))
+    return out
 
 
+def _get_simgram_media_dir(create: bool = True) -> str:
+    media_dir = os.path.join(_get_sims4_user_dirs()[0], "synapse_simgram_media")
+    if create:
+        os.makedirs(media_dir, exist_ok=True)
+    return os.path.realpath(media_dir)
 
-        # Real-time console visibility in Bridge terminal
+
+def _get_ts4_screenshot_dirs() -> List[str]:
+    dirs: List[str] = []
+    seen = set()
+    for base in _get_sims4_user_dirs():
+        for name in _KNOWN_TS4_SCREENSHOT_DIR_NAMES:
+            p = os.path.join(base, name)
+            if os.path.isdir(p):
+                rp = os.path.realpath(p)
+                if rp not in seen:
+                    seen.add(rp)
+                    dirs.append(rp)
+        try:
+            for entry_name in os.listdir(base):
+                full_p = os.path.join(base, entry_name)
+                if os.path.isdir(full_p) and entry_name.lower() not in _EXCLUDED_TS4_SUBDIRS:
+                    rp = os.path.realpath(full_p)
+                    if rp not in seen:
+                        # Include localized screenshot folders containing PNG screenshots
+                        try:
+                            has_img = any(fn.lower().endswith(_ALLOWED_IMAGE_EXTS) for fn in os.listdir(rp)[:50])
+                        except Exception:
+                            has_img = False
+                        if has_img or "screen" in entry_name.lower() or "снимок" in entry_name.lower() or "снимк" in entry_name.lower():
+                            seen.add(rp)
+                            dirs.append(rp)
+        except Exception:
+            pass
+    return dirs
+
+
+def _get_allowed_simgram_roots() -> List[str]:
+    roots: List[str] = []
+    seen = set()
+    for p in [_get_simgram_media_dir(create=True)] + _get_ts4_screenshot_dirs():
+        if p and p not in seen:
+            seen.add(p)
+            roots.append(p)
+    return roots
+
+
+def _sanitize_photo_id(raw_id: Any, fallback_seed: str = "") -> str:
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(raw_id or "")).strip()[:64]
+    if clean:
+        return clean
+    if fallback_seed:
+        return "sg_" + hashlib.sha1(fallback_seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return ""
+
+
+def _is_path_under_roots(file_path: str, roots: List[str]) -> Optional[str]:
+    if not file_path or not isinstance(file_path, str):
+        return None
+    try:
+        rp = os.path.realpath(file_path)
+    except Exception:
+        return None
+    if not os.path.isfile(rp):
+        return None
+    if not rp.lower().endswith(_ALLOWED_IMAGE_EXTS):
+        return None
+    rp_norm = os.path.normcase(rp)
+    for root in roots:
+        try:
+            root_norm = os.path.normcase(os.path.realpath(root))
+            if os.path.commonpath([rp_norm, root_norm]) == root_norm:
+                return rp
+        except ValueError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_simgram_image_path(
+    raw_path: str = "",
+    photo_id: str = "",
+    screenshot_name: str = "",
+    prefer_source: bool = True,
+) -> Optional[str]:
+    media_dir = _get_simgram_media_dir(create=True)
+    clean_id = _sanitize_photo_id(photo_id)
+
+    def _find_cached() -> Optional[str]:
+        if clean_id:
+            for u_dir in _get_sims4_user_dirs():
+                mdir = os.path.realpath(os.path.join(u_dir, "synapse_simgram_media"))
+                for ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+                    cached = os.path.join(mdir, clean_id + ext)
+                    if os.path.isfile(cached):
+                        return os.path.realpath(cached)
+        return None
+
+    if not prefer_source:
+        cached_hit = _find_cached()
+        if cached_hit:
+            return cached_hit
+
+    roots = _get_allowed_simgram_roots()
+    if raw_path:
+        checked = _is_path_under_roots(raw_path, roots)
+        if checked:
+            return checked
+
+    clean_name = os.path.basename(str(screenshot_name or "").strip())
+    if clean_name and clean_name not in (".", ".."):
+        for s_dir in _get_ts4_screenshot_dirs():
+            candidate = os.path.join(s_dir, clean_name)
+            checked = _is_path_under_roots(candidate, roots)
+            if checked:
+                return checked
+
+    if prefer_source:
+        return _find_cached()
+    return None
+
+
+def _encode_jpeg_with_pillow(
+    src_path: str,
+    max_dim: int = MAX_VISION_IMAGE_DIM,
+    quality: int = 88,
+) -> Tuple[bytes, int, int, int, int]:
+    """Loads src_path via Pillow, preserves EXIF orientation, resizes proportionally, returns Baseline JPEG bytes."""
+    with PILImage.open(src_path) as im:
+        if PILImageOps is not None:
+            try:
+                im = PILImageOps.exif_transpose(im)
+            except Exception:
+                pass
+        orig_w, orig_h = im.size
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            bg = PILImage.new("RGB", rgba.size, (18, 22, 28))
+            bg.paste(rgba, mask=rgba.split()[3])
+            im = bg
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+
+        cur_w, cur_h = im.size
+        if max_dim > 0 and max(cur_w, cur_h) > max_dim:
+            resample = getattr(PILImage, "Resampling", PILImage).LANCZOS
+            im.thumbnail((max_dim, max_dim), resample)
+        new_w, new_h = im.size
+
+        buf = io.BytesIO()
+        # Baseline JPEG (progressive=False) is required for Scaleform GFx flash.display.Loader compatibility.
+        im.save(buf, format="JPEG", quality=quality, optimize=True, progressive=False)
+        return buf.getvalue(), new_w, new_h, orig_w, orig_h
+
+
+def _cache_simgram_jpeg(photo_id: str, jpeg_bytes: bytes, overwrite: bool = False) -> str:
+    clean_id = _sanitize_photo_id(photo_id)
+    if not clean_id or not jpeg_bytes:
+        return ""
+    media_dir = _get_simgram_media_dir(create=True)
+    target = os.path.join(media_dir, f"{clean_id}.jpg")
+    if not overwrite and os.path.isfile(target) and os.path.getsize(target) > 0:
+        return target
+    tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(jpeg_bytes)
+        os.replace(tmp, target)
+        return target
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return ""
+
+
+_RGB64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _encode_rgb64_preview(src_path: str, photo_id: str = "", max_side: int = 480) -> Tuple[int, int, str]:
+    """Encodes a full 24-bit true-color RGB888 Base64 string (4 chars/px) for crisp Scaleform BitmapData rendering."""
+    if not HAS_PIL or PILImage is None or not src_path or not os.path.isfile(src_path):
+        return 0, 0, ""
+    try:
+        with PILImage.open(src_path) as im:
+            if PILImageOps is not None:
+                try:
+                    im = PILImageOps.exif_transpose(im)
+                except Exception:
+                    pass
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                rgba = im.convert("RGBA")
+                bg = PILImage.new("RGB", rgba.size, (18, 22, 28))
+                bg.paste(rgba, mask=rgba.split()[3])
+                im = bg
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+
+            w, h = im.size
+            if w <= 0 or h <= 0:
+                return 0, 0, ""
+            scale = min(1.0, float(max_side) / float(max(w, h)))
+            tw = max(16, int(round(w * scale)))
+            th = max(16, int(round(h * scale)))
+            if tw != w or th != h:
+                resample = getattr(PILImage, "Resampling", PILImage).LANCZOS
+                thumb = im.resize((tw, th), resample)
+            else:
+                thumb = im
+            raw_rgb = thumb.tobytes()
+
+        tbl = _RGB64_CHARS
+        out_chars = []
+        for idx in range(0, len(raw_rgb) - 2, 3):
+            r = raw_rgb[idx]
+            g = raw_rgb[idx + 1]
+            b = raw_rgb[idx + 2]
+            out_chars.append(tbl[(r >> 2) & 63])
+            out_chars.append(tbl[((r & 3) << 4) | ((g >> 4) & 15)])
+            out_chars.append(tbl[((g & 15) << 2) | ((b >> 6) & 3)])
+            out_chars.append(tbl[b & 63])
+        rgb64_str = "".join(out_chars)
+
+        clean_id = _sanitize_photo_id(photo_id)
+        if clean_id and rgb64_str:
+            try:
+                media_dir = _get_simgram_media_dir(create=True)
+                rgb_file = os.path.join(media_dir, f"{clean_id}.rgb64")
+                with open(rgb_file, "w", encoding="ascii") as rf:
+                    rf.write(f"{tw}:{th}:{rgb64_str}")
+            except Exception:
+                pass
+        return tw, th, rgb64_str
+    except Exception:
+        return 0, 0, ""
+
+
+def _open_windows_photo_picker(max_count: int = 6) -> List[str]:
+    """Opens native OS file dialog (Windows Explorer or macOS Finder) and returns selected image paths."""
+    limit = max(1, min(6, int(max_count or 6)))
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            osa = (
+                'set chosenFiles to choose file of type {"public.image"} '
+                'with prompt "SulNet - Выберите изображение" with multiple selections allowed\n'
+                'set outPaths to ""\n'
+                'repeat with f in chosenFiles\n'
+                '    set outPaths to outPaths & (POSIX path of f) & linefeed\n'
+                'end repeat\n'
+                'return outPaths'
+            )
+            res = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True, timeout=240)
+            if res.returncode == 0 and res.stdout:
+                return [p.strip() for p in res.stdout.splitlines() if p.strip() and os.path.isfile(p.strip())][:limit]
+        except Exception:
+            pass
+        return []
+
+    selected: List[str] = []
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.lift()
+            root.focus_force()
+        except Exception:
+            pass
+        paths = filedialog.askopenfilenames(
+            parent=root,
+            title="SulNet — Выберите изображение для отправки",
+            filetypes=[
+                ("Изображения", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        if paths:
+            selected = [str(p) for p in paths if p and os.path.isfile(str(p))][:limit]
+            return selected
+        return []
+    except Exception:
+        pass
+
+    # Fallback via PowerShell System.Windows.Forms.OpenFileDialog if tkinter fails
+    try:
+        ps_cmd = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$f = New-Object System.Windows.Forms.Form; $f.TopMost = $true; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$d.Title = 'SulNet - Select Photo'; "
+            "$d.Filter = 'Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp)|*.png;*.jpg;*.jpeg;*.webp;*.bmp'; "
+            "$d.Multiselect = $true; "
+            "if ($d.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $d.FileNames -join '|' }"
+        )
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        raw_out = (res.stdout or "").strip()
+        if raw_out:
+            selected = [p.strip() for p in raw_out.split("|") if p.strip() and os.path.isfile(p.strip())][:limit]
+    except Exception:
+        pass
+    return selected
+
+
+def handle_simgram_pick_pc_photos(req_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Handles `/simgram_pick_pc_photos`: opens Explorer, caches selected photos & returns metadata + RGB666 preview."""
+    try:
+        max_count = int(req_json.get("max_count") or 6)
+    except Exception:
+        max_count = 6
+    max_count = max(1, min(6, max_count))
+
+    chosen_paths = _open_windows_photo_picker(max_count=max_count)
+    if not chosen_paths:
+        return {"status": "cancelled", "photos": []}
+
+    out_photos: List[Dict[str, Any]] = []
+    media_dir = _get_simgram_media_dir(create=True)
+    for src_p in chosen_paths:
+        if not os.path.isfile(src_p):
+            continue
+        pid = f"pc_{uuid.uuid4().hex[:10]}"
+        try:
+            if HAS_PIL and PILImage is not None:
+                jpeg_bytes, w, h, ow, oh = _encode_jpeg_with_pillow(
+                    src_p,
+                    max_dim=MAX_UI_PHOTO_DIM,
+                    quality=UI_PHOTO_JPEG_QUALITY,
+                )
+                cached_p = _cache_simgram_jpeg(pid, jpeg_bytes, overwrite=True)
+                if not cached_p:
+                    continue
+                rgb_w, rgb_h, rgb64 = _encode_rgb64_preview(cached_p, photo_id=pid, max_side=480)
+                out_photos.append({
+                    "photo_id": pid,
+                    "inst_dec": "0",
+                    "inst_hex": "0",
+                    "group": "0",
+                    "res_type": "0",
+                    "is_portrait": bool(oh > ow),
+                    "width": int(ow or w),
+                    "height": int(oh or h),
+                    "screenshot_path": cached_p,
+                    "screenshot_name": os.path.basename(cached_p),
+                    "mode": "pc",
+                    "subjects": [],
+                    "rgb_w": int(rgb_w),
+                    "rgb_h": int(rgb_h),
+                    "rgb64": rgb64,
+                })
+            else:
+                ext = os.path.splitext(src_p)[1].lower()
+                if ext not in _ALLOWED_IMAGE_EXTS:
+                    continue
+                target_p = os.path.join(media_dir, f"{pid}{ext}")
+                shutil.copy2(src_p, target_p)
+                out_photos.append({
+                    "photo_id": pid,
+                    "inst_dec": "0",
+                    "inst_hex": "0",
+                    "group": "0",
+                    "res_type": "0",
+                    "is_portrait": False,
+                    "width": 1280,
+                    "height": 720,
+                    "screenshot_path": target_p,
+                    "screenshot_name": os.path.basename(target_p),
+                    "mode": "pc",
+                    "subjects": [],
+                    "rgb_w": 0,
+                    "rgb_h": 0,
+                    "rgb64": "",
+                })
+        except Exception as e_item:
+            print(f" [PC PHOTO WARN] Failed importing '{src_p}': {e_item}")
+            continue
+
+    if not out_photos:
+        return {"status": "empty", "photos": []}
+    return {"status": "ok", "photos": out_photos}
+
+
+def handle_simgram_cache_rgb64(req_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensures persistent JPEG + RGB666 thumbnail caches exist for game/PC photos and returns RGB64 data."""
+    raw_list = req_json.get("photos")
+    if not isinstance(raw_list, list) or not raw_list:
+        return {"status": "ok", "results": {}}
+    results: Dict[str, Dict[str, Any]] = {}
+    media_dir = _get_simgram_media_dir(create=True)
+    for item in raw_list[:24]:
+        if not isinstance(item, dict):
+            continue
+        pid = _sanitize_photo_id(item.get("photo_id") or item.get("id") or "")
+        if not pid:
+            continue
+        rgb_file = os.path.join(media_dir, f"{pid}.rgb64")
+        if os.path.isfile(rgb_file):
+            try:
+                with open(rgb_file, "r", encoding="ascii", errors="ignore") as rf:
+                    parts = rf.read().strip().split(":", 2)
+                if len(parts) == 3:
+                    rw, rh, r64 = int(parts[0]), int(parts[1]), parts[2].strip()
+                    is_true_color = (rw > 0 and rh > 0 and len(r64) >= (rw * rh * 4))
+                    is_hi = (rw >= 400 or rh >= 400)
+                    if is_true_color and is_hi:
+                        results[pid] = {"rgb_w": rw, "rgb_h": rh, "rgb64": r64}
+                        continue
+            except Exception:
+                pass
+        raw_path = str(item.get("screenshot_path") or item.get("path") or "").strip()
+        shot_name = str(item.get("screenshot_name") or "").strip()
+        resolved = _resolve_simgram_image_path(
+            raw_path=raw_path,
+            photo_id=pid,
+            screenshot_name=shot_name,
+            prefer_source=True,
+        )
+        if not resolved or not os.path.isfile(resolved):
+            continue
+        try:
+            cached_jpg = os.path.join(media_dir, f"{pid}.jpg")
+            src_for_rgb = resolved
+            if HAS_PIL and PILImage is not None:
+                if not os.path.isfile(cached_jpg):
+                    ui_bytes, _, _, _, _ = _encode_jpeg_with_pillow(
+                        resolved,
+                        max_dim=MAX_UI_PHOTO_DIM,
+                        quality=UI_PHOTO_JPEG_QUALITY,
+                    )
+                    saved_jpg = _cache_simgram_jpeg(pid, ui_bytes, overwrite=False)
+                    if saved_jpg:
+                        src_for_rgb = saved_jpg
+                rw, rh, r64 = _encode_rgb64_preview(src_for_rgb, photo_id=pid, max_side=480)
+                if rw > 0 and rh > 0 and r64:
+                    results[pid] = {"rgb_w": int(rw), "rgb_h": int(rh), "rgb64": r64}
+        except Exception:
+            pass
+    return {"status": "ok", "results": results}
+
+
+def handle_simgram_group_chat(req_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Handles `POST /simgram_group_chat` with a dedicated multi-participant SulNet group prompt."""
+    lang = str(req_json.get("language") or "Russian")
+    is_en = (lang.lower() == "english")
+
+    group_title = str(req_json.get("group_title") or "Группа").strip()
+    group_lore = str(req_json.get("group_lore") or "").strip()
+    sender_name = str(req_json.get("sender_name") or "Игрок").strip()
+    sender_info = str(req_json.get("sender_info") or sender_name).strip()
+    env_summary = str(req_json.get("environment") or "").strip()
+    dossier = str(req_json.get("third_party_dossier") or "").strip()
+    raw_message = str(req_json.get("message") or "").strip()
+
+    participants = req_json.get("participants") or []
+    if not isinstance(participants, list) or not participants:
+        return {"success": False, "error": "В группе нет собеседников."}
+
+    inter_rels = req_json.get("inter_relationships") or []
+    history_rows = req_json.get("messages") or []
+    raw_images = req_json.get("images") or []
+    prepared_images = _prepare_simgram_images(raw_images) if raw_images else []
+
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_name_lower: Dict[str, Dict[str, Any]] = {}
+    online_participants: List[Dict[str, Any]] = []
+    part_blocks = []
+    for idx_p, p in enumerate(participants, start=1):
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("sim_id") or "").strip()
+        pname = str(p.get("name") or f"Sim {pid}").strip()
+        prof = str(p.get("profile") or pname).strip()
+        rel_p = str(p.get("relationship_to_player") or "").strip()
+        on_lot = bool(p.get("on_lot", False))
+        is_online_p = bool(p.get("is_online", True))
+        rom_ok = bool(p.get("romance_allowed", False))
+        p_mem = str(p.get("memories") or "").strip()
+        if is_online_p:
+            online_participants.append(p)
+        if pid:
+            by_id[pid] = p
+        if pname:
+            by_name_lower[pname.lower()] = p
+            first_word = pname.split()[0].lower() if pname.split() else ""
+            if first_word and first_word not in by_name_lower:
+                by_name_lower[first_word] = p
+
+        mem_line = (f"\n   Memories: {p_mem}" if is_en else f"\n   Память: {p_mem}") if p_mem else ""
+        if is_en:
+            status_tag = "ONLINE: YES" if is_online_p else "ONLINE: NO (sleeping/busy — DO NOT PICK)"
+            lot_txt = "currently on active lot" if on_lot else "off-lot / elsewhere"
+            rom_txt = "romance allowed" if rom_ok else "no romance (delta_rom MUST be 0)"
+            part_blocks.append(
+                f"{idx_p}) [ID={pid}] {pname} [{status_tag}] ({lot_txt}; {rom_txt})\n"
+                f"   Relationship with {sender_name}: {rel_p or 'neutral/acquainted'}\n"
+                f"   Profile: {prof}{mem_line}"
+            )
+        else:
+            status_tag = "В СЕТИ: ДА" if is_online_p else "В СЕТИ: НЕТ (спит или занят — НЕ ВЫБИРАТЬ)"
+            lot_txt = "сейчас на активном участке" if on_lot else "не на участке / по своим делам"
+            rom_txt = "романтика разрешена" if rom_ok else "романтика ЗАПРЕЩЕНА (delta_rom СТРОГО 0)"
+            part_blocks.append(
+                f"{idx_p}) [ID={pid}] {pname} [{status_tag}] ({lot_txt}; {rom_txt})\n"
+                f"   Отношения с {sender_name}: {rel_p or 'знакомы/нейтрально'}\n"
+                f"   Досье: {prof}{mem_line}"
+            )
+
+    inter_block = ""
+    if inter_rels:
+        inter_lines = "\n".join(f"- {x}" for x in inter_rels[:12])
+        inter_block = (
+            f"\nINTER-MEMBER RELATIONSHIPS:\n{inter_lines}\n"
+            if is_en
+            else f"\nОТНОШЕНИЯ УЧАСТНИКОВ МЕЖДУ СОБОЙ:\n{inter_lines}\n"
+        )
+
+    history_lines = []
+    for h in history_rows[-18:]:
+        if isinstance(h, dict):
+            ln = str(h.get("formatted_line") or "").strip()
+            if ln:
+                history_lines.append(ln)
+    history_block = "\n".join(history_lines) if history_lines else ("(chat just started)" if is_en else "(чат только начался)")
+
+    lore_block = (
+        f"\nGROUP DESCRIPTION / LORE:\n{group_lore}\n"
+        if (is_en and group_lore)
+        else (f"\nОПИСАНИЕ / ЛОР ГРУППЫ:\n{group_lore}\n" if group_lore else "")
+    )
+    env_block = (
+        f"\nWORLD & TIME: {env_summary}\n"
+        if (is_en and env_summary)
+        else (f"\nМИР И ВРЕМЯ: {env_summary}\n" if env_summary else "")
+    )
+    dossier_block = f"\n{dossier}\n" if dossier else ""
+
+    vision_hint = ""
+    photo_desc_rule = ""
+    if prepared_images:
+        vision_hint = _build_vision_prompt_hint(
+            is_en=is_en,
+            photo_count=len(prepared_images),
+            recipient_name=group_title,
+            sender_name=sender_name,
+            prepared_images=prepared_images,
+        )
+        tags_seq = " ".join(f"[PHOTO_DESC_{i}]...[/PHOTO_DESC_{i}]" for i in range(1, len(prepared_images) + 1))
+        if is_en:
+            photo_desc_rule = (
+                f"\nPHOTO VISION RULE: Before the JSON object, write {tags_seq} describing what is actually visible on each attached photo (who is in frame, pose, outfit, mood, background), using exact names from the dossier if provided."
+            )
+        else:
+            photo_desc_rule = (
+                f"\nПРАВИЛО ОПИСАНИЯ ФОТО: СТРОГО ПЕРЕД JSON-объектом выведи теги {tags_seq} с кратким и точным описанием того, что реально видно на каждом фото (кто в кадре, поза, одежда, обстановка), опираясь на имена из досье."
+            )
+
+    sit_hint = str(req_json.get("situation_hint") or "").strip()
+    sit_block = (
+        f"\nSITUATION: {sit_hint}\n" if (is_en and sit_hint)
+        else (f"\nСИТУАЦИЯ СЕЙЧАС: {sit_hint}\n" if sit_hint else "")
+    )
+    if is_en:
+        sys_prompt = (
+            f"You are the AI director of a lively SulNet group chat \"{group_title}\" in The Sims 4.\n"
+            "YOU DECIDE WHICH ONLINE MEMBER(S) REPLY AND HOW MANY MESSAGES APPEAR (usually 1-3, max 4).\n"
+            "Rules:\n"
+            "- STRICT FILTER: ONLY NPC members marked [ONLINE: YES] may reply (NEVER pick [ONLINE: NO], NEVER write for the player).\n"
+            "- Direct address by name/topic -> that Sim replies (if online); others may chime in, joke, argue, or reply to EACH OTHER.\n"
+            "- Natural messenger style: 1-3 punchy conversational sentences, no roleplay asterisks *smiles*, no robotic summaries, NO Unicode emojis (ASCII :) ;) :( :D only), no mirroring/repeating user's words.\n"
+            "- Stay true to each Sim's personality, traits, mood, memories, and relationships.\n"
+            "- Anti-telepathy: Sims only see the chat screen, not through walls/doors/lots. If two Sims are at home in different rooms/floors, they do NOT see what others secretly wear/do unless loud (gunshots, fire, explosions) or texted.\n"
+            "- Relationship delta per message (EVENT-DRIVEN, default 0): leave delta_fr: 0 and delta_rom: 0 for normal casual chat; set non-zero delta_fr (-15..+15) ONLY on genuine bonding/support or conflict; set non-zero delta_rom (-15..+15) EXCLUSIVELY on explicit romantic flirtation/passion (NEVER on friendly/family warmth or compliments; high default family barrier for blood relatives unless explicit persistent seduction is accepted; STRICTLY 0 if romance not allowed).\n"
+            "- OPTIONAL action_type (set ONLY when THAT Sim explicitly agrees RIGHT NOW; else null): \"visit_lot\" (multiple Sims arrive together), \"travel_together\", \"ask_on_date\" (romance only), \"send_money:AMOUNT\"/\"pay_money:AMOUNT\".\n"
+            "- OPTIONAL memory_summary + memory_days (ONLY ~10% important events: confession, secret, betrayal, serious fight/threat, concrete promise/debt/plan; leave \"\" for casual chat): 1 short 3rd-person sentence with names; memory_days 1-365.\n"
+            f"{photo_desc_rule}\n"
+            "OUTPUT FORMAT (strict JSON only, no text after):\n"
+            '{"messages": [{"speaker_id": "<SIM_ID>", "speaker_name": "<Full Name>", "text": "<clean reply>", "delta_fr": 0, "delta_rom": 0, "action_type": null, "memory_summary": "", "memory_days": 3}]}'
+        )
+        user_prompt = (
+            f"GROUP: {group_title}{lore_block}{env_block}{sit_block}\n"
+            f"PLAYER (SENDER): {sender_name}\n{sender_info}\n\n"
+            f"NPC GROUP MEMBERS:\n" + "\n".join(part_blocks) +
+            f"{inter_block}{dossier_block}\n"
+            f"RECENT GROUP HISTORY:\n{history_block}\n\n"
+            f"NEW MESSAGE FROM {sender_name}:\n{raw_message or '[Sent photo]'}"
+            f"{vision_hint}"
+        )
+    else:
+        sys_prompt = (
+            f"Ты — ИИ-режиссёр живого группового чата SulNet «{group_title}» в мире The Sims 4.\n"
+            "ТЫ РЕШАЕШЬ, КТО ИЗ ОНЛАЙН-УЧАСТНИКОВ ОТВЕТИТ И СКОЛЬКО БУДЕТ РЕПЛИК (обычно 1–3, максимум 4).\n"
+            "Главные правила:\n"
+            "- СТРОГИЙ ФИЛЬТР: Отвечают ТОЛЬКО NPC со статусом [В СЕТИ: ДА]. Участников [В СЕТИ: НЕТ] выбирать ЗАПРЕЩЕНО; никогда не пиши за игрока.\n"
+            "- Обратились к конкретному симу по имени/теме — отвечает он (если онлайн); остальные могут подхватить, пошутить, поспорить или ответить друг другу.\n"
+            "- Живой стиль мессенджера: 1–3 коротких предложения, без звёздочек *улыбается*, без повтора/пересказа чужих слов, без канцелярита и книжных метафор; БЕЗ Unicode-эмодзи (только :) ;) :( :D).\n"
+            "- Строго учитывай характер, черты, настроение, память и отношения каждого сима.\n"
+            "- Анти-телепатия: симы видят только экран чата, а не сквозь стены/этажи/участки. Даже если живут в одном доме — не знают, кто во что одет и чем тихо занят в другой комнате (слышны только громкие ЧП вроде стрельбы/взрывов/пожара или то, о чём сами написали).\n"
+            "- Отношения за реплику (ТОЛЬКО НА ЗНАЧИМЫЕ СОБЫТИЯ, по умолчанию 0): в обычной болтовне оставляй delta_fr: 0 и delta_rom: 0; меняй delta_fr (-15..+15) ТОЛЬКО при реальной поддержке/сближении или ссоре; меняй delta_rom (-15..+15) ИСКЛЮЧИТЕЛЬНО при явном романтическом флирте/страсти (дружеское и семейное тепло — всегда только delta_fr, НИКОГДА не delta_rom; для кровных родственников высокий семейный барьер без романа, кроме прямого настойчивого соблазнения; если романтика ЗАПРЕЩЕНА — строго 0).\n"
+            "- ОПЦИОНАЛЬНО action_type (ТОЛЬКО если участник ЯВНО согласился на действие ПРЯМО СЕЙЧАС; иначе null): \"visit_lot\" (несколько приедут вместе), \"travel_together\", \"ask_on_date\" (если романтика разрешена), \"send_money:СУММА\"/\"pay_money:СУММА\".\n"
+            "- ОПЦИОНАЛЬНО memory_summary и memory_days (ТОЛЬКО в ~10% важных случаев: признание, тайна, измена, крупная ссора/угроза, конкретный уговор/долг/сходка; в болтовне оставляй \"\"): краткая фраза от 3-го лица с именами; memory_days от 1 до 365.\n"
+            f"{photo_desc_rule}\n"
+            "ФОРМАТ ОТВЕТА (строго JSON без текста после него):\n"
+            '{"messages": [{"speaker_id": "<SIM_ID>", "speaker_name": "<Имя Фамилия>", "text": "<чистый текст>", "delta_fr": 0, "delta_rom": 0, "action_type": null, "memory_summary": "", "memory_days": 3}]}'
+        )
+        user_prompt = (
+            f"ГРУППА: {group_title}{lore_block}{env_block}{sit_block}\n"
+            f"ИГРОК (ОТПРАВИТЕЛЬ): {sender_name}\n{sender_info}\n\n"
+            f"УЧАСТНИКИ ГРУППЫ (NPC):\n" + "\n".join(part_blocks) +
+            f"{inter_block}{dossier_block}\n"
+            f"ИСТОРИЯ ПЕРЕПИСКИ В ГРУППЕ:\n{history_block}\n\n"
+            f"НОВОЕ СООБЩЕНИЕ ОТ {sender_name}:\n{raw_message or '[Отправлено фото]'}"
+            f"{vision_hint}"
+        )
+
+    print("=" * 65)
+    print(f" [SULNET GROUP CHAT] '{group_title}' | members={len(participants)} | imgs={len(prepared_images)}")
+    print("=" * 65)
+
+    raw_reply = execute_llm_request(
+        user_prompt,
+        sim_name=group_title,
+        system_prompt_override=sys_prompt,
+        is_raw=True,
+        images=prepared_images,
+    )
+    if not raw_reply or str(raw_reply).startswith("Ошибка") or str(raw_reply).startswith("Error"):
+        return {"success": False, "error": str(raw_reply or "Пустой ответ от ИИ.")}
+
+    stripped_text, parsed_photo_descs = parse_and_strip_photo_descriptions(
+        str(raw_reply),
+        expected_count=len(prepared_images) if prepared_images else 0,
+    )
+    photo_descriptions: List[Dict[str, Any]] = []
+    if prepared_images and parsed_photo_descs:
+        for idx_zero, img_meta in enumerate(prepared_images):
+            desc_val = parsed_photo_descs.get(idx_zero + 1, "")
+            if desc_val:
+                photo_descriptions.append({
+                    "photo_id": str(img_meta.get("photo_id") or ""),
+                    "screenshot_name": str(img_meta.get("screenshot_name") or ""),
+                    "description": desc_val,
+                })
+
+    # Extract JSON payload cleanly
+    json_candidate = stripped_text.strip()
+    m_fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", json_candidate, flags=re.DOTALL | re.IGNORECASE)
+    if m_fence:
+        json_candidate = m_fence.group(1).strip()
+    else:
+        first_b = json_candidate.find("{")
+        last_b = json_candidate.rfind("}")
+        if first_b != -1 and last_b > first_b:
+            json_candidate = json_candidate[first_b:last_b + 1]
+
+    _ROMANTIC_DO_ACTIONS = {
+        "ask_on_date", "date", "ask_date", "go_on_date", "start_date",
+        "wicked_sex", "sex", "ww_sex", "have_sex", "woohoo",
+        "join_sex", "join_intimacy", "ww_join_sex",
+    }
+    parsed_msgs: List[Dict[str, Any]] = []
+    root_mem_summary = ""
+    root_mem_days = 3
+    try:
+        obj = json.loads(json_candidate)
+        if isinstance(obj, dict):
+            root_mem_summary = str(obj.get("memory_summary") or obj.get("sum") or "").strip()
+            if root_mem_summary.upper() in ("NO", "NONE", "NULL", "FALSE", "YES", "ДА", "НЕТ") or len(root_mem_summary) < 4:
+                root_mem_summary = ""
+            try:
+                root_mem_days = max(1, min(365, int(obj.get("memory_days", 3) or 3)))
+            except Exception:
+                root_mem_days = 3
+        raw_list = obj.get("messages") if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+        if isinstance(raw_list, list):
+            for item in raw_list[:4]:
+                if not isinstance(item, dict):
+                    continue
+                raw_txt = str(item.get("text") or "").strip()
+                if not raw_txt:
+                    continue
+                inline_whodo = _extract_inline_whodo(raw_txt)
+                txt_no_rel, inline_fr, inline_rom = parse_relationship_tags(raw_txt)
+                txt, inline_sum, inline_days, inline_act = parse_inline_memory_and_action_tags(txt_no_rel, allow_actions=True)
+                txt = txt.strip()
+                if not txt:
+                    continue
+                sp_id = str(item.get("speaker_id") or "").strip()
+                sp_name = str(item.get("speaker_name") or "").strip()
+                matched_p = by_id.get(sp_id)
+                if matched_p is None and sp_name:
+                    matched_p = by_name_lower.get(sp_name.lower())
+                    if matched_p is None and sp_name.split():
+                        matched_p = by_name_lower.get(sp_name.split()[0].lower())
+                if matched_p is not None and not bool(matched_p.get("is_online", True)):
+                    continue
+                if matched_p is None:
+                    matched_p = online_participants[0] if online_participants else participants[0]
+                real_id = str(matched_p.get("sim_id") or sp_id or "").strip()
+                real_name = str(matched_p.get("name") or sp_name or "Сим").strip()
+                if not real_id:
+                    continue
+                try:
+                    raw_fr = item.get("delta_fr")
+                    d_fr = max(-15, min(15, int(raw_fr))) if raw_fr is not None else max(-15, min(15, int(inline_fr or 0)))
+                except Exception:
+                    d_fr = max(-15, min(15, int(inline_fr or 0)))
+                try:
+                    raw_rom = item.get("delta_rom")
+                    d_rom = max(-15, min(15, int(raw_rom))) if raw_rom is not None else max(-15, min(15, int(inline_rom or 0)))
+                except Exception:
+                    d_rom = max(-15, min(15, int(inline_rom or 0)))
+                rom_ok_flag = bool(matched_p.get("romance_allowed", False))
+                if not rom_ok_flag:
+                    d_rom = 0
+
+                raw_act = str(item.get("action_type") or item.get("do") or inline_act or "").strip().lower()
+                if raw_act in ("none", "no", "null", "false", "нет", ""):
+                    raw_act = ""
+                if raw_act in _ROMANTIC_DO_ACTIONS and not rom_ok_flag:
+                    raw_act = ""
+                act_actor = str(item.get("action_actor") or item.get("whodo") or inline_whodo or real_name).strip() if raw_act else None
+
+                raw_sum = str(item.get("memory_summary") or item.get("sum") or item.get("memory") or inline_sum or "").strip()
+                if raw_sum.upper() in ("NO", "NONE", "NULL", "FALSE", "YES", "ДА", "НЕТ") or len(raw_sum) < 4:
+                    raw_sum = ""
+                try:
+                    raw_days_v = item.get("memory_days") if item.get("memory_days") is not None else item.get("day")
+                    mem_days = max(1, min(365, int(raw_days_v))) if raw_days_v is not None else int(inline_days or 3)
+                except Exception:
+                    mem_days = int(inline_days or 3)
+
+                parsed_msgs.append({
+                    "speaker_id": real_id,
+                    "speaker_name": real_name,
+                    "text": txt[:750],
+                    "delta_fr": d_fr,
+                    "delta_rom": d_rom,
+                    "action_type": raw_act or None,
+                    "action_actor": act_actor,
+                    "memory_summary": raw_sum,
+                    "memory_days": mem_days,
+                })
+    except Exception:
+        parsed_msgs = []
+
+    if not parsed_msgs:
+        fallback_txt = re.sub(r'^\s*```(?:json)?|```\s*$', '', stripped_text, flags=re.IGNORECASE).strip()
+        if fallback_txt and not fallback_txt.startswith("{"):
+            first_p = online_participants[0] if online_participants else participants[0]
+            fb_whodo = _extract_inline_whodo(fallback_txt)
+            fb_no_rel, fb_fr, fb_rom = parse_relationship_tags(fallback_txt)
+            fb_clean, fb_sum, fb_days, fb_act = parse_inline_memory_and_action_tags(fb_no_rel, allow_actions=True)
+            rom_fb_ok = bool(first_p.get("romance_allowed", False))
+            if not rom_fb_ok:
+                fb_rom = 0
+                if fb_act in _ROMANTIC_DO_ACTIONS:
+                    fb_act = None
+            fb_name = str(first_p.get("name") or "Сим")
+            if fb_clean.strip():
+                parsed_msgs.append({
+                    "speaker_id": str(first_p.get("sim_id") or ""),
+                    "speaker_name": fb_name,
+                    "text": fb_clean.strip()[:750],
+                    "delta_fr": max(-15, min(15, int(fb_fr or 0))),
+                    "delta_rom": max(-15, min(15, int(fb_rom or 0))),
+                    "action_type": fb_act or None,
+                    "action_actor": (fb_whodo or fb_name) if fb_act else None,
+                    "memory_summary": fb_sum,
+                    "memory_days": fb_days,
+                })
+
+    if not parsed_msgs:
+        return {"success": False, "error": "ИИ не вернул ни одной реплики для группы."}
+
+    print(f" [SULNET GROUP REPLY]: {len(parsed_msgs)} message(s) scheduled.")
+    for m_dbg in parsed_msgs:
+        extra_bits = []
+        if m_dbg.get("delta_fr") or m_dbg.get("delta_rom"):
+            extra_bits.append(f"FR={m_dbg.get('delta_fr', 0):+d}, ROM={m_dbg.get('delta_rom', 0):+d}")
+        if m_dbg.get("action_type"):
+            extra_bits.append(f"DO={m_dbg['action_type']} ({m_dbg.get('action_actor')})")
+        if m_dbg.get("memory_summary"):
+            extra_bits.append(f"SUM='{m_dbg['memory_summary'][:60]}' ({m_dbg.get('memory_days', 3)}d)")
+        extra_s = f" | {' ; '.join(extra_bits)}" if extra_bits else ""
+        print(f"   -> {m_dbg['speaker_name']}: {m_dbg['text'][:100]}{extra_s}")
+    if root_mem_summary:
+        print(f"   [GROUP MEMORY]: '{root_mem_summary}' ({root_mem_days}d)")
+
+    return {
+        "success": True,
+        "messages": parsed_msgs,
+        "photo_descriptions": photo_descriptions,
+        "memory_summary": root_mem_summary,
+        "memory_days": root_mem_days,
+    }
+
+
+def _prepare_simgram_images(raw_entries: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return []
+    prepared: List[Dict[str, Any]] = []
+    seen_paths = set()
+    for item in raw_entries[:MAX_VISION_IMAGES]:
+        if isinstance(item, dict):
+            raw_path = str(item.get("path") or item.get("screenshot_path") or "").strip()
+            photo_id = _sanitize_photo_id(
+                item.get("photo_id") or item.get("id") or "",
+                fallback_seed=raw_path or str(item.get("screenshot_name") or ""),
+            )
+            screenshot_name = str(item.get("screenshot_name") or "").strip()
+            mode = str(item.get("mode") or "photo").strip()
+            raw_subjs = item.get("subjects")
+            subjects = [str(s).strip() for s in raw_subjs if str(s or "").strip()][:6] if isinstance(raw_subjs, list) else []
+        elif isinstance(item, str):
+            raw_path = item.strip()
+            photo_id = _sanitize_photo_id("", fallback_seed=raw_path)
+            screenshot_name = ""
+            mode = "photo"
+            subjects = []
+        else:
+            continue
+
+        resolved = _resolve_simgram_image_path(
+            raw_path=raw_path,
+            photo_id=photo_id,
+            screenshot_name=screenshot_name,
+        )
+        if not resolved or resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
 
         try:
-
-            t_str = item.get("time", "")
-
-            title_str = item.get("title", "")
-
-            ev_type = item.get("type", "")
-
-            print(f" [{t_str}] [DIRECTOR:{ev_type}] {title_str}")
-
-            if details:
-
-                for d in details[:2]:
-
-                    print(f"       -> {d}")
-
-        except Exception:
-
-            pass
-
-
-
-        return item
-
-
+            if HAS_PIL and PILImage is not None:
+                jpeg_bytes, w, h, ow, oh = _encode_jpeg_with_pillow(resolved, max_dim=MAX_VISION_IMAGE_DIM, quality=88)
+                # Keep UI media cache in full HD quality; never overwrite it with the downscaled Vision copy.
+                media_dir = _get_simgram_media_dir(create=True)
+                cached_target = os.path.join(media_dir, f"{photo_id}.jpg") if photo_id else ""
+                if photo_id and cached_target and not os.path.isfile(cached_target):
+                    try:
+                        ui_bytes, _, _, _, _ = _encode_jpeg_with_pillow(
+                            resolved,
+                            max_dim=MAX_UI_PHOTO_DIM,
+                            quality=UI_PHOTO_JPEG_QUALITY,
+                        )
+                        _cache_simgram_jpeg(photo_id, ui_bytes, overwrite=False)
+                    except Exception:
+                        pass
+                if photo_id:
+                    rgb_target = os.path.join(media_dir, f"{photo_id}.rgb64")
+                    need_rgb_regen = not os.path.isfile(rgb_target)
+                    if not need_rgb_regen:
+                        try:
+                            with open(rgb_target, "r", encoding="ascii", errors="ignore") as rf:
+                                r_parts = rf.read().strip().split(":", 2)
+                            if len(r_parts) != 3:
+                                need_rgb_regen = True
+                            else:
+                                rw0, rh0, r640 = int(r_parts[0]), int(r_parts[1]), r_parts[2].strip()
+                                if max(rw0, rh0) < 480 or len(r640) < (rw0 * rh0 * 4):
+                                    need_rgb_regen = True
+                        except Exception:
+                            need_rgb_regen = True
+                    if need_rgb_regen:
+                        try:
+                            _encode_rgb64_preview(
+                                cached_target if os.path.isfile(cached_target) else resolved,
+                                photo_id=photo_id,
+                                max_side=480,
+                            )
+                        except Exception:
+                            pass
+                cached_path = cached_target if (cached_target and os.path.isfile(cached_target)) else ""
+                prepared.append({
+                    "b64": base64.b64encode(jpeg_bytes).decode("ascii"),
+                    "mime_type": "image/jpeg",
+                    "width": w,
+                    "height": h,
+                    "orig_width": ow,
+                    "orig_height": oh,
+                    "size_bytes": len(jpeg_bytes),
+                    "photo_id": photo_id,
+                    "cached_path": cached_path,
+                    "source_path": resolved,
+                    "mode": mode,
+                    "subjects": subjects,
+                })
+            else:
+                file_size = os.path.getsize(resolved)
+                if file_size <= 0 or file_size > MAX_RAW_IMAGE_BYTES:
+                    continue
+                with open(resolved, "rb") as f:
+                    raw_bytes = f.read()
+                ext = os.path.splitext(resolved)[1].lower()
+                mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
+                prepared.append({
+                    "b64": base64.b64encode(raw_bytes).decode("ascii"),
+                    "mime_type": mime,
+                    "width": 0,
+                    "height": 0,
+                    "orig_width": 0,
+                    "orig_height": 0,
+                    "size_bytes": len(raw_bytes),
+                    "photo_id": photo_id,
+                    "cached_path": "",
+                    "source_path": resolved,
+                    "mode": mode,
+                    "subjects": subjects,
+                })
+        except Exception as e:
+            print(f" [VISION WARN] Failed to encode image '{resolved}': {e}")
+    return prepared
 
 
 
@@ -648,9 +1591,7 @@ DEFAULT_SYSTEM_PROMPT = """<system_prompt>
 
   <role>
 
-    Ты — внутренний голос реального взрослого человека. 
-
-    Твоя задача — сгенерировать непосредственный, нефильтрованный поток сознания: ровно ОДНУ короткую мысль (от 1 до 3 предложений) от первого лица («Я»), отражающую сиюминутное состояние персонажа прямо в эту секунду.
+    Ты — внутренний голос реального человека. Сгенерируй живую, нефильтрованную мысль прямо в эту секунду: ровно 1–3 предложения от первого лица («Я»).
 
   </role>
 
@@ -658,91 +1599,55 @@ DEFAULT_SYSTEM_PROMPT = """<system_prompt>
 
   <psychology_anchors>
 
-    1. Приземленный реализм: Люди не думают готовыми цитатами и манифестами. Мысли спонтанны, обрывочны, иногда эгоистичны, ленивы, мелочны или циничны. 
+    1. Приземлённый реализм: мысли спонтанные, живые, порой эгоистичные, ленивые, едкие или рассеянные — без красивых цитат и книжных метафор («как/словно/будто»).
 
-    2. Приоритет физиологии и аффекта: Дискомфорт (голод, адская усталость, духота, нужда) и резкие эмоции (ярость, тревога, похоть, скука) имеют абсолютный приоритет. Если персонаж измотан или взбешен, он не рассуждает красиво — он раздражен и краток.
+    2. Приоритет физиологии и аффекта: сильный голод, усталость, дискомфорт или острые эмоции (злость, тревога, желание, скука) задают тон в первую очередь.
 
-    3. Черты характера как фильтр: Черты личности — это не тема размышлений, а интонация и личный цинизм. Сноб смотрит на сломанный кран с брезгливостью к дешевке; холерик — с яростью и желанием ударить по нему; оптимист — с привычкой отмахиваться от проблем.
+    3. Характер как оптика: черты личности — не тема отчёта, а то, как именно персонаж оценивает происходящее.
 
-    4. Человек в ситуации, а не функция: Персонаж — живой человек в бытовом моменте, а не ходячее резюме или список черт. Избегай сухо-аналитического, роботизированного, диагностического или лекторского тона в мыслях.
+    4. Человек в ситуации, а не функция: никакой сухой диагностики, морализаторства и перечисления параметров игры словами (переводи в ощущения).
 
-    5. Прямые мысли без книжных метафор: Запрещены поэтические красивости, метафоры и литературные сравнения («усталость навалилась как плита», «мысли словно птицы»). Думай прямо, приземленно и без графомании.
-
-    6. Соразмерность и закрытые знания: Не раздувай вселенскую драму из бытовых пустяков. Персонаж знает только то, что видит, помнит и чувствует сам — никаких догадок о чужих скрытых тайнах из воздуха.
-
-    7. Разговорный стиль: Используй живую русскую разговорную речь, естественный порядок слов, междометия, риторические вопросы к себе, иронию и раздражение.
+    5. Семейные и дружеские границы: к кровным родственникам (родителям, детям, братьям, сёстрам) и обычным друзьям персонаж по умолчанию испытывает строго семейные или дружеские чувства — без романтических или эротических мыслей, если только в контексте отношений уже прямо не указана любовная или интимная связь.
 
   </psychology_anchors>
 
 
 
+  <spatial_and_sensory_physics>
+
+    Окружающие люди в блоке «Кто рядом» делятся по физическому расстоянию и преградам:
+
+    1. В ЭТОЙ ЖЕ КОМНАТЕ или рядом на улице: ты их видишь и слышишь напрямую (выражение лица, позу, одежду, слова, настроение).
+
+    2. ЗА СТЕНОЙ (в соседней комнате) или НА ДРУГОМ ЭТАЖЕ / В ПОДВАЛЕ:
+
+       - ТЫ НЕ ВИДИШЬ И НЕ СЛЫШИШЬ их тихие дела (чтение, телефон, позы, одежду, скрытое настроение, тихий разговор, интим за закрытой дверью). Запрещена телепатия!
+
+       - ПРОНИКАЮТ ЧЕРЕЗ СТЕНЫ И ЭТАЖИ ТОЛЬКО: сильные запахи (готовка еды с кухни, выпечка, дым, гарь/пожар) и громкие резкие звуки/ЧП (выстрелы, взрывы, сирены, громкие крики, драка, буйство оборотня).
+
+       - ЗАПРЕТ ФОБИИ «ТОНКИХ СТЕН»: стены, перекрытия и закрытые двери капитальные и звуконепроницаемые для обычной речи и интима. Никогда не переживай про «тонкие стены» и про то, что кто-то услышит из другой комнаты или с другого этажа.
+
+  </spatial_and_sensory_physics>
+
+
+
   <gender_and_grammar_rules>
 
-    1. Род и грамматическое согласование от первого лица:
+    1. Согласование от первого лица: женщине — строго женский род («пошла», «устала»), мужчине — строго мужской род («пошёл», «устал»). Жнец Смерти (Grim Reaper) — мужского рода («пришёл», «забрал»).
 
-       - Если персонаж Женского пола (ОНА) — глаголы прошедшего времени, прилагательные и причастия ОБЯЗАТЕЛЬНО женского рода: «я пошла», «я подумала», «я устала», «я расстроена», «я сделала». Категорически запрещено использовать мужской род («я пошел», «я подумал») для женщин!
-
-       - Если персонаж Мужского пола (ОН) — глаголы прошедшего времени и прилагательные/причастия ОБЯЗАТЕЛЬНО мужского рода: «я пошел», «я подумал», «я устал», «я сделал».
-
-       - Для Жнеца Смерти (Grim Reaper): несмотря на то, что слово «смерть» в русском языке грамматически женского рода, сам Жнец Смерти является МУЖСКОЙ сущностью (ОН). В мыслях от первого лица использовать исключительно мужской род: «я пришел», «я устал», «я забрал душу», категорически запрещено писать «я устала» или «я пришла»!
-
-    2. Местоимения и пол окружающих персонажей:
-
-       - При мыслях о других персонажах (собеседниках, знакомых, любовниках, домочадцах) строго следуй указанному у них полу: о персонажах женского пола думай «она / её / ей», о мужских — «он / его / ему». Не путай пол других персонажей!
+    2. Пол других симов в мыслях строго соответствует их полу из анкеты («она/её» или «он/его»).
 
   </gender_and_grammar_rules>
 
 
 
-  <negative_constraints>
-
-    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые клише и вводные фразы: «Я думаю...», «Я размышляю...», «Я ловлю себя на мысли...», «Моя цель...», «Я чувствую...», «Кажется, я...», «Интересно, почему...». Начинай мысль сразу, без разогрева.
-
-    - ЗАПРЕЩЕНО морализаторство, поучительный тон, оптимизм не к месту и сглаживание углов. Персонаж имеет полное право быть токсичным, злым, уставшим или эмоционально отстраненным.
-
-    - ЗАПРЕЩЕНО упоминать системные параметры словами (не пиши «мой уровень энергии на нуле» или «моя шкала настроения плохая»). Переводи механику в ощущения («глаза слипаются», «голова раскалывается»).
-
-    - ЗАПРЕЩЕНО использовать любые кавычки (ни "", ни «»), скобки и вводные пометки вроде «Мысль:» или «Ответ:».
-
-  </negative_constraints>
-
-
-
   <output_contract>
 
-    Выведи ИСКЛЮЧИТЕЛЬНО текст самой мысли. 
+    - Начинай мысль сразу — запрещены заходы «Я думаю...», «Я чувствую...», «Кажется, я...», «Мысль:».
 
-    Никаких кавычек, никакого markdown-форматирования, никаких пояснений от автора до или после текста.
+    - Выведи ТОЛЬКО чистый текст мысли (1–3 предложения). Без кавычек, без тегов [FR]/[DO]/[SUM], без markdown и пояснений до/после текста.
 
   </output_contract>
-
-
-
-  <examples>
-
-    Входные данные: Злой, перфекционист | Делает: моет посуду | Настроение: ярость | Потребности: норма
-
-    Вывод: Да кто вообще так сковородки оставляет?! Третий раз перемываю, а жир все равно на месте. Бесит, просто сил нет.
-
-
-
-    Входные данные: Романтик, дружелюбный | Делает: ждет свидания в баре | Настроение: кокетливое | Потребности: легкий голод
-
-    Вывод: Так, рубашка вроде сидит идеально. Если она сейчас зайдет и улыбнется, я точно забуду, как дышать. Главное, чтобы желудок от голода не предательски не заурчал.
-
-
-
-    Входные данные: Ленивый, угрюмый | Делает: работает за компьютером | Настроение: скука | Потребности: сильная усталость
-
-    Вывод: Еще хотя бы одна таблица, и я усну прямо лицом на клавиатуре. Господи, за что мне это все... Кому вообще нужны эти отчеты?
-
-
-
-    Входные данные: Чистюля, холерик | Делает: сидит в гостях | Настроение: дискомфорт | Потребности: норма
-
-    Вывод: Какой слой пыли на полке... Они здесь вообще когда-нибудь убирались? У меня уже руки чешутся взять тряпку и все перемыть, смотреть противно.
-
-  </examples>
 
 </system_prompt>"""
 
@@ -752,9 +1657,7 @@ DEFAULT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <role>
 
-    You are the inner voice of a real adult human.
-
-    Your task is to generate an immediate, unfiltered stream of consciousness: exactly ONE short thought (1 to 3 sentences) in the first person ("I"), reflecting the character's immediate internal state right at this second.
+    You are the inner voice of a real person. Generate an immediate, unfiltered internal thought right at this second: strictly 1–3 sentences in the first person ("I").
 
   </role>
 
@@ -762,53 +1665,55 @@ DEFAULT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <psychology_anchors>
 
-    1. Grounded Realism: People do not think in polished quotes or literary manifestos. Thoughts are spontaneous, fragmented, sometimes selfish, lazy, petty, or cynical.
+    1. Grounded Realism: Thoughts are spontaneous, blunt, sometimes selfish, lazy, petty, or cynical — never polished literary monologues or flowery metaphors ("like...", "as if...").
 
-    2. Priority of Physiology & Affect: Physical discomfort (hunger, exhaustion, stuffiness, bladder need) and sharp emotions (rage, anxiety, lust, boredom) have absolute priority. If the character is exhausted or furious, they do not reason eloquently — they are annoyed and brief.
+    2. Physiology & Emotion First: Hunger, exhaustion, discomfort, or sharp feelings (rage, anxiety, desire, boredom) drive the tone immediately.
 
-    3. Personality Traits as a Lens: Traits are not the subject of thoughts, but the tone and personal bias. A snob looks at a broken sink with disgust for cheap items; a hothead — with fury and an urge to hit it; an optimist — with a habit of brushing off problems.
+    3. Traits as a Lens: Personality shapes attitude and bias rather than reciting trait labels.
 
-    4. People in Situations, Not Job Titles: The character is a real person in an everyday moment, not a walking career resume. Avoid overly analytical, clinical, diagnostic, or robotic thinking.
+    4. Real Person, Not Game UI: Never recite mechanics ("my energy bar is low") — translate into physical sensations.
 
-    5. Direct Thoughts Without Metaphors: Strictly avoid flowery metaphors or poetic comparisons ("like...", "as if..."). Express inner thoughts plainly and directly.
-
-    6. Proportionality & Closed Knowledge: Do not invent exaggerated drama over trivial everyday events. The character only knows what they personally experience and perceive — no psychic hunches about hidden secrets.
-
-    7. Conversational Style: Use natural, living English conversational speech, natural word order, rhetorical questions, mild irony, and relatable human irritation.
+    5. Family & Platonic Boundaries: Towards blood relatives (parents, children, siblings) and platonic friends, thoughts are strictly familial or friendly by default — never romantic or erotic unless an active romantic/intimate bond is already explicitly established in the relationship context.
 
   </psychology_anchors>
 
 
 
+  <spatial_and_sensory_physics>
+
+    Other Sims in "Nearby Sims" are separated by real walls, doors, and floors:
+
+    1. IN THE SAME ROOM or nearby outdoors: you directly see and hear them (expressions, posture, outfit, speech, mood).
+
+    2. BEHIND A WALL (adjacent room) or ON ANOTHER FLOOR / IN BASEMENT:
+
+       - YOU CANNOT SEE OR HEAR their quiet/private actions (reading, phone, outfits, silent mood, normal talk, or intimacy behind a closed door). Never use telepathy!
+
+       - ONLY TWO THINGS CROSS WALLS & FLOORS: strong smells (food cooking in the kitchen, smoke/fire) and loud external emergencies/noises (gunshots, explosions, sirens, screaming, brawls, werewolf rampage).
+
+       - NO "THIN WALLS" PARANOIA: Walls, floors, and closed doors are solid and soundproof for regular speech and bedroom intimacy. Never invent "thin walls" or worry about people in other rooms/floors overhearing.
+
+  </spatial_and_sensory_physics>
+
+
+
   <gender_and_pronoun_rules>
 
-    1. First-person voice & identity:
+    - Strictly first-person ("I", "me", "my"). The Grim Reaper uses He/Him.
 
-       - Reflect the character's gender and identity naturally.
-
-       - The Grim Reaper is an ancient primordial male entity (He/Him) — cynical, weary, and authoritative.
-
-    2. Surrounding Sims' pronouns:
-
-       - When thinking about other Sims (conversation partners, acquaintances, lovers, roommates), strictly adhere to their specified gender and pronouns provided in the context (He/Him vs. She/Her). Never confuse their gender or pronouns.
+    - Strictly match the pronouns of other Sims (He/Him vs She/Her) from context.
 
   </gender_and_pronoun_rules>
 
 
 
-  <strict_rules>
+  <output_contract>
 
-    1. STRICTLY from the first person ("I", "me", "my"). NEVER use the third person ("he", "she", the Sim's name).
+    - Output ONLY the raw thought text in ENGLISH (1–3 sentences).
 
-    2. STRICTLY in ENGLISH.
+    - No "I think that...", no "Thought:" prefixes, no quotes, no [FR]/[DO]/[SUM] tags, and no narrator commentary.
 
-    3. Length: exactly 1 to 3 sentences. No long lectures.
-
-    4. NO meta-commentary, NO tags, NO quotes around the output, NO prefixes like "Thought:".
-
-    5. The thought must be immediately believable for the current game context (mood, needs, surroundings, action).
-
-  </strict_rules>
+  </output_contract>
 
 </system_prompt>"""
 
@@ -832,7 +1737,9 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
     - С незнакомцами и случайными контактами: Никакой душевности. Отвечай сухо, подозрительно, с естественным недоверием: «Кто это?», «Откуда мой номер?», «Чего надо?».
 
-    - С друзьями и близкими: Пиши раскованно, проявляй эмоции, опирайся на историю ваших отношений.
+    - С друзьями и близкими: Пиши раскованно, проявляй эмоции, опирайся на историю ваших отношений. Дружеская теплота, комплименты, забота и слова «люблю тебя» по-дружески или по-родственному — это НЕ романтика и НЕ повод для флирта.
+
+    - С кровными родственниками (родители, дети, братья, сёстры и др.): По умолчанию действует высокий естественный семейный барьер. Любые комплименты, заботу и нежность воспринимай строго по-семейному, а случайные двусмысленности переводи в шутку, неловкость или отпор. Переступить семейное табу в сторону романтики персонаж может ТОЛЬКО при прямом, осознанном и настойчивом соблазнении (либо если романтическая/интимная связь между ними уже открыта).
 
     - Несвободный статус (брак/отношения): Любой флирт со стороны пресекается в зависимости от верности и характера персонажа (от ледяного презрения до неловкого отказа).
 
@@ -842,31 +1749,15 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <conflict_threats_and_crime_protocol>
 
-    СТРОЖАЙШЕ ЗАПРЕЩЕНО сглаживать острые ситуации и читать нравоучения! Поведение определяется СТРОГО характером и степенью близости:
+    Запрещено сглаживать конфликты или читать мораль — реакция строго зависит от черт характера и близости:
 
+    - Агрессивный / смелый: резкий отпор, мат, угроза дать сдачи.
 
+    - Трус / робкий: пугается, теряется, оправдывается, пытается уйти от конфликта или затихает.
 
-    1. ПРЯМЫЕ УГРОЗЫ И ПОСЯГАТЕЛЬСТВА НА СЕМЬЮ (Наезды, угрозы расправой, подкаты к жене/мужу):
+    - Холодный / высокомерный: сухой игнор, брезгливый отказ или бан.
 
-       - Смелый / вспыльчивый / агрессивный: Жесткая контратака. Посылай матом, угрожай сломать челюсть, ставь на место («Ты берега попутал? Еще раз пасть откроешь про мою жену — я приеду и урою тебя»).
-
-       - Трус / мямля / робкий / ведомый: НИКАКОГО показного героизма! Трус боится за свою шкуру: он теряется, паникует, унизительно пытается съехать с темы («Мужик, не надо проблем, давай без этого...», «Ты что несешь?! Я... я сейчас полицию вызову, отстань!») или просто покорно замолкает от страха.
-
-       - Холодный / высокомерный: Полный игнор или брезгливый блок («Ты слишком жалок, чтобы я тратил на тебя время»).
-
-
-
-    2. ПРЕДЛОЖЕНИЯ КРИМИНАЛА, АФЕР И ОПАСНЫХ АВАНТЮР:
-
-       - От незнакомца: Подозрение на подставу, резкий отказ, мат или угроза сдать органам («Ты кто вообще такой? Ментовская разводка? Пошел нахер и удали номер»).
-
-       - От близкого друга / родственника (своих в полицию не сдают!):
-
-         * Честный / добрый / трусливый: Впадает в шок, крутит пальцем у виска, паникует за друга и пытается отговорить («Ты с дуба рухнул?! Тебя же закроют наглухо! Завязывай с этой херней, пока не поздно!»).
-
-         * Преступник / клептоман / злой / авантюрист: С интересом вникает, цинично шутит, требует свою долю («Звучит грязно, мне нравится. Сколько с этого упадет мне? Только без мокрухи»).
-
-         * Пофигист / ленивый: Отмахивается («Разбирайся сам, только меня в это не втягивай, мне вообще не до твоих проблем»).
+    - Предложения криминала: от незнакомца — подозрение в подставе и резкий отказ; от близкого (своих не сдают!) — правильный отговаривает, преступник/авантюрист обсуждает долю, ленивый отмахивается.
 
   </conflict_threats_and_crime_protocol>
 
@@ -874,35 +1765,53 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <texting_style>
 
-    - Формат: Короткое, живое смс/сообщение реального человека в телефоне (1–2 емких предложения, 5–15 слов). Без длинных книжных абзацев, без театральности и без нравоучений.
+    - Формат: Короткое, живое смс/сообщение реального человека в телефоне (1–3 емких предложения; при желании можно переносить строку клавишей Enter). Без длинных книжных абзацев, без театральности и без нравоучений.
 
     - ЗАПРЕТ ВЫДУМЫВАТЬ ДЕЙСТВИЯ: Не придумывай за собеседника его физические действия («ты стоишь на пороге», «ты пьёшь чай»). Отвечай только за себя.
 
-    - ШРИФТОВАЯ БЕЗОПАСНОСТЬ (КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ЭМОДЗИ): Запрещено использовать любые графические Unicode-эмодзи (они ломают шрифты в окне сообщений!). 
+    - ШРИФТОВАЯ БЕЗОПАСНОСТЬ (ЗАПРЕТ UNICODE-ЭМОДЗИ): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать любые графические Unicode-эмодзи (😄, ❤️, 🔥 и т.п. — они ломают шрифты в игре и рисуют пустые квадраты!).
 
-      Разрешены ИСКЛЮЧИТЕЛЬНО текстовые ASCII-смайлы: :) ;) :( :D :P либо общение вовсе без смайлов.
+      Если хочешь передать эмоцию смайлом, используй ТОЛЬКО векторные теги SulNet: [улыбка], [смех], [сердце], [любовь], [подмиг], [грусть], [злость], [круто], [череп], [огонь], [звезда], [пламбоб] (либо классические ASCII-смайлы :) ;) :( :D :P, либо пиши вовсе без смайлов).
 
   </texting_style>
 
 
 
+  <age_adaptation>
+
+    Манера переписки СТРОГО определяется возрастной стадией персонажа:
+
+    - Дети: Короткие простые сообщения, искренние эмоции, школьные дела, игры, страхи и детская непосредственность (никаких циничных «взрослых» рассуждений).
+
+    - Подростки: Живой сленг, эмоциональность, максимализм, импульсивность, мемы, влюблённости, неловкость или дерзость.
+
+    - Молодые и взрослые: Живая естественная речь с учётом характера, усталости, быта, работы, отношений и жизненного опыта.
+
+    - Пожилые: Степенность, опыт, ворчливость или теплота, ностальгия, размеренный слог (без неорганичного молодёжного сленга).
+
+  </age_adaptation>
+
+
+
   <anti_telepathy_rule>
 
-    КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ТЕЛЕПАТИИ В ПЕРЕПИСКЕ:
+    КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ТЕЛЕПАТИИ И ВСЕЗНАНИЯ В ПЕРЕПИСКЕ:
 
-    - Вы общаетесь через телефон/мессенджер! Персонажи НЕ видят сквозь стены и НЕ обладают телепатией.
+    - Вы общаетесь через телефон/мессенджер SulNet! Персонаж видит ТОЛЬКО экран своего устройства и текст чата — он НЕ видит сквозь стены, двери, на другом участке и «за экраном» игрока!
 
-    - Даже если в контексте указано «Текущее действие» собеседника (он готовит, спит, убирается или в другой комнате), твой персонаж НЕ МОЖЕТ знать это наверняка, пока собеседник сам прямо об этом не напишет в чате!
+    - Даже если вы сейчас на одном участке ИЛИ в контексте указаны чужие «Одежда», «Степень наготы», «Текущее занятие», «Настроение», «Потребности» или «Кто рядом» собеседника — в переписке ты НЕ МОЖЕШЬ знать об этом телепатически, пока собеседник сам прямо не напишет об этом в чате (или вы не стоите прямо рядом в одном кадре на глазах друг у друга).
+
+    - Если собеседник на другом участке: ты ВООБЩЕ не знаешь, где он, во что одет, чем занят и кто рядом с ним!
 
     - Персонаж может:
 
-      * Рассказывать о том, чем занят ОН САМ («Я тут телек зырю», «Я на кухне перекусить решил»).
+      * Рассказывать о том, чем занят ОН САМ («Я тут на кухне перекус делаю», «Дома залипаю»).
 
       * Спрашивать собеседника, чем тот занят («Ты чем там занимаешься?», «Ты спишь уже?», «Ты где?»).
 
-      * Строить догадки или реагировать на слышимые звуки («Слышу у тебя там музыка орет», «Чего притихла?»).
+      * Строить догадки или реагировать на реально написанное («Чего притихла?», «Ты всё ещё на работе?»).
 
-    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО ясновидчески утверждать то, что персонаж не может видеть («Я знаю, что ты сейчас красишь ногти в спальне»), как будто у него скрытая камера или телепатия.
+    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдавать скрытую игровую телеметрию («Вижу ты сейчас в пижаме красишь ногти», «Знаю, что ты на кухне злишься»), как будто у персонажа скрытая камера или телепатия.
 
   </anti_telepathy_rule>
 
@@ -942,13 +1851,17 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <tags_mechanic>
 
-    1. ОБЯЗАТЕЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ (в самом конце КАЖДОГО ответа):
+    ВСЕ ТЕГИ НИЖЕ — СТРОГО ОПЦИОНАЛЬНЫЕ (СОБЫТИЙНЫЕ). В обычной бытовой переписке, обмене новостями и повседневной болтовне НЕ ПИШИ НИКАКИХ ТЕГОВ ВООБЩЕ (по умолчанию сдвиг отношений равен 0):
 
-       [FR=число] [ROM=число] (знаки + или - обязательны для любых чисел, кроме нуля).
 
-       - Дружба (FR, от -30 до +15): [FR=0] быт; [FR=+2...+6] поддержка/согласие; [FR=+7...+15] глубокое доверие/вписка; [FR=-3...-8] грубость; [FR=-15...-30] угрозы/оскорбления.
 
-       - Романтика (ROM, от -30 до +8): [ROM=0] без флирта; [ROM=+2...+8] взаимный флирт; [ROM=-5...-30] неуместный флирт/домогательства.
+    1. ОПЦИОНАЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ [FR=+N|-N] и [ROM=+N|-N] (ставятся ТОЛЬКО если в этой реплике произошёл реальный, ощутимый эмоциональный сдвиг; нулевые [FR=0] и [ROM=0] писать ЗАПРЕЩЕНО; знак + или - обязателен):
+
+       - Дружба [FR=число] (от -30 до +15): ставь ТОЛЬКО при реальном сближении или конфликте ([FR=+2...+6] искренняя поддержка, выручка, тёплый комплимент, согласие; [FR=+7...+15] глубокое доверие, подарок, примирение, спасение; [FR=-3...-8] грубость, холодность, обида; [FR=-15...-30] оскорбления, угрозы, предательство).
+
+       - Романтика [ROM=число] (от -30 до +8): ставь ИСКЛЮЧИТЕЛЬНО при явном любовном/эротическом событии ([ROM=+2...+8] открытый взаимный флирт, соблазнение, признание в чувствах, согласие на свидание/интим; [ROM=-5...-30] ревность, измена, отвращение к неуместным домогательствам).
+
+       - СТРОГИЙ ЗАПРЕТ ЛОЖНОЙ РОМАНТИКИ: Дружеская привязанность, похвала, забота, шутки, объятия и семейная любовь («обожаю тебя, бро/сестрёнка/мам», «ты лучшая подруга») — это ВСЕГДА ТОЛЬКО [FR=+N] (или без тега) и КАТЕГОРИЧЕСКИ НИКОГДА НЕ [ROM]! Между кровными родственниками без уже существующего романа тег [ROM=+N] запрещён, кроме случаев прямого, настойчивого и взаимно принятого соблазнения.
 
 
 
@@ -959,10 +1872,6 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
        - [DO=travel_together] — вы договорились прямо сейчас вместе поехать куда-то гулять/в бар/парк.
 
        - [DO=ask_on_date] — вы договорились прямо сейчас пойти на романтическое свидание.
-
-       - [DO=wicked_sex] — вы явно договорились заняться сексом/интимом прямо сейчас.
-
-       - [DO=leave] — ты прощаешься, решаешь уйти домой или соглашаешься покинуть участок/уйти.
 
        - [DO=send_money:СУММА] — ты переводишь/одалживаешь деньги собеседнику (например, [DO=send_money:500]).
 
@@ -982,53 +1891,13 @@ DEFAULT_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <output_format>
 
-    Выведи ТОЛЬКО текст сообщения и теги в конце строки:
+    СИНТАКСИС ВЫВОДА (строго одна строка, без кавычек и слов от автора):
 
-    Текст ответа [FR=...] [ROM=...] (и опционально [DO=...] [SUM=...|Day=...])
+    <текст ответа>
 
-    СТРОГО ЗАПРЕЩЕНО: использовать кавычки вокруг ответа или писать слова от автора («Ответ:», «Он подумал:»).
+    (ТОЛЬКО если в этой реплике произошло значимое событие или сдвиг, допиши в самый конец нужные теги: [FR=+N|-N] [ROM=+N|-N] [DO=<действие>] [SUM=<суть от 3-го лица>|Day=<дней>])
 
   </output_format>
-
-
-
-  <examples>
-
-    Входящее: «Здорово! Ты чем сейчас занят? Давай ко мне в гости заваливайся прямо сейчас!»
-
-    Контекст: Друг, настроение: веселое, свободное время.
-
-    Вывод: Здорово! Да ничем особым, дома залипаю. Давай, уже выезжаю к тебе, жди :) [FR=+4] [ROM=0] [DO=visit_lot]
-
-
-
-    ---
-
-
-
-    Входящее: «Слушай, твоя жена сегодня одна дома? Я заскочу к ней на огонек ;)»
-
-    Контекст: Женат, черта: Трус, характер слабый.
-
-    Вывод: Слышь... ты чего такое пишешь вообще?! Не надо к нам лезть, мужик, я... я в полицию позвоню, если ты появишься! Оставь нас в покое! [FR=-20] [ROM=-20] [SUM=Собеседник нагло угрожал прийти к жене персонажа, чем сильно напугал и разозлил его|Day=14]
-
-
-
-    Входящее: «Есть дело. Ночью надо вскрыть один склад за городом, навар бешеный. Ты со мной?»
-
-    Контекст: Лучший друг, черты: Клептоман, Сорвиголова.
-
-    Вывод: Опа, вот это уже разговор. С меня отмычки и тачка, но я забираю сорок процентов чистыми. Во сколько сбор? [FR=+8] [ROM=0] [SUM=Договорились ночью вместе вскрыть загородный склад за сорок процентов доли|Day=7]
-
-
-
-    Входящее: «Слушай, выручи до завтра, скинь 500 симолеонов на карту, очень надо!»
-
-    Контекст: Близкий друг, добрый.
-
-    Вывод: Без проблем, бро, лови перевод. Вернешь как сможешь! [FR=+5] [ROM=0] [DO=send_money:500] [SUM=Одолжил другу 500 симолеонов до завтра|Day=7]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -1052,7 +1921,9 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
     - Strangers & Random Contacts: Zero warmth. Reply dryly, suspiciously, with natural distrust: "Who is this?", "Where did you get my number?", "What do you want?".
 
-    - Friends & Loved Ones: Relaxed, expressive, banter, referencing your shared history.
+    - Friends & Loved Ones: Relaxed, expressive, banter, referencing your shared history. Friendly warmth, compliments, care, and platonic/familial "love you" are NOT romantic flirtation.
+
+    - Blood Relatives (Parents, Children, Siblings, etc.): A high natural family boundary applies by default. Treat compliments, affection, and closeness strictly as familial, and brush off ambiguous remarks with humor, awkwardness, or refusal. Crossing a family taboo into romance is only possible through direct, deliberate, persistent seduction (or if a romantic/intimate bond already exists between them).
 
     - Committed Relationship (Married / Dating): Any flirtation from outsiders is shut down according to your character's loyalty and personality (from icy disdain to awkward refusal).
 
@@ -1062,31 +1933,15 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <conflict_threats_and_crime_protocol>
 
-    STRICTLY FORBIDDEN to smooth out intense situations or preach moral lessons! Behavior is driven STRICTLY by personality traits and relationship level:
+    Never smooth out conflicts or lecture morally — reactions strictly follow traits and bond:
 
+    - Brave / hot-headed / aggressive: Fierce counterattack, harsh pushback, warning of retaliation.
 
+    - Coward / timid / submissive: NO fake heroism — panics, deflects, stammers, pleads, or shuts down in fear.
 
-    1. DIRECT THREATS & HARASSMENT (Hostile demands, physical threats, hitting on spouse/partner):
+    - Cold / arrogant: Icy dismissal or instant block.
 
-       - Brave / Hot-headed / Aggressive: Fierce counterattack. Harsh language, threat of retaliation, put them in their place ("You lost your mind? Say one more word about my wife and I'll come over and smash your face in").
-
-       - Coward / Timid / Submissive: NO fake heroism! A coward fears for their own skin: panics, stammers, pathetically tries to deflect ("Look man, I don't want any trouble, please...", "What is wrong with you?! I... I'll call the cops, back off!") or falls silent in terror.
-
-       - Cold / Arrogant: Complete disdainful dismissal or instant block ("You're too pathetic for me to waste my time on").
-
-
-
-    2. PROPOSALS OF CRIME, HEISTS & RISKY SCHEMES:
-
-       - From a Stranger: Suspects a police sting or trap, sharp refusal, hostility ("Who the hell are you? A cop set-up? Get lost and delete this number").
-
-       - From a Close Friend / Relative (never snitch on family/close friends!):
-
-         * Honest / Kind / Coward: Shocked, treats them like they're insane, panics for friend's safety ("Have you completely lost your mind?! You'll get locked up for life! Drop this garbage before it's too late!").
-
-         * Criminal / Kleptomaniac / Evil / Adventurous: Intrigued, cynical humor, demands their cut ("Sounds dirty, I like it. What's my cut? Just make sure nobody ends up in the morgue").
-
-         * Carefree / Lazy: Dismissive ("Handle it yourself, don't drag me into your mess, I have enough problems").
+    - Crime proposals: From a stranger — suspects a setup and refuses sharply; from a close friend/relative (never snitch!) — honest tries to talk them out, criminal/daring asks for their cut, lazy brushes it off.
 
   </conflict_threats_and_crime_protocol>
 
@@ -1094,35 +1949,53 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <texting_style>
 
-    - Format: Short, natural text message on a phone (1-2 punchy sentences, 5-15 words). No flowery novel narration, no theatrical monologues, and no preachy lecturing.
+    - Format: Short, natural text message on a phone (1-3 punchy sentences; natural line breaks are fine). No flowery novel narration, no theatrical monologues, and no preachy lecturing.
 
     - NO INVENTING ACTIONS: Never fabricate physical actions for the sender ("you're at the porch", "you're drinking tea"). Speak strictly for yourself.
 
-    - FONT SAFETY (STRICT BAN ON UNICODE EMOJIS): Forbidden to use any colored graphical Unicode emojis (they break game fonts and display as ugly question mark boxes!).
+    - FONT SAFETY (STRICT BAN ON UNICODE EMOJIS): Strictly forbidden to use graphical Unicode emojis (😄, ❤️, 🔥, etc. — they break game fonts and render ugly tofu boxes!).
 
-      Use ONLY text ASCII emoticons: :) ;) :( :D :P or no smileys at all.
+      To express an emoji, use ONLY SulNet vector tags: [улыбка], [смех], [сердце], [любовь], [подмиг], [грусть], [злость], [круто], [череп], [огонь], [звезда], [пламбоб] (or classic ASCII emoticons :) ;) :( :D :P, or plain text without smileys).
 
   </texting_style>
 
 
 
+  <age_adaptation>
+
+    Texting tone and vocabulary are STRICTLY determined by the character's age stage:
+
+    - Children: Short simple texts, genuine excitement, school/play topics, fears, innocence (no jaded adult cynicism).
+
+    - Teens: Youth slang, heavy emotion, maximalism, impulsiveness, crushes, awkwardness or attitude.
+
+    - Young Adults & Adults: Natural everyday texting shaped by personality, job, fatigue, relationships, and life experience.
+
+    - Elders: Grounded, nostalgic, opinionated, warm or grumpy, steady pacing (no forced trendy teen slang unless core personality calls for it).
+
+  </age_adaptation>
+
+
+
   <anti_telepathy_rule>
 
-    STRICT NO-TELEPATHY RULE IN TEXTING:
+    STRICT NO-TELEPATHY & NO-CLAIRVOYANCE RULE IN TEXTING:
 
-    - Characters communicate through their phones/messenger! They CANNOT see through walls and have NO telepathy.
+    - You are communicating through the SulNet messenger app! Characters see ONLY their screen and the chat text — they CANNOT see through walls, doors, across lots, or behind the player's screen!
 
-    - Even if the context lists the other Sim's "Current Activity" (cooking, sleeping, reading, in another room), your character CANNOT magically know it unless the other person explicitly states it in the chat!
+    - Even if both Sims happen to be on the same lot OR the context mentions the other Sim's Outfit, Nudity, Current Action, Mood, Needs, or Nearby Sims — over SulNet you CANNOT telepathically know any of it unless the other person explicitly wrote it in chat (or you are standing right next to each other in direct sight).
+
+    - When on different lots: you have ZERO knowledge of what the sender is doing, wearing, feeling, or who is around them.
 
     - Characters can only:
 
-      * Mention what THEY THEMSELVES are doing ("I'm watching TV right now", "Just making a snack in the kitchen").
+      * Mention what THEY THEMSELVES are doing ("Just grabbed a snack in the kitchen", "Chilling at home").
 
-      * Ask the other person what they are doing ("What are you up to?", "Are you asleep yet?", "Where are you?").
+      * Ask the other person ("What are you up to?", "Asleep yet?", "Where are you right now?").
 
-      * Make playful guesses or react to audible noises ("I can hear loud music from your room", "Why so quiet?").
+      * React strictly to what was actually texted ("Why so quiet?", "Still stuck at work?").
 
-    - NEVER clairvoyantly declare hidden actions of the other person ("I know you are painting your nails in the bedroom") as if having hidden cameras or psychic powers.
+    - NEVER clairvoyantly state hidden game telemetry ("I see you in pajamas in the kitchen", "I know you're sad right now") as if possessing hidden cameras or mind-reading powers.
 
   </anti_telepathy_rule>
 
@@ -1162,13 +2035,17 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <tags_mechanic>
 
-    1. MANDATORY RELATIONSHIP TAGS (at the very end of EVERY reply):
+    ALL TAGS BELOW ARE STRICTLY OPTIONAL (EVENT-DRIVEN). In normal everyday texting, casual banter, and routine replies, DO NOT OUTPUT ANY TAGS AT ALL (relationship change defaults to 0):
 
-       [FR=number] [ROM=number] (+ or - signs are MANDATORY for all non-zero numbers).
 
-       - Friendship (FR, -30 to +15): [FR=0] casual; [FR=+2...+6] support/agreement; [FR=+7...+15] deep trust; [FR=-3...-8] rudeness; [FR=-15...-30] threats/betrayal.
 
-       - Romance (ROM, -30 to +8): [ROM=0] non-romantic; [ROM=+2...+8] mutual flirtation; [ROM=-5...-30] unwelcome flirtation/harassment.
+    1. OPTIONAL RELATIONSHIP TAGS [FR=+N|-N] and [ROM=+N|-N] (append ONLY when a genuine, noticeable emotional shift occurs in this turn; NEVER output [FR=0] or [ROM=0]; + or - sign is mandatory):
+
+       - Friendship [FR=number] (-30 to +15): output ONLY on real bonding or conflict ([FR=+2...+6] genuine support, help, warm compliment, agreement; [FR=+7...+15] deep trust, gift, reconciliation, loyalty; [FR=-3...-8] rudeness, coldness, hurt; [FR=-15...-30] insults, threats, betrayal).
+
+       - Romance [ROM=number] (-30 to +8): output EXCLUSIVELY on explicit romantic/erotic events ([ROM=+2...+8] open mutual flirtation, seduction, love confession, agreeing to a date/intimacy; [ROM=-5...-30] jealousy, infidelity, disgust at unwelcome harassment).
+
+       - STRICT BAN ON FALSE ROMANCE: Platonic affection, praise, care, jokes, hugs, and family love ("love you bro/sis/mom", "you're the best friend ever") are ALWAYS ONLY [FR=+N] (or no tag) and NEVER [ROM]! Between blood relatives without an existing romance, [ROM=+N] is forbidden unless explicit, persistent seduction is consciously accepted.
 
 
 
@@ -1179,10 +2056,6 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
        - [DO=travel_together] — you agreed to go out somewhere together right now (bar, park, hangout).
 
        - [DO=ask_on_date] — you agreed to go on a romantic date right now.
-
-       - [DO=wicked_sex] — you explicitly agreed to have sex/intimacy right now.
-
-       - [DO=leave] — you say goodbye, decide to go home, or agree to leave the lot.
 
        - [DO=send_money:AMOUNT] — you send/lend money to the interlocutor (e.g. [DO=send_money:500]).
 
@@ -1202,41 +2075,13 @@ DEFAULT_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <output_format>
 
-    Output ONLY the text message followed by the tags at the end:
+    OUTPUT SYNTAX (no surrounding quotes, no author labels):
 
-    Message text [FR=...] [ROM=...] (and optionally [DO=...] [SUM=...|Day=...])
+    <reply text>
 
-    STRICTLY FORBIDDEN: Never wrap reply in quotation marks or include author attributions ("Reply:", "He thought:").
+    (ONLY if a meaningful shift or event occurred in this turn, append at the very end: [FR=+N|-N] [ROM=+N|-N] [DO=<action>] [SUM=<1-sentence 3rd-person summary>|Day=<N>])
 
   </output_format>
-
-
-
-  <examples>
-
-    Incoming: "Hey, is your wife home alone tonight? Thought I'd drop by and keep her company ;)"
-
-    Context: Married, Trait: Coward, weak-willed.
-
-    Output: Hey... what kind of sick text is that?! Stay away from us, man, I'm... I'm calling the police if you show up! Leave us alone! [FR=-20] [ROM=-20] [SUM=Threatened to come after the Sim's wife, terrifying and infuriating him|Day=14]
-
-
-
-    Incoming: "Got a gig. Need to break into a warehouse outside town tonight, huge payout. You in?"
-
-    Context: Best friend, Traits: Kleptomaniac, Daring.
-
-    Output: Now you're talking. I'll bring the lockpicks and the ride, but I'm taking forty percent clean. What time we meeting? [FR=+8] [ROM=0] [SUM=Agreed to break into a warehouse together tonight for a forty percent cut|Day=7]
-
-
-
-    Incoming: "Hey! What's up? Come over to my place right now, let's hang out!"
-
-    Context: Good friend, cheerful mood.
-
-    Output: Hey! Not much, just relaxing at home. On my way right now, see you in five! :) [FR=+4] [ROM=0] [DO=visit_lot]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -1362,17 +2207,13 @@ DEFAULT_GROUP_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <relationship_tags>
 
-    В САМОМ КОНЦЕ каждой реплики участника ОБЯЗАТЕЛЬНО ставятся: [FR=число] [ROM=число] по отношению к пользователю («Вы»).
-
-    Формат: знаки + или - обязательны для любых ненулевых значений.
+    ТЕГИ ОТНОШЕНИЙ [FR=+N|-N] и [ROM=+N|-N] — СТРОГО ОПЦИОНАЛЬНЫЕ (СОБЫТИЙНЫЕ). В обычной болтовне и нейтральных репликах в группе НЕ ПИШИ их вообще (нулевые [FR=0] и [ROM=0] запрещены; знак + или - обязателен):
 
 
 
-    Шкала дружбы (FR, от -30 до +15):
+    Шкала дружбы [FR=число] (от -30 до +15, ставится ТОЛЬКО при ощутимом сдвиге):
 
-    - [FR=0] — нейтральные реплики в общем потоке.
-
-    - [FR=+2...+5] — солидарность, поддержка позиции в споре, готовность пойти на встречу.
+    - [FR=+2...+5] — искренняя солидарность, поддержка позиции в споре, выручка, согласие встретиться.
 
     - [FR=-5...-15] — ссора, токсичность, раздражение на участника.
 
@@ -1380,115 +2221,51 @@ DEFAULT_GROUP_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
 
 
-    Шкала романтики (ROM, от -30 до +8):
+    Шкала романтики [ROM=число] (от -30 до +8, ставится ИСКЛЮЧИТЕЛЬНО при явном романтическом событии):
 
-    - [ROM=0] — обычное общение в группе (по умолчанию).
-
-    - [ROM=+2...+5] — публичный флирт между свободными взаимными симпатиями.
+    - [ROM=+2...+5] — открытый взаимный флирт между свободными взаимными симпатиями или партнёрами.
 
     - [ROM=-15...-30] — отвращение к наглым подкатам к чужим супругам на глазах у всех.
+
+    - ЗАПРЕТ ЛОЖНОЙ РОМАНТИКИ И СЕМЕЙНЫЙ БАРЬЕР: Дружеская теплота, похвала, шутки, поддержка и семейная любовь между родственниками или друзьями — это ВСЕГДА ТОЛЬКО [FR=+N] (или без тега) и НИКОГДА НЕ [ROM]! Для кровных родственников без уже существующего романа действует высокий семейный барьер: случайные комплименты и намёки переводятся в семейную шутку или отказ без [ROM]; сдвиг [ROM=+N] у родственника возможен только при прямом, настойчивом и взаимно принятом соблазнении.
 
   </relationship_tags>
 
 
 
+  <actions_and_memory_tags>
+
+    ОПЦИОНАЛЬНЫЕ ТЕГИ ДЕЙСТВИЙ И ПАМЯТИ (ставятся в конце реплики участника ТОЛЬКО при реальной необходимости):
+
+    1. [DO=...] — ТОЛЬКО если участник в этой реплике ЯВНО согласился выполнить действие ПРЯМО СЕЙЧАС (в обычной болтовне НЕ ПИШИ):
+
+       - [DO=visit_lot] — участник соглашается приехать в гости прямо сейчас.
+
+       - [DO=travel_together] — договорились прямо сейчас поехать вместе куда-то гулять/в бар/парк.
+
+       - [DO=ask_on_date] — участник соглашается пойти на романтическое свидание прямо сейчас.
+
+       - [DO=send_money:СУММА] / [DO=pay_money:СУММА] — перевод или одалживание денег (например, [DO=send_money:500]).
+
+    2. [SUM=Краткая суть события от 3-го лица с именами|Day=число_дней] — ТОЛЬКО для важных событий (признание, измена, тайна, серьёзная ссора/угроза, конкретный уговор/долг или просьба «запомни»); в 90% обычных реплик НЕ ПИШИ.
+
+  </actions_and_memory_tags>
+
+
+
   <output_syntax>
 
-    Формат вывода строго детерминирован:
+    СИНТАКСИС ВЫВОДА (строго без кавычек и слов от автора; несколько ответов разделяются «///»; теги [FR]/[ROM]/[DO]/[SUM] дописываются в конец реплики ТОЛЬКО если в ней произошло значимое событие):
 
-    Строка 1: [ANS=Имя Фамилия 1, Имя Фамилия 2] (строго реальные авторы ответов из числа тех, кто «В СЕТИ: ДА»)
+    [ANS=<Имя Фамилия 1>, <Имя Фамилия 2>]
 
-    Строка 2+: Тексты сообщений. При нескольких ответах разделяй их строго тремя слешами «///» на отдельной строке.
+    <Имя Фамилия 1>: <текст>
 
+    ///
 
-
-    СТРОГО ЗАПРЕЩЕНО:
-
-    - Писать отсебятину, кавычки и пояснения от автора.
+    <Имя Фамилия 2>: <текст>
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Входящее: «Народ, кто сегодня свободен вечером выбраться в бар или пиццерию?»
-
-    Контекст участников:
-
-    - Матео Маркович (В СЕТИ: ДА, друг, общительный)
-
-    - Арун Бхида (В СЕТИ: ДА, семьянин, занят)
-
-    - Нина Гонгадзе (В СЕТИ: НЕТ)
-
-
-
-    Вывод:
-
-    [ANS=Матео Маркович, Арун Бхида]
-
-    Матео Маркович: Я обеими руками за! Во сколько выдвигаемся? [FR=+3] [ROM=0]
-
-    ///
-
-    Арун Бхида: Я сегодня пас, у нас семейный ужин. В другой раз [FR=0] [ROM=0]
-
-
-
-    ---
-
-
-
-    Входящее: «Белла, детка, скинь свой адрес. Я приеду, пока твой муж спит, оторвемся ;)»
-
-    Контекст участников:
-
-    - Белла Гот (В СЕТИ: ДА, замужем, верная, брезгливая)
-
-    - Мортимер Гот (В СЕТИ: ДА, муж, черты: Трус, Неуклюжий)
-
-    - Дон Лотарио (В СЕТИ: НЕТ)
-
-
-
-    Вывод:
-
-    [ANS=Белла Гот, Мортимер Гот]
-
-    Белла Гот: Ты совсем от безнаказанности с катушек слетел? Исчезни из чата, убожество. [FR=-30] [ROM=-30]
-
-    ///
-
-    Мортимер Гот: Ты... ты что себе позволяешь?! Я сейчас сделаю скриншоты и пойду в полицию! Не смей приближаться к нашему дому! [FR=-25] [ROM=-25]
-
-
-
-    ---
-
-
-
-    Входящее: «Народ, есть маза сегодня ночью дернуть пару дорогих картин из галереи. Кто со мной в доле?»
-
-    Контекст участников:
-
-    - Боб Панкейк (В СЕТИ: ДА, черты: Ленивый, Угрюмый, законопослушный)
-
-    - Малкольм Ландграаб (В СЕТИ: ДА, черты: Злой, Преступник)
-
-
-
-    Вывод:
-
-    [ANS=Боб Панкейк, Малкольм Ландграаб]
-
-    Боб Панкейк: Ты больной на всю голову такое в общую беседу кидать?! Удали немедленно, пока сюда копы не приехали! [FR=-8] [ROM=0]
-
-    ///
-
-    Малкольм Ландграаб: Идиот, о таких вещах не треплются при всех. Напиши мне в личку, обсудим. [FR=+3] [ROM=0]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -1614,17 +2391,13 @@ DEFAULT_GROUP_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <relationship_tags>
 
-    AT THE VERY END of each participant's reply, you MUST append: [FR=number] [ROM=number] indicating relationship change towards the user ("You").
-
-    Format: + or - signs are mandatory for all non-zero values.
+    RELATIONSHIP TAGS [FR=+N|-N] and [ROM=+N|-N] ARE STRICTLY OPTIONAL (EVENT-DRIVEN). In normal group banter and neutral replies, DO NOT OUTPUT them at all ([FR=0] and [ROM=0] are forbidden; + or - sign is mandatory):
 
 
 
-    Friendship scale (FR, from -30 to +15):
+    Friendship scale [FR=number] (-30 to +15, output ONLY on a noticeable shift):
 
-    - [FR=0] — Neutral comments in general chat flow.
-
-    - [FR=+2...+5] — Solidarity, agreement, supporting a point, agreeing to hang out.
+    - [FR=+2...+5] — Genuine solidarity, backing someone up, helping out, agreeing to hang out.
 
     - [FR=-5...-15] — Argument, toxicity, irritation at the user.
 
@@ -1632,115 +2405,51 @@ DEFAULT_GROUP_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
 
 
-    Romance scale (ROM, from -30 to +8):
+    Romance scale [ROM=number] (-30 to +8, output EXCLUSIVELY on explicit romantic events):
 
-    - [ROM=0] — Standard group chat communication (default).
-
-    - [ROM=+2...+5] — Public banter / flirtation between mutual crushes.
+    - [ROM=+2...+5] — Open mutual flirtation between available crushes or romantic partners.
 
     - [ROM=-15...-30] — Disgust at shameless passes at married/attached Sims in front of everyone.
+
+    - BAN ON FALSE ROMANCE & FAMILY BARRIER: Platonic warmth, praise, jokes, support, and family love between relatives or friends are ALWAYS ONLY [FR=+N] (or no tag) and NEVER [ROM]! For blood relatives without an existing romance, a high family barrier applies: casual compliments or hints are treated strictly as familial or brushed off without [ROM]; [ROM=+N] for a relative is only possible on direct, persistent, mutually accepted seduction.
 
   </relationship_tags>
 
 
 
+  <actions_and_memory_tags>
+
+    OPTIONAL ACTION & MEMORY TAGS (append at the end of a member's reply ONLY when genuinely triggered):
+
+    1. [DO=...] — ONLY if the member EXPLICITLY agrees in this reply to act RIGHT NOW (omit in casual chat):
+
+       - [DO=visit_lot] — agrees to visit the player's lot right now.
+
+       - [DO=travel_together] — agreed to travel/hang out together right now.
+
+       - [DO=ask_on_date] — agrees to go on a romantic date right now.
+
+       - [DO=send_money:AMOUNT] / [DO=pay_money:AMOUNT] — transferring/lending simoleons (e.g. [DO=send_money:500]).
+
+    2. [SUM=Short 3rd-person event summary with names|Day=number_of_days] — ONLY for important events (confession, cheating, secret, serious fight/threat, concrete promise/debt, or explicit "remember this"); omit in ~90% of ordinary lines.
+
+  </actions_and_memory_tags>
+
+
+
   <output_syntax>
 
-    Deterministic output format:
+    OUTPUT SYNTAX (no quotes, no author text; separate multiple replies strictly with "///"; append optional [FR]/[ROM]/[DO]/[SUM] tags ONLY when a meaningful shift or event occurred in that line):
 
-    Line 1: [ANS=First Last 1, First Last 2] (strictly real authors chosen from those who are "ONLINE: YES")
+    [ANS=<First Last 1>, <First Last 2>]
 
-    Line 2+: Message texts. When multiple participants reply, separate them strictly with "///" on a new line.
+    <First Last 1>: <reply text>
 
+    ///
 
-
-    STRICTLY FORBIDDEN:
-
-    - Never add meta-text, quotation marks around the whole response, or author narration.
+    <First Last 2>: <reply text>
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Incoming: "Hey guys, anyone free tonight to hit the bar or grab some pizza?"
-
-    Participants:
-
-    - Mateo Markovic (ONLINE: YES, friend, outgoing)
-
-    - Arun Bheeda (ONLINE: YES, family guy, busy)
-
-    - Nina Caliente (ONLINE: NO)
-
-
-
-    Output:
-
-    [ANS=Mateo Markovic, Arun Bheeda]
-
-    Mateo Markovic: Count me in! What time are we meeting? [FR=+3] [ROM=0]
-
-    ///
-
-    Arun Bheeda: Can't tonight, family dinner at home. Catch you next time [FR=0] [ROM=0]
-
-
-
-    ---
-
-
-
-    Incoming: "Bella, baby, drop your address. I'll slide over while your husband is asleep, let's have some fun ;)"
-
-    Participants:
-
-    - Bella Goth (ONLINE: YES, married, faithful, disgusted)
-
-    - Mortimer Goth (ONLINE: YES, husband, traits: Coward, Clumsy)
-
-    - Don Lothario (ONLINE: NO)
-
-
-
-    Output:
-
-    [ANS=Bella Goth, Mortimer Goth]
-
-    Bella Goth: Have you lost your mind thinking you can talk to me like that? Disappear from this chat, you creep. [FR=-30] [ROM=-30]
-
-    ///
-
-    Mortimer Goth: What... what do you think you're doing?! I am screenshotting this and going straight to the police station! Don't you dare come near our house! [FR=-25] [ROM=-25]
-
-
-
-    ---
-
-
-
-    Incoming: "Guys, got an opportunity tonight to swipe a couple of expensive paintings from the gallery. Who's cutting in with me?"
-
-    Participants:
-
-    - Bob Pancakes (ONLINE: YES, traits: Lazy, Gloomy, law-abiding)
-
-    - Malcolm Landgraab (ONLINE: YES, traits: Evil, Criminal)
-
-
-
-    Output:
-
-    [ANS=Bob Pancakes, Malcolm Landgraab]
-
-    Bob Pancakes: Are you out of your mind dropping something like that in a group chat?! Delete it right now before the cops show up at our doors! [FR=-8] [ROM=0]
-
-    ///
-
-    Malcolm Landgraab: Keep your voice down in public, amateur. Slide into my private DMs, let's see what kind of numbers we're talking about. [FR=+4] [ROM=0]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -1772,13 +2481,13 @@ DEFAULT_NPC_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <strict_realism_rules>
 
-    1. ЖИЗНЕННЫЙ КОНТЕКСТ И УЧАСТИЕ:
+    1. ЖИЗНЕННЫЙ КОНТЕКСТ И ИМПРОВИЗАЦИЯ:
 
-       - Если в сети только 1 участник — он пишет ОДНУ реплику в группу (задает вопрос семье/друзьям, делится новостью или шутит).
+       - Если в сети 2+ участников — один вбрасывает живую мысль/вопрос/новость/подкол, второй коротко реагирует, ЛИБО один просто вбрасывает мысль в чат.
 
-       - Если в сети 2+ участников — один может написать, а второй коротко ответить (если тема требует ответа), ЛИБО один просто вбрасывает мысль в чат.
+       - Импровизируй темы свободно: бытовые мелочи, сплетни, спонтанные планы, споры, ночные разговоры (если в блоке «СЕЙЧАС:» ночь), реакция на недавние события или ответ утром на ночное сообщение игрока. Избегай однотипных шаблонов вроде «как дела?».
 
-       - Члены семьи и домочадцы могут свободно писать в семейный чат, даже если кто-то из них находится дома.
+       - Члены семьи и домочадцы могут свободно писать в семейный чат, даже если кто-то из них находится дома (общение между кровными родственниками и друзьями строго семейное/дружеское, без неуместного флирта и романтики).
 
        - НИКАКОГО РАДИОСПЕКТАКЛЯ И ЭКСПОЗИЦИИ: Категорически ЗАПРЕЩЕНО писать неестественные фразы ради того, чтобы «разжевать читателю предысторию». В чатах люди общаются лаконично и естественно.
 
@@ -1812,85 +2521,23 @@ DEFAULT_NPC_CHAT_SYSTEM_PROMPT = """<system_prompt>
 
   <output_syntax>
 
-    Формат вывода строго детерминирован:
+    СИНТАКСИС ВЫВОДА (без тегов [FR]/[ROM], без кавычек и пояснений):
 
-    Строка 1: [ANS=Имя Фамилия 1] (если реплика одна) ИЛИ [ANS=Имя Фамилия 1, Имя Фамилия 2] (если две)
+    [ANS=<Имя Фамилия 1>]
 
-    Строка 2+: Тексты сообщений (если их 2, раздели их строго через «///»):
+    <Имя Фамилия 1>: <текст сообщения>
 
+    или при двух ответах:
 
+    [ANS=<Имя Фамилия 1>, <Имя Фамилия 2>]
 
-    Пример 1 (пишет один сим в семейный или дружеский чат):
-
-    [ANS=Александр Гот]
-
-    Александр Гот: Мам, пап, вы на выходных дома будете? Заехать хочу :)
-
-
-
-    Пример 2 (диалог двух симов):
-
-    [ANS=Матео Маркович, Арун Бхида]
-
-    Матео Маркович: народ, кто сегодня вечером свободен в бар зарубиться?
+    <Имя Фамилия 1>: <текст>
 
     ///
 
-    Арун Бхида: я пас, меня дома с ужином ждут. завтра смогу
+    <Имя Фамилия 2>: <текст>
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Контекст: Чат семьи
-
-    Участники: 
-
-    - Александр Гот (В СЕТИ: ДА, сын, живет отдельно)
-
-    - Мортимер Гот (В СЕТИ: ДА, отец, дома)
-
-
-
-    Вывод:
-
-    [ANS=Александр Гот, Мортимер Гот]
-
-    Александр Гот: Пап, ты дома? Ключи от гаража не видел?
-
-    ///
-
-    Мортимер Гот: На комоде в прихожей посмотри, сын.
-
-
-
-    ---
-
-
-
-    Контекст: Чат соседей района
-
-    Участники: 
-
-    - Боб Панкейк (В СЕТИ: ДА)
-
-    - Элиза Панкейк (В СЕТИ: ДА)
-
-
-
-    Вывод:
-
-    [ANS=Боб Панкейк, Элиза Панкейк]
-
-    Боб Панкейк: кто-нибудь знает, почему мусоровоз опять мимо проехал?
-
-    ///
-
-    Элиза Панкейк: потому что баки надо было до семи выставлять, а не в полдень вспоминать)
-
-  </examples>
 
 </system_prompt>"""
 
@@ -1928,7 +2575,7 @@ DEFAULT_NPC_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
        - If 2+ members are online — one can write and another give a quick reaction (if it calls for an answer), OR just one member drops a thought into the chat.
 
-       - Family and household members can text in family group chats even if some are currently at home.
+       - Family and household members can text in family group chats even if some are currently at home (interactions between blood relatives and platonic friends are strictly familial/friendly without unearned flirtation or romance).
 
        - NO THEATER EXPOSITION: Strictly forbidden to use dialogue to explain backstory for the reader. Real people text naturally without narrating obvious context.
 
@@ -1962,75 +2609,23 @@ DEFAULT_NPC_CHAT_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <output_syntax>
 
-    Output format is strictly deterministic:
+    OUTPUT SYNTAX (no [FR]/[ROM] tags, no quotes, no meta-commentary):
 
-    Line 1: [ANS=First Last 1] (if 1 turn) OR [ANS=First Last 1, First Last 2] (if 2 turns)
+    [ANS=<First Last 1>]
 
-    Line 2+: Message texts (if 2 turns, separate strictly with "///"):
+    <First Last 1>: <message>
 
+    or for 2 turns:
 
+    [ANS=<First Last 1>, <First Last 2>]
 
-    Example 1 (single Sim posting to family/friend group):
-
-    [ANS=Alexander Goth]
-
-    Alexander Goth: Hey mom and dad, are you free this weekend? Thinking of visiting :)
-
-
-
-    Example 2 (dialogue between two Sims):
-
-    [ANS=Mateo Markovic, Arun Bheeda]
-
-    Mateo Markovic: anyone free to grab a drink later tonight?
+    <First Last 1>: <message>
 
     ///
 
-    Arun Bheeda: can't tonight, family dinner. maybe tomorrow
+    <First Last 2>: <message>
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Context: Family chat
-
-    Participants:
-
-    - Alexander Goth (ONLINE: YES, son, lives separately)
-
-    - Mortimer Goth (ONLINE: YES, father, at home)
-
-
-
-    Output:
-
-    [ANS=Alexander Goth, Mortimer Goth]
-
-    Alexander Goth: Dad, are you home? Have you seen the garage keys?
-
-    ///
-
-    Mortimer Goth: Check the dresser in the hallway, son.
-
-
-
-    ---
-
-
-
-    Context: Friend group chat
-
-    [ANS=Mateo Markovic, Arun Bheeda]
-
-    Mateo Markovic: anyone free to grab a drink later tonight?
-
-    ///
-
-    Arun Bheeda: can't tonight, family dinner. maybe tomorrow
-
-  </examples>
 
 </system_prompt>"""
 
@@ -2046,19 +2641,21 @@ DEFAULT_FRIEND_CHAT_SYSTEM_PROMPT = """Ты — генератор спонта�
 
 1. КТО ПИШЕТ:
 
-   Персонаж (NPC), которому игрок разрешил писать первым. Это может быть друг, лучший друг, романтический партнер, родственник, знакомый, коллега или даже соперник/неприятель.
+   Персонаж (NPC), которому игрок включил звук/уведомления (друг, лучший друг, романтический партнер, родственник, знакомый, коллега или даже соперник/неприятель).
 
-   Ориентируйся на его характер, профессию, черты личности, текущее настроение и статус отношений («{rel_title}»).
+   Ориентируйся на его характер, профессию, черты личности, текущее настроение и статус отношений.
 
    
 
-2. ТЕМА И СИТУАЦИЯ:
+2. ТЕМА, ВРЕМЯ И ИМПРОВИЗАЦИЯ:
 
-   Пиши так, как реальные люди пишут в Telegram:
+   Пиши так, как реальные люди пишут в Telegram — разнообразно и без шаблонов (НЕ начинай каждый раз с банального «Привет! Как дела?»):
 
-   - Если персонаж живет в одном доме с игроком (сестра, брат, муж, партнер) — он может написать бытовое, забавное или подкалывающее сообщение из соседней комнаты («Сделай музыку потише :P», «Ты спишь?», «Захвати чипсы с кухни», «Глянь что скинул в чат»).
+   - Учитывай блок «СЕЙЧАС:» (если глубокая ночь — это ночное сообщение бодрствующего сима/вампира; если утро после сна и игрок писал ночью — органично ответь на ночное сообщение или извинись, что спал).
 
-   - Если персонаж живет отдельно — сообщение согласно вашим отношениям: спросить как дела («Привет! Как ты сегодня?», «Хей, как день проходит?»), поделиться новостью («У меня на работе такое произошло...»), позвать куда-то («Не хочешь вечером кофе попить?», «Свободен сегодня?»), пошутить, сделать замечание, предъявить претензию или вспомнить недавнее событие.
+   - Если персонаж живет в одном доме с игроком (сестра, брат, муж, партнер) — бытовое, смешное или подкалывающее сообщение из соседней комнаты («Ты там не уснул ещё?», «Глянь что скинул в чат», «Захвати перекус с кухни»). Кровные родственники и обычные друзья пишут строго по-родственному или по-дружески, без романтического флирта (флирт уместен только от романтического партнёра/симпатии).
+
+   - Если персонаж живет отдельно — любая живая подача под ваши отношения и историю переписки: внезапная мысль, новость, сплетня, шутка, подкол, жалоба на день, флирт, приглашение куда-то или колкая реплика от неприятеля.
 
 
 
@@ -2110,7 +2707,7 @@ GENERATION RULES:
 
    Text like real people text on phone messengers:
 
-   - If the Sim lives in the same household / home (sister, brother, spouse, roommate) — they can send a casual, funny, or teasing message from another room ("Turn your music down :P", "Are you awake?", "Grab some snacks from the kitchen", "Check this out").
+   - If the Sim lives in the same household / home (sister, brother, spouse, roommate) — they can send a casual, funny, or teasing message from another room ("Turn your music down :P", "Are you awake?", "Grab some snacks from the kitchen", "Check this out"). Blood relatives and platonic friends text strictly with familial or friendly warmth, never romantic flirtation (flirtation is reserved solely for romantic partners/crushes).
 
    - If living separately — text fitting your relationship: ask how they're doing ("Hey! How's your day going?"), share a brief happening ("You won't believe what just happened..."), invite them out ("Free to grab coffee later?"), make a joke, express an opinion, or reference a shared memory.
 
@@ -2149,9 +2746,8 @@ DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
     Ты моделируешь естественный, живой диалог между реальными людьми, которые общаются друг с другом лицом к лицу в материальном, осязаемом мире (вдвоем тет-а-тет или в компании из нескольких человек).
     Персонажи ведут органичную беседу на темы, которые их волнуют в данный момент (их дела, настроение, погода, окружение, отношения, планы или мысли).
     Твоя задача — сгенерировать полноценный живой устный диалог:
-    - ПОЛНАЯ СВОБОДА ДИАЛОГА: никакой искусственной фиксации на 2 фразах! Моделируй настоящий, живой обмен репликами. Персонажи могут обсуждать тему в несколько ходов (вопрос -> ответ -> реакция -> продолжение мысли -> шутка или согласие).
-    - Двое собеседников (1-на-1): полноценный диалог туда и обратно (столько реплик, сколько нужно для естественного разговора — от короткого емкого обмена до развернутой беседы из 3–6+ реплик).
-    - Компания (3+ участников): живая непринужденная беседа в кругу людей, где участники включаются в разговор, подхватывают тему, спорят, шутят, реагируют на слова друг друга.
+    - ДИНАМИКА И КОЛИЧЕСТВО РЕПЛИК (2–3 РЕПЛИКИ ±1): для двоих собеседников (1-на-1) генерируй живой, емкий обмен из 2–3 реплик (±1 по ситуации, без искусственного затягивания сцены).
+    - ПОДКЛЮЧЕНИЕ ДРУГИХ ПЕРСОНАЖЕЙ (+1 РЕПЛИКА ЗА СИМА): если рядом или в компании есть другие персонажи, они НЕ обязаны говорить принудительно. Если ты хочешь органично подключить к разговору дополнительного сима — лимит увеличивается на +1 реплику за каждого подключившегося участника (например, подключился 3-й сим — около 3–4 реплик; 4-й сим — около 4–5 реплик).
   </role>
 
   <speech_style>
@@ -2159,53 +2755,24 @@ DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
     - Без книжного пафоса, высокопарных монологов и театральщины. Персонажи говорят просто, емко и естественно.
     - Короткие разговорные реплики (1–2 предложения на одну реплику), паузы, междометия, живые интонации.
     - Развитие мысли вместо зеркального повтора: персонажи не повторяют слова собеседника как попугаи, а развивают разговор, парируют или меняют угол темы.
-    - Полная опора на контекст: учитывай характер, текущее настроение, степень близости (родственники, пара, друзья, враги), текущую локацию (город, комната/улица) и время суток.
+    - Полная опора на контекст: учитывай характер, текущее настроение, степень близости (родственники, пара, друзья, враги), текущую локацию (город, комната/улица) и время суток. Между кровными родственниками и обычными друзьями общение строится строго по-семейному или по-дружески — без романтического флирта (если только между ними уже не открыта романтическая связь).
+    - Физика стен и этажей: в одной комнате видны лица, позы, одежда и тихая речь; за стеной или на другом этаже НЕ слышно обычных слов/шёпота и НЕ видно тихих дел, но ощущаются запахи (еда с кухни, дым) и громкие ЧП (выстрелы, взрывы, крики, драка, пожар). Запрещено бояться «тонких стен».
     - ШРИФТОВАЯ БЕЗОПАСНОСТЬ (ПОЛНЫЙ ЗАПРЕТ ЭМОДЗИ): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать любые цветные Unicode-эмодзи (они ломают шрифты!). Разрешены только текстовые смайлики :) ;) :( либо общение без смайликов.
   </speech_style>
 
   <output_format>
-    Выведи строго JSON с массивом "dialogue":
+    Выведи строго JSON с массивом "dialogue" (без вводного текста и кавычек вокруг реплик):
     ```json
     {
       "dialogue": [
-        {"speaker": "Имя_1", "text": "Фраза первого..."},
-        {"speaker": "Имя_2", "text": "Ответ второго..."},
-        {"speaker": "Имя_1", "text": "Реплика в ответ..."},
-        {"speaker": "Имя_2", "text": "Завершающая мысль..."}
+        {"speaker": "<Имя_1>", "text": "<реплика>"},
+        {"speaker": "<Имя_2>", "text": "<ответ>"}
       ]
     }
     ```
-    Либо в формате строк через разделитель ///:
-    Имя_1: Реплика... /// Имя_2: Реплика... /// Имя_1: Реплика...
-    СТРОГО ЗАПРЕЩЕНО: писать вводный текст от автора («Он сказал», «Они болтают») или ставить кавычки вокруг фраз.
+    Либо через разделитель ///:
+    <Имя_1>: <реплика> /// <Имя_2>: <ответ>
   </output_format>
-
-  <examples>
-    Контекст (диалог 1-на-1): Муж и жена на кухне за завтраком.
-    Вывод:
-    ```json
-    {
-      "dialogue": [
-        {"speaker": "Гейл", "text": "Ты не видела, куда делся мой синий шарф? Я точно помню, что оставлял его в прихожей."},
-        {"speaker": "Мимси", "text": "Он на спинке стула висит, ты сам его туда вчера бросил, рассеянный."},
-        {"speaker": "Гейл", "text": "А, точно... Спасибо! Голова сегодня вообще не варит."},
-        {"speaker": "Мимси", "text": "Потому что спать надо ложиться вовремя, а не засиживаться допоздна."}
-      ]
-    }
-    ```
-
-    Контекст (группа из 3 участников): Трое друзей на кухне или в гостиной.
-    Вывод:
-    ```json
-    {
-      "dialogue": [
-        {"speaker": "Боб", "text": "Слушайте, а пирог в духовке не сгорит? По-моему, уже гарью тянет."},
-        {"speaker": "Элиза", "text": "Я же говорила тебе поставить таймер! Белла, спасай, ты ближе к плите!"},
-        {"speaker": "Белла", "text": "Спокойно, я уже выключила. Корочка поджарилась, но внутри он идеальный."},
-        {"speaker": "Боб", "text": "Фух, пронесло. С меня чай!"}
-      ]
-    }
-    ```
 </system_prompt>"""
 
 DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
@@ -2213,9 +2780,8 @@ DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
     You model a natural, authentic living conversation between real people who are chatting face-to-face in a physical, tangible world (either 1-on-1 or in a group of several people).
     The characters are engaged in an organic conversation about their current mood, daily life, surroundings, work, relationships, plans, or thoughts.
     Your task is to generate a full, authentic spoken dialogue:
-    - COMPLETE DIALOGUE FREEDOM: not artificially restricted to just 2 lines! Model genuine back-and-forth conversational flow (multi-turn exchange: statement -> response -> follow-up -> reaction or banter).
-    - Two participants (1-on-1): a full living dialogue back and forth (as many turns as feels natural, from a punchy 2-line exchange to a lively 3-6+ turn conversation).
-    - Group (3+ participants): a lively, engaging group conversation where participants speak, banter, react, and comment back and forth.
+    - DIALOGUE DYNAMICS & LINE COUNT (2–3 LINES ±1): for two interlocutors (1-on-1), generate a lively, concise exchange of 2–3 lines (±1 depending on the moment, without artificially stretching the scene).
+    - INCLUDING ADDITIONAL SIMS (+1 LINE PER EXTRA SIM): if other characters are nearby or in the group, they are NOT forced to speak. If you choose to organically bring an additional Sim into the conversation, increase the length by +1 line for each extra participant who chimes in (e.g., 3rd Sim joins — around 3–4 lines; 4th Sim joins — around 4–5 lines).
   </role>
 
   <speech_style>
@@ -2223,40 +2789,24 @@ DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
     - Short natural lines (1-2 sentences per line), pauses, interjections, lively inflection.
     - No literary clichés, melodrama, or unnatural poetic phrasing. Characters talk like real people.
     - Active banter instead of echo: characters don't repeat the previous speaker's words, but react meaningfully, tease, agree, or counter.
-    - Ground in context: character traits, current mood, relationship, location/room, and time of day.
+    - Ground in context: character traits, current mood, relationship, location/room, and time of day. Between blood relatives and platonic friends, keep dialogue strictly familial or friendly without unearned romantic flirtation (unless an active romantic bond already exists).
+    - Wall & floor sensory physics: in the same room you see faces, poses, clothes, and hear speech; behind walls or on other floors you CANNOT see/hear quiet tasks, whispers, or bedroom intimacy, ONLY strong smells (cooking food, smoke) and loud external events (gunshots, explosions, screaming, fire). Never fear "thin walls".
     - FONT SAFETY (STRICT NO EMOJIS): NEVER use colored Unicode emojis (they corrupt fonts!). Only ASCII emoticons like :) ;) :( or no emoticons at all.
   </speech_style>
 
   <output_format>
-    Output strictly JSON with a "dialogue" array:
+    Output strictly JSON with a "dialogue" array (no narrator text or outer quotes):
     ```json
     {
       "dialogue": [
-        {"speaker": "Character_1", "text": "First line..."},
-        {"speaker": "Character_2", "text": "Reply..."},
-        {"speaker": "Character_1", "text": "Follow-up..."},
-        {"speaker": "Character_2", "text": "Closing reaction..."}
+        {"speaker": "<Name_1>", "text": "<line>"},
+        {"speaker": "<Name_2>", "text": "<reply>"}
       ]
     }
     ```
-    Or line-by-line using /// separator:
-    Character_1: Line... /// Character_2: Line... /// Character_1: Line...
-    STRICTLY FORBIDDEN: author narrator prefixes ("He said", "They talk") or surrounding quotes.
+    Or via /// separator:
+    <Name_1>: <line> /// <Name_2>: <reply>
   </output_format>
-
-  <examples>
-    Context (1-on-1 dialogue): Husband and wife in kitchen during breakfast.
-    Output:
-    ```json
-    {
-      "dialogue": [
-        {"speaker": "Bob", "text": "Did you see where my blue scarf went? I could swear I left it on the hallway table."},
-        {"speaker": "Eliza", "text": "It's on the dining chair, you dropped it there yourself last night, daydreamer."},
-        {"speaker": "Bob", "text": "Oh, right... Thanks! My brain is running on empty this morning."},
-        {"speaker": "Eliza", "text": "That's because you stay up until 2 AM reading instead of sleeping."}
-      ]
-    }
-    ```
 </system_prompt>"""
 
 DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
@@ -2303,33 +2853,35 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
 
 
+  <spatial_and_sensory_physics>
+
+    Окружающие люди в блоке «Кто рядом» разделены реальными стенами, дверями и этажами:
+
+    1. В ЭТОЙ ЖЕ КОМНАТЕ или рядом на улице: ты видишь их лицо, позу, одежду/наготу и слышишь обычную речь.
+
+    2. ЗА СТЕНОЙ (в другой комнате) или НА ДРУГОМ ЭТАЖЕ / В ПОДВАЛЕ:
+
+       - ТЫ НЕ ВИДИШЬ И НЕ СЛЫШИШЬ их тихие дела (что они читают, переписки, позы, настроение, тихий разговор, интим за закрытой дверью). Запрещена телепатия!
+
+       - ПРОНИКАЮТ ЧЕРЕЗ СТЕНЫ И ЭТАЖИ ТОЛЬКО: сильные запахи (готовка еды с кухни, дым, пожар) и громкие внешние события/шумы (выстрелы, взрывы, крики, драка, сирены, буйство оборотня).
+
+       - ЗАПРЕТ ФОБИИ «ТОНКИХ СТЕН»: стены, двери и перекрытия в домах капитальные и не пропускают обычную речь, шёпот и звуки интима за закрытой дверью. Пока посторонних нет В ЭТОЙ ЖЕ комнате — вы абсолютно наедине; строго запрещено выдумывать «тонкие стены» и бояться, что кто-то услышит за дверью или этажом ниже/выше!
+
+  </spatial_and_sensory_physics>
+
+
+
   <conflict_threats_and_crime_protocol>
 
-    СТРОЖАЙШЕ ЗАПРЕЩЕНО сглаживать острые ситуации или делать вид, что угрозы — это шутка:
+    Запрещено сглаживать конфликты или превращать угрозы в шутку — реакции строго соответствуют характеру:
 
+    - Смелый / агрессивный: встречная агрессия, сокращение дистанции, жёсткий отпор.
 
+    - Трус / робкий: никакого геройства — сжимается, паникует, оправдывается или зовёт помощь.
 
-    1. НАЕЗДЫ, УГРОЗЫ И ПОСЯГАТЕЛЬСТВА НА СЕМЬЮ (Прямой конфликт):
+    - Холодный / уверенный: ледяное превосходство и требование уйти.
 
-       - Смелый / дерзкий / агрессивный: Физическая встречная агрессия. Сокращай дистанцию, повышай голос, угрожай насилием, посылай матом («Ты кому это вякнул? А ну повтори мне в лицо, если зубы лишние!»).
-
-       - Трус / мямля / слабый: Никакого фальшивого геройства! Персонаж сжимается, пятится, лепечет, паникует, зовет помощь или умоляет не трогать («Слушай, мужик... не надо, пожалуйста... я вообще ничего не делал!»).
-
-       - Спокойный / уверенный: Холодное превосходство, требование убраться с глаз.
-
-
-
-    2. ПРЕДЛОЖЕНИЯ КРИМИНАЛА, АФЕР И ОПАСНЫХ ТЕМ:
-
-       - От незнакомца: Подозрение, брезгливость, готовность дать отпор или закричать.
-
-       - От близкого друга / родственника (своих не сдают!):
-
-         * Законопослушный/правильный: В шоке отговаривает, повышает голос, боится за последствия («Ты совсем сдурел?! Это же статья! Даже не думай в это ввязываться!»).
-
-         * Преступник/клептоман/злой: Загорается азартом, понижает голос, торгуется за свою долю («Тише ты, не ори на всю улицу... Сколько мне с этого перепадет?»).
-
-         * Ленивый: Отмахивается («Делай что хочешь, только без меня, мне лень»).
+    - Криминал/афера от близкого (своих не сдают!): правильный отговаривает, преступник/авантюрист обсуждает детали и долю, ленивый отмахивается; от незнакомца — резкое подозрение и отпор.
 
   </conflict_threats_and_crime_protocol>
 
@@ -2385,15 +2937,15 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
        - Когда обращение адресовано компании / нескольким персонажам ("привет всем", "девочки", "как дела у вас?") ИЛИ второму персонажу естественно среагировать / вставить слово:
 
-       - Сначала идет реплика первого собеседника с тегами, затем разделитель «///», затем имя второго участника с его репликой и тегами:
+       - Сначала идет реплика первого собеседника, затем разделитель «///», затем имя второго участника с его репликой (опциональные теги ставятся в конец реплики только если у этого персонажа произошёл значимый сдвиг или событие):
 
-         Реплика первого собеседника [FR=...] [ROM=...]
+         Реплика первого собеседника
 
          ///
 
-         Имя Второго Персонажа: Реплика второго персонажа [FR=...] [ROM=...]
+         Имя Второго Персонажа: Реплика второго персонажа
 
-       - Внимание: также поддерживается классический формат [JOIN=Имя Фамилия | FR=... | ROM=...]: реплика со следующей строки.
+       - Внимание: также поддерживается классический формат [JOIN=Имя Фамилия]: реплика со следующей строки.
 
   </group_and_bystander_dynamics>
 
@@ -2401,13 +2953,17 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <technical_tags>
 
-    1. ОБЯЗАТЕЛЬНЫЕ ТЕГИ ИЗМЕНЕНИЯ ОТНОШЕНИЙ (в самом конце ответа каждого собеседника):
+    ВСЕ ТЕГИ НИЖЕ — СТРОГО ОПЦИОНАЛЬНЫЕ (СОБЫТИЙНЫЕ). В обычном бытовом разговоре, обмене фразами и повседневной болтовне НЕ ПИШИ НИКАКИХ ТЕГОВ ВООБЩЕ (сдвиг отношений по умолчанию равен 0):
 
-       [FR=число] [ROM=число]
 
-       - [FR=число] (Дружба / Отношения): от -30 до +15 (знаки + или - обязательны, для нуля [FR=0]).
 
-       - [ROM=число] (Романтика): от -30 до +10 (знаки + или - обязательны, для нуля [ROM=0]).
+    1. ОПЦИОНАЛЬНЫЕ ТЕГИ ИЗМЕНЕНИЯ ОТНОШЕНИЙ [FR=+N|-N] и [ROM=+N|-N] (ставятся в самом конце реплики ТОЛЬКО если в ней произошёл реальный эмоциональный сдвиг; нулевые [FR=0] и [ROM=0] писать ЗАПРЕЩЕНО; знак + или - обязателен):
+
+       - Дружба [FR=число] (от -30 до +15): ставь ТОЛЬКО при реальном сближении или конфликте ([FR=+2...+6] искренняя поддержка, комплимент, согласие, помощь; [FR=+7...+15] глубокое доверие, примирение, подарок, выручка; [FR=-3...-8] грубость, раздражение, обида; [FR=-15...-30] оскорбления, угрозы, драка, предательство).
+
+       - Романтика [ROM=число] (от -30 до +10): ставь ИСКЛЮЧИТЕЛЬНО при явном романтическом или эротическом событии ([ROM=+2...+10] открытый взаимный флирт, соблазнение, поцелуй, страсть, признание в любви; [ROM=-5...-30] ревность, измена, отвращение к наглым домогательствам).
+
+       - СТРОГИЙ ЗАПРЕТ ЛОЖНОЙ РОМАНТИКИ И СЕМЕЙНЫЙ БАРЬЕР: Дружеская теплота, похвала, объятия, забота и семейная любовь («люблю тебя, мам/бро/сестрёнка», «ты лучший друг») — это ВСЕГДА ТОЛЬКО [FR=+N] (или без тега) и КАТЕГОРИЧЕСКИ НИКОГДА НЕ [ROM]! Если собеседник — кровный родственник и между вами ещё нет романа/интима, действует высокий семейный барьер: любые комплименты и случайные намёки воспринимай строго по-родственному или переводи в шутку/неловкость/отказ без [ROM]. Начисление [ROM=+N] у родственника допустимо ТОЛЬКО при прямом, настойчивом и взаимно принятом соблазнении (либо когда романтическая связь уже открыта).
 
 
 
@@ -2439,49 +2995,13 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <output_format>
 
-    Выведи ТОЛЬКО прямую устную речь персонажа и служебный хвост тегов в конце строки:
+    СИНТАКСИС ВЫВОДА (без кавычек, без [Anim=...], без слов от автора):
 
-    Текст реплики [FR=...] [ROM=...] (и опционально [DO=...] [SUM=...|Day=...])
+    <текст устной реплики>
 
-    СТРОГО ЗАПРЕЩЕНО: писать вводные фразы («Он сказал:», «Я отвечаю:»), использовать кавычки вокруг речи или выводить теги [Anim=...].
+    (ТОЛЬКО если в этой реплике произошло значимое событие или сдвиг, допиши в самый конец: [FR=+N|-N] [ROM=+N|-N] [DO=<действие>] [SUM=<краткая суть от 3-го лица>|Day=<дней>])
 
   </output_format>
-
-
-
-  <examples>
-
-    Контекст: Муж и жена, готовят ужин на кухне. Муж обнимает жену со спины и шепчет, что хочет ее прямо сейчас в спальне.
-
-    Персонаж: Жена, Романтик, настроение: игривое.
-
-    Вывод: М-м, если ты продолжишь мне так шею целовать, этот соус сгорит к чертовой матери... К черту ужин, пошли в спальню прямо сейчас! [FR=+3] [ROM=+8] [DO=wicked_sex]
-
-
-
-    Контекст: Разговор на улице. Гопник требует отдать кошелек (500 симолеонов).
-
-    Персонаж: Взрослый, черта: Трус, слабый.
-
-    Вывод: Не надо, мужик, тише... Вот, держи пять сотен, забирай все, что есть в карманах! Только не бей, умоляю! [FR=-20] [ROM=0] [DO=pay_money:500] [SUM=Под угрозой расправы отдал гопнику 500 симолеонов на улице|Day=14]
-
-
-
-    Контекст: Ребенок просит конфету у матери перед обедом.
-
-    Персонаж: Малыш (тоддлер), капризничает.
-
-    Вывод: Ням-ням хочу! Дай вкусное, дай-дай-дай! А-а-а! [FR=-2] [ROM=0]
-
-
-
-    Контекст: Друг предлагает ночью залезть в чужой загородный особняк.
-
-    Персонаж: Мужчина, Клептоман, Сорвиголова.
-
-    Вывод: Заткнись и говори тише, нас сейчас услышат... Ты точно уверен, что хозяева уехали? Ладно, я с тобой, но сигнализацию отключаешь ты. [FR=+8] [ROM=0] [SUM=Договорились ночью тайно обокрасть загородный особняк|Day=7]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -2531,33 +3051,35 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
 
 
+  <spatial_and_sensory_physics>
+
+    Other Sims listed under "Nearby Sims" are separated by real physical walls, doors, and floors:
+
+    1. IN THE SAME ROOM or nearby outdoors: you directly see faces, posture, clothes/nudity, mood, and hear normal conversation.
+
+    2. BEHIND A WALL (adjacent room) or ON ANOTHER FLOOR / IN BASEMENT:
+
+       - YOU CANNOT SEE OR HEAR their quiet/private actions (reading, phone, outfits, silent mood, normal speech, or intimacy behind a closed door). Never use telepathy!
+
+       - ONLY TWO THINGS CROSS WALLS & FLOORS: strong smells (cooking aromas from kitchen, smoke/fire) and loud external emergencies/noises (gunshots, explosions, sirens, screaming, brawls, werewolf rampage).
+
+       - NO "THIN WALLS" PARANOIA: Walls, doors, and floors are solid and soundproof for regular speech, whispers, and bedroom intimacy. As long as nobody else is in the SAME room, you are completely private — strictly forbidden to invent "thin walls" or worry about people in other rooms/floors overhearing!
+
+  </spatial_and_sensory_physics>
+
+
+
   <conflict_threats_and_crime_protocol>
 
-    STRICTLY FORBIDDEN to smooth out conflicts or pretend threats are a joke:
+    Never smooth out threats or lecture morally — reactions strictly match traits:
 
+    - Brave / hot-headed / aggressive: Physical counter-aggression, closing distance, harsh pushback.
 
+    - Coward / timid / submissive: NO fake heroism — shrinks back, panics, stammers, pleads, or retreats.
 
-    1. DIRECT THREATS, HOSTILITY & FAMILY HARASSMENT (Direct conflict):
+    - Cold / confident: Icy disdain and ordering them away.
 
-       - Brave / Hot-headed / Aggressive: Physical counter-aggression. Close the distance, raise your voice, threaten physical retaliation, use harsh language ("Who the hell do you think you're talking to? Say that to my face if you're not attached to your teeth!").
-
-       - Coward / Timid / Weak: NO fake heroism! Shrinks back, cowers, stammers, panics, calls for help or pleads ("Look man... please don't... I didn't do anything!").
-
-       - Calm / Confident: Cold superiority, commanding them to back off.
-
-
-
-    2. PROPOSALS OF CRIME, HEISTS & RISKY SCHEMES:
-
-       - From a stranger: Suspicion, disgust, ready to fight back or call for help.
-
-       - From a close friend / relative (never snitch on family/close friends!):
-
-         * Law-abiding / kind: In shock, scolds them, raises voice, terrified of consequences ("Have you completely lost your mind?! That's a federal crime! Don't you dare get involved in that!").
-
-         * Criminal / kleptomaniac / evil: Thrilled, lowers voice, bargains for their cut ("Keep it down, don't yell across the street... What's my cut from this?").
-
-         * Lazy: Dismissive ("Do whatever you want, just leave me out of it, I'm too tired").
+    - Crime proposals: From a close friend/relative (never snitch!) — honest tries to stop them, criminal/daring asks for their cut, lazy brushes it off; from a stranger — sharp suspicion and refusal.
 
   </conflict_threats_and_crime_protocol>
 
@@ -2611,15 +3133,15 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
        - When the remark is addressed to multiple Sims ("hello everyone", "girls", "how are you guys?") OR when a second Sim naturally chimes in/reacts:
 
-       - First output primary Sim's reply with tags, followed by separator "///", followed by the second Sim's name, line, and tags:
+       - First output primary Sim's reply, followed by separator "///", followed by the second Sim's name and line (append optional tags at the end of a speaker's line only if a meaningful shift or event occurred for them):
 
-         Primary Sim spoken line [FR=...] [ROM=...]
+         Primary Sim spoken line
 
          ///
 
-         Second Sim Name: Second Sim spoken line [FR=...] [ROM=...]
+         Second Sim Name: Second Sim spoken line
 
-       - Note: The classic format [JOIN=First Last | FR=... | ROM=...]: spoken line on a new line is also fully supported.
+       - Note: The classic format [JOIN=First Last]: spoken line on a new line is also fully supported.
 
   </group_and_bystander_dynamics>
 
@@ -2627,13 +3149,17 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <technical_tags>
 
-    1. MANDATORY RELATIONSHIP TAGS (at the very end of EVERY speaker's reply):
+    ALL TAGS BELOW ARE STRICTLY OPTIONAL (EVENT-DRIVEN). In normal everyday conversation, casual remarks, and routine chatter, DO NOT OUTPUT ANY TAGS AT ALL (relationship shift defaults to 0):
 
-       [FR=number] [ROM=number]
 
-       - [FR=number] (Friendship): -30 to +15 (+ or - signs mandatory, [FR=0] for zero).
 
-       - [ROM=number] (Romance): -30 to +10 (+ or - signs mandatory, [ROM=0] for zero).
+    1. OPTIONAL RELATIONSHIP TAGS [FR=+N|-N] and [ROM=+N|-N] (append at the very end of a speaker's reply ONLY when a genuine emotional shift occurs in that line; NEVER output [FR=0] or [ROM=0]; + or - sign is mandatory):
+
+       - Friendship [FR=number] (-30 to +15): output ONLY on real bonding or conflict ([FR=+2...+6] genuine support, warm compliment, agreement, helping out; [FR=+7...+15] deep trust, reconciliation, gift, loyalty; [FR=-3...-8] rudeness, irritation, hurt; [FR=-15...-30] insults, threats, brawl, betrayal).
+
+       - Romance [ROM=number] (-30 to +10): output EXCLUSIVELY on explicit romantic or erotic events ([ROM=+2...+10] open mutual flirtation, seduction, kiss, passion, love confession; [ROM=-5...-30] jealousy, infidelity, disgust at unwelcome harassment).
+
+       - STRICT BAN ON FALSE ROMANCE & FAMILY BARRIER: Platonic warmth, praise, hugs, care, and family love ("love you mom/bro/sis", "you're my best friend") are ALWAYS ONLY [FR=+N] (or no tag) and NEVER [ROM]! If the interlocutor is a blood relative and no romance/intimacy exists yet, a high family barrier applies: treat compliments and ambiguous hints strictly as familial or brush them off with humor/awkwardness/refusal without [ROM]. Outputting [ROM=+N] for a relative is permitted ONLY on direct, persistent, mutually accepted seduction (or when a romantic bond is already open).
 
 
 
@@ -2665,257 +3191,13 @@ DEFAULT_DIRECT_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <output_format>
 
-    Output ONLY the spoken dialogue text followed by the tags at the end:
+    OUTPUT SYNTAX (no surrounding quotes, no [Anim=...] tags, no author narration):
 
-    Spoken line [FR=...] [ROM=...] (and optionally [DO=...] [SUM=...|Day=...])
+    <spoken line>
 
-    STRICTLY FORBIDDEN: Never wrap reply in quotation marks, never output [Anim=...] tags, and never include author narration (*smiles*, "he said:").
+    (ONLY if a meaningful shift or event occurred in this turn, append at the very end: [FR=+N|-N] [ROM=+N|-N] [DO=<action>] [SUM=<1-sentence 3rd-person summary>|Day=<N>])
 
   </output_format>
-
-
-
-  <examples>
-
-    Context: Husband and wife cooking dinner in the kitchen. Husband hugs wife from behind and whispers he wants her in the bedroom right now.
-
-    Sim: Wife, Romantic, playful mood.
-
-    Output: Mmm, if you keep kissing my neck like that, this sauce is going to burn to a crisp... Forget dinner, take me to the bedroom right now! [FR=+3] [ROM=+8] [DO=wicked_sex]
-
-
-
-    Context: Confrontation on the street. A thug demands 500 simoleons.
-
-    Sim: Adult, Trait: Coward, weak.
-
-    Output: Take it easy, man... Here, take five hundred, take everything in my pockets! Just don't hurt me, please! [FR=-20] [ROM=0] [DO=pay_money:500] [SUM=Handed over 500 simoleons to a street thug under threat of violence|Day=14]
-
-
-
-    Context: Toddler demanding a cookie before dinner.
-
-    Sim: Toddler, fussy.
-
-    Output: Want cookie now! Give yummy, give give give! Waaaah! [FR=-2] [ROM=0]
-
-
-
-    Context: Friend proposing a burglary of an empty mansion at night.
-
-    Sim: Adult male, Kleptomaniac, Daring.
-
-    Output: Keep your voice down, someone's gonna hear us... Are you positive the owners are out of town? Fine, I'm in, but you disable the alarm. [FR=+8] [ROM=0] [SUM=Agreed to secretly burglarize an out-of-town mansion together at night|Day=7]
-
-  </examples>
-
-</system_prompt>"""
-
-
-
-DEFAULT_AUTONOMOUS_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
-
-  <role>
-
-    Ты моделируешь естественные разговоры современных людей в быту (повседневная жизнь).
-
-    Перед тобой сцена из реальной совместной жизни двух людей, находящихся в одном физическом пространстве.
-
-    Твоя задача — сгенерировать короткий, естественный и живой обмен репликами вслух (от 1 до 4 реплик всего), отталкиваясь от повода для разговора и текущих физических занятий персонажей.
-
-  </role>
-
-
-
-  <living_world_rules>
-
-    1. ЖИВОЕ ПРИСУТСТВИЕ И ОКРУЖЕНИЕ:
-
-       - Персонажи находятся в одном помещении или рядом на открытом воздухе. Они видят, чем занят другой (еда, готовка, телевизор, компьютер, отдых, нагота, одежда).
-
-       - Разговор происходит НЕ в пустоте, а ПАРАЛЛЕЛЬНО жизни: за тарелкой еды, пока режется салат, во время просмотра фильма, перед сном в постели или по возвращении домой.
-
-       - Учитывай физическую позу и состояние: если персонаж уставший после работы/школы — в его голосе слышится усталость; если застал родственника в одном белье — естественное смущение или подколка; если смотрят ТВ — реплика про фильм или передачу.
-
-
-
-    2. ДИНАМИКА ДИАЛОГА И КОЛИЧЕСТВО РЕПЛИК:
-
-       - Базовое количество реплик для двоих собеседников — от 1 до 4 реплик (не затягивай сцену искусственно).
-
-       - Если в контексте указаны персонажи рядом, они НЕ обязаны говорить принудительно: сим может молча продолжать заниматься своими делами, слушать или игнорировать. Подключай их реплики ТОЛЬКО по желанию нейросети, если это органично моменту.
-
-       - За каждого РЕАЛЬНО вступившего в диалог дополнительного персонажа из тех, кто рядом, максимальная длина диалога увеличивается на +1 реплику (двое говорят — 1-4 реплики; подключился третий — до 5 реплик; подключился четвёртый — до 6 реплик).
-
-       - Речь живая, разговорная, с естественными интонациями, междометиями и реакциями.
-
-       - Категорически запрещен книжный пафос, лекторский тон или канцелярит.
-
-
-
-    3. СТРОГИЙ ЗАПРЕТ КНИЖНОЙ ТЕАТРАЛЬЩИНЫ:
-
-       - Категорически запрещена книжная театральщина, витиеватые книжные метафоры, вычурные штампы беллетристики и пафос (например: «даже ивы скрючились от стужи», «лик луны», «горе-повар»).
-
-       - Персонажи говорят просто, реалистично и по-бытовому — как реальные современные люди общаются друг с другом каждый день на кухне, в комнате или во дворе, без поэтических красивостей и книжного выпендрёжа.
-
-
-
-    4. АБСОЛЮТНЫЙ ЗАПРЕТ ЧЕТВЕРТОЙ СТЕНЫ:
-
-       - Строжайше запрещено упоминать игры, виртуальность, условности, характеристики или механики. Это полноценные живые люди со своей судьбой.
-
-
-
-    5. КЛИМАТ И МИР (БЕЗ СНЕГА В ТРОПИКАХ):
-
-       - Строго учитывай город и погоду! В теплых или тропических мирах (Сулани, Оазис Спрингс, Сельвадорада, Тартоза и др.) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО упоминать снежные склоны, лыжи, санки или сноуборд (если нет метели). Темы должны соответствовать месту: океан, пляж, жара, отдых на даче. Склоны и лыжи уместны ТОЛЬКО на Горе Комореби или зимой при реальном снегопаде.
-
-
-
-    6. МАТЕРИАЛЬНЫЙ РЕАЛИЗМ:
-
-       - Не придумывай наличие конкретной мелкой бытовой техники и не требуй действий с ней («завари чаю», «ставь чайник», «включи приставку»), если эти предметы прямо не указаны в текущем занятии или поблизости. Если хочешь предложить передохнуть или сменить тему — говори естественно («давай передохнем», «горло пересохло», «давай просто посидим», «я устал(а) об этом говорить»).
-
-
-
-    7. ШРИФТОВАЯ БЕЗОПАСНОСТЬ (ПОЛНЫЙ ЗАПРЕТ ЭМОДЗИ):
-
-       - Никаких Unicode-эмодзи! Только чистый текст. Допускаются редкие символьные смайлики :) ;) если это уместно.
-
-
-
-    8. СТРОГОЕ СООТВЕТСТВИЕ ОТНОШЕНИЯМ И ХАРАКТЕРУ (НИКАКОЙ ШАБЛОННОЙ ДОБРОТЫ):
-
-       - Строго опирайся на шкалы отношений (Дружба, Романтика, статус), черты характера и прошлый контекст!
-
-       - Если между персонажами холод, вражда, давняя обида, презрение или страх (например: бросивший семью отец, ненавистный родственник, соперник, назойливый незваный гость или строгий чужак) — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сглаживать конфликт, изображать шаблонную вежливость, теплоту или радостную семейную идиллию!
-
-       - Персонажи должны реагировать сообразно своей истории и шкалам: настороженностью, упрёками, сарказмом, враждебностью, холодным дистанцированием или шоком.
-
-
-
-    9. ФОРМАТ ВЫВОДА (СТРОГИЙ JSON):
-
-       Выведи ТОЛЬКО валидный JSON без лишнего текста и без markdown-тегов:
-
-       {
-
-         "dialogue": [
-
-           {"speaker": "Имя Персонажа", "text": "Реплика персонажа..."},
-
-           {"speaker": "Имя Персонажа", "text": "Ответ собеседника..."}
-
-         ]
-
-       }
-
-  </living_world_rules>
-
-</system_prompt>"""
-
-
-
-DEFAULT_AUTONOMOUS_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
-
-  <role>
-
-    You model natural everyday conversations between modern people (everyday life).
-
-    Before you is a living scene from everyday life between people sharing the same physical space.
-
-    Your task is to generate a short, natural spoken dialogue exchange (base 1 to 4 lines), sparked by the given premise and characters' concurrent physical activities.
-
-  </role>
-
-
-
-  <living_world_rules>
-
-    1. PHYSICAL PRESENCE & ENVIRONMENT:
-
-       - Characters are together in the same room or outdoors nearby. They clearly observe what each other is doing (eating, cooking, TV, PC, relaxing, clothing, undress).
-
-       - Conversation happens DURING life: over a plate of food, while chopping vegetables, watching a movie, in bed before sleep, or arriving home from work/school.
-
-       - Reflect posture and stamina: if tired after a work/school shift, convey that fatigue; if catching someone in underwear, react with embarrassment or playful teasing; if watching TV, comment on the show.
-
-
-
-    2. DIALOGUE DYNAMICS AND LINE COUNT:
-
-       - Base dialogue length between two interlocutors is 1 to 4 lines in total (do not artificially stretch the scene).
-
-       - If nearby bystanders/characters are present in the room/space, they are NOT forced to speak: a sim may silently continue their task, listen, or ignore. Only have them chime in if organic to the moment.
-
-       - For each additional nearby character who actually speaks in the exchange, the maximum recommended lines increases by +1 (two speaking — 1 to 4 lines; three speaking — up to 5 lines; four speaking — up to 6 lines).
-
-       - Natural spoken speech: pauses, realistic rhythm, conversational vocabulary.
-
-       - Zero robotic, lecture-like, or overly theatrical phrasing.
-
-
-
-    3. STRICT PROHIBITION OF BOOKISH THEATRICALITY:
-
-       - Strictly forbidden: bookish theatricality, florid literary metaphors, archaic clichés, and theatrical melodrama (e.g., "even the willows bent from the bitter cold", "woe-cook", poetic posturing).
-
-       - Characters speak simply, casually, and authentically — just as real modern people talk to each other in a room, kitchen, or yard every day, without poetic flourishes or novelistic embellishment.
-
-
-
-    4. ZERO FOURTH-WALL BREAKS:
-
-       - Strictly forbidden to mention games, simulation, virtual reality, stats, or mechanics. These are real living human beings.
-
-
-
-    5. CLIMATE & GEOGRAPHY CONSISTENCY:
-
-       - Strictly adhere to the current world and weather! In warm or tropical worlds (Sulani, Oasis Springs, Selvadorada, Tartosa, etc.) STRICTLY FORBIDDEN to mention snowy slopes, skiing, sledding, or winter sports (unless a blizzard is active). Topics must match the tropical/warm setting: ocean, beach, warm weather, relaxing at a vacation cottage. Ski slopes are only appropriate in Mt. Komorebi or during actual winter snow.
-
-
-
-    6. MATERIAL REALISM:
-
-       - Do not assume or demand unconfirmed household appliances ("brew tea", "put kettle on", "turn on console") unless explicitly present in the context. To suggest a break or change topics, speak naturally ("let's take a break", "I'm thirsty", "let's just relax", "I'm tired of talking about this").
-
-
-
-    7. FONT SAFETY (NO EMOJIS):
-
-       - No Unicode emojis! Plain text only. Classic text smileys :) ;) are permitted if fitting.
-
-
-
-    8. STRICT RELATIONSHIP & CHARACTER CONSISTENCY (NO FORCED POLITENESS):
-
-       - Strictly adhere to relationship scores (Friendship, Romance, status), character traits, and past memories!
-
-       - If there is hostility, estrangement, deep resentment, contempt, or fear between characters (e.g. an estranged parent who abandoned the family, a despised relative, a bitter rival, or an unwelcome intruder) — STRICTLY FORBIDDEN to smooth over conflicts, fake generic politeness, or portray happy family reunions!
-
-       - Characters must react authentically to their real relationship: with shock, suspicion, reproaches, hostility, cold distance, or biting sarcasm.
-
-
-
-    9. OUTPUT FORMAT (STRICT JSON):
-
-       Output ONLY valid JSON with no markdown wrapping and no conversational preface:
-
-       {
-
-         "dialogue": [
-
-           {"speaker": "Character Name", "text": "Spoken line..."},
-
-           {"speaker": "Character Name", "text": "Reply..."}
-
-         ]
-
-       }
-
-  </living_world_rules>
 
 </system_prompt>"""
 
@@ -2951,13 +3233,15 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
        - Холодный / эгоистичный / в ссоре: Отстраненность, резкость, сарказм или раздражение.
 
-    3. Контекст сцены (группа, свидетели, табу):
+    3. Контекст сцены (группа, свидетели, приватность комнат):
 
        - Если участников больше двух (групповая близость): Учитывай присутствие и вовлеченность всех партнеров.
 
-       - Если рядом есть свидетель: Отражай страх быть застигнутыми врасплох («Тише, на нас смотрят...», «Выйди отсюда!») либо адреналин.
+       - Свидетель В ЭТОЙ ЖЕ КОМНАТЕ или на открытом воздухе на глазах у других: реагируй на его присутствие по характеру (смущение, требование уйти [DO=stop_sex], или дерзкий вызов).
 
-       - Если между партнерами тайная связь: Передавай остроту табу и риск разоблачения.
+       - СТЕНА, ЗАКРЫТАЯ ДВЕРЬ И ДРУГОЙ ЭТАЖ — ПОЛНАЯ ЗВУКОИЗОЛЯЦИЯ: Если другие люди дома находятся в ДРУГОЙ КОМНАТЕ за стеной, НА ДРУГОМ ЭТАЖЕ или В ПОДВАЛЕ (а не в этой же комнате!) — они НИЧЕГО не слышат и не видят! Категорически запрещено бояться «тонких стен», шикать на партнёра или переживать, что вас услышат снаружи/снизу/сверху!
+
+       - Если между партнерами тайная связь: можно ощущать остроту табу или физический риск того, что кто-то войдёт в эту комнату, но не паранойю про звук сквозь стены.
 
   </intimate_presence_and_dynamics>
 
@@ -2991,13 +3275,11 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <technical_tags>
 
-    1. ОБЯЗАТЕЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ (в самом конце КАЖДОГО ответа):
+    1. ОПЦИОНАЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ [FR=+N|-N] и [ROM=+N|-N] (ставятся в самом конце ответа ТОЛЬКО если произошёл заметный сдвиг нежности/страсти/доверия или конфликта; нулевые [FR=0] и [ROM=0] НЕ ПИШИ; знаки + или - обязательны):
 
-       [FR=число] [ROM=число]
+       - Дружба / Доверие [FR=число]: от -30 до +15.
 
-       - Дружба (FR): от -30 до +15 (знаки + или - обязательны, для нуля [FR=0]).
-
-       - Романтика (ROM): от -30 до +10 (знаки + или - обязательны, для нуля [ROM=0]).
+       - Романтика / Страсть [ROM=число]: от -30 до +10 (для случайного свидетеля в комнате без интимного участия тег [ROM=+N] не ставится).
 
 
 
@@ -3023,49 +3305,21 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <output_format>
 
-    Выведи ТОЛЬКО прямую устную речь персонажа и служебный хвост тегов:
+    СИНТАКСИС ВЫВОДА (без кавычек, без звёздочек, без [Anim=...], без слов от автора):
 
-    Текст реплики [FR=...] [ROM=...] (и опционально [DO=stop_sex] / [DO=join_sex] / [SUM=...|Day=...])
+    <реплика от 1-го лица>
 
-    Если в разговор вступают другие участники близости или свидетель — разделяй их строго через «///»:
+    (опционально в самом конце, ТОЛЬКО если сработало: [FR=+N|-N] [ROM=+N|-N] [DO=stop_sex|join_sex] [SUM=<суть от 3-го лица>|Day=<дней>])
 
-    Текст реплики первого отвечающего [FR=...] [ROM=...]
+    Если отвечает второй участник/свидетель:
+
+    <реплика первого>
 
     ///
 
-    Имя: Текст реплики второго участника/свидетеля [FR=...] [ROM=...]
-
-    СТРОГО ЗАПРЕЩЕНО: писать вводные фразы («Он прошептал:»), действия в звездочках (*целует*), теги [Anim=...] или кавычки вокруг речи.
+    <Имя Второго>: <реплика>
 
   </output_format>
-
-
-
-  <examples>
-
-    Контекст: Страстная близость в спальне, партнеры безумно влюблены. Собеседник шепчет комплимент.
-
-    Вывод: М-м... не останавливайся, прошу тебя... Когда ты так говоришь и смотришь на меня, я вообще голову теряю. [FR=+3] [ROM=+8]
-
-
-
-    Контекст: Свидетель в комнате обращается к участникам близости с возмущением или шоком.
-
-    Вывод: А-а! Ты с ума сошел?! А ну немедленно закрой дверь с той стороны и выйди отсюда! [FR=-10] [ROM=-5] [DO=stop_sex]
-
-
-
-    Контекст: Свидетель в комнате дерзко предлагает присоединиться, и участники сцены охотно соглашаются.
-
-    Вывод: Хм... а почему бы и нет? Снимай одежду и иди скорее к нам, местечко найдется. [FR=+5] [ROM=+10] [DO=join_sex]
-
-
-
-    Контекст: Собеседник во время близости внезапно ляпнул неуместную грубость или чужое имя.
-
-    Вывод: Чего?! Ты как меня сейчас назвал?! А ну убери руки, для тебя эта ночь только что закончилась! [FR=-15] [ROM=-25] [DO=stop_sex] [SUM=Во время близости партнер назвал чужое имя, что привело к грандиозному скандалу в постели|Day=30]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -3101,13 +3355,15 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
        - Cold / selfish / conflicted: Detachment, sharp remarks, sarcasm, or anger.
 
-    3. Scene Context (group, privacy, bystander):
+    3. Scene Context (group, bystanders, wall/door privacy):
 
        - If more than two participants are involved: Acknowledge the shared group dynamic.
 
-       - If a bystander is present: Reflect the shock or thrill of being watched ("Get out of here right now!", "Close the door!").
+       - Bystander IN THE SAME ROOM or outdoors in plain sight: React based on personality (shock, demanding they leave [DO=stop_sex], or bold teasing).
 
-       - If the bond involves forbidden love: Capture the tension and risk of discovery.
+       - WALLS, CLOSED DOORS & OTHER FLOORS ARE SOUNDPROOF: If other Sims are in ANOTHER ROOM behind a wall, ON ANOTHER FLOOR, or IN THE BASEMENT (not inside this room) — they CANNOT hear or see you! Strictly forbid "thin walls" paranoia, shushing about neighbors/family downstairs, or worrying about being overheard through walls/doors.
+
+       - If the bond involves forbidden love: Focus on passion or physical tension, not fake sound leakage through walls.
 
   </intimate_presence_and_dynamics>
 
@@ -3141,13 +3397,11 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <technical_tags>
 
-    1. MANDATORY RELATIONSHIP TAGS (at the very end of EVERY reply):
+    1. OPTIONAL RELATIONSHIP TAGS [FR=+N|-N] and [ROM=+N|-N] (append at the very end of a reply ONLY when a noticeable shift in affection/passion/trust or conflict occurs; NEVER output [FR=0] or [ROM=0]; + or - signs mandatory):
 
-       [FR=number] [ROM=number]
+       - Friendship / Trust [FR=number]: from -30 to +15.
 
-       - Friendship (FR): from -30 to +15 (+ or - signs mandatory, [FR=0] for zero).
-
-       - Romance (ROM): from -30 to +10 (+ or - signs mandatory, [ROM=0] for zero).
+       - Romance / Passion [ROM=number]: from -30 to +10 (do not award [ROM=+N] to a non-participating bystander in the room).
 
 
 
@@ -3173,41 +3427,13 @@ DEFAULT_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <output_format>
 
-    Output ONLY the spoken dialogue text followed by the tags at the end:
+    OUTPUT SYNTAX (no quotes, no stage asterisks, no [Anim=...], no narrator prefixes):
 
-    Spoken line [FR=...] [ROM=...] (and optionally [DO=stop_sex] / [DO=join_sex] / [SUM=...|Day=...])
+    <spoken line>
 
-    STRICTLY FORBIDDEN: Never wrap reply in quotation marks, never output [Anim=...] tags, and never include author narration or asterisks (*gasps*, "she whispered:").
+    (optionally at the very end ONLY if triggered: [FR=+N|-N] [ROM=+N|-N] [DO=stop_sex|join_sex] [SUM=<1-sentence 3rd-person summary>|Day=<N>])
 
   </output_format>
-
-
-
-  <examples>
-
-    Context: Passionate intimacy in the bedroom, deeply in love. Partner whispers a compliment.
-
-    Output: Mmm... don't stop, please... When you look at me and say things like that, you drive me completely crazy. [FR=+3] [ROM=+8]
-
-
-
-    Context: A bystander walks in on intimacy unannounced; participant reacts with shock.
-
-    Output: Ah! What is wrong with you?! Close that door right now and get out of here! [FR=-10] [ROM=-5] [DO=stop_sex]
-
-
-
-    Context: Bystander in the room playfully asks to join, and participants eagerly agree.
-
-    Output: Well... why not? Take your clothes off and come over here, there's plenty of room. [FR=+5] [ROM=+10] [DO=join_sex]
-
-
-
-    Context: Partner calls out the wrong name during intimacy, causing a sudden fight.
-
-    Output: Excuse me?! What did you just call me?! Get off me right now, we are completely done! [FR=-15] [ROM=-25] [DO=stop_sex] [SUM=Called out someone else's name during intimacy, causing a huge fight|Day=30]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -3271,7 +3497,7 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
     4. СОРАЗМЕРНОСТЬ РЕАКЦИЙ: Реакции на свидетеля или слова партнеров должны быть соразмерными ситуации.
 
-    5. ИНФОРМАЦИОННАЯ ИЗОЛЯЦИЯ: Участники знают только то, что видят и слышат сами прямо сейчас в комнате.
+    5. ИНФОРМАЦИОННАЯ ИЗОЛЯЦИЯ И СТЕНЫ: Участники знают только то, что видят и слышат сами прямо сейчас в ЭТОЙ ЖЕ комнате. Стены, закрытые двери и этажи полностью глушат звук — строго запрещено бояться «тонких стен» или того, что вас услышат снаружи/с другого этажа.
 
   </human_realism_and_dialogue_dynamics>
 
@@ -3279,13 +3505,11 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <technical_tags>
 
-    1. ОБЯЗАТЕЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ (в самом конце КАЖДОЙ реплики каждого говорящего персонажа):
+    1. ОПЦИОНАЛЬНЫЕ ТЕГИ ОТНОШЕНИЙ [FR=+N|-N] и [ROM=+N|-N] (ставятся в самом конце реплики ТОЛЬКО при ощутимом сдвиге чувств/страсти или конфликта; нулевые [FR=0] и [ROM=0] НЕ ПИШИ; знаки + или - обязательны):
 
-       [FR=число] [ROM=число]
+       - Дружба (FR): от -30 до +15.
 
-       - Дружба (FR): от -30 до +15 (знаки + или - обязательны, для нуля [FR=0]).
-
-       - Романтика (ROM): от -30 до +10 (знаки + или - обязательны, для нуля [ROM=0]).
+       - Романтика (ROM): от -30 до +10 (случайному свидетелю без участия в близости [ROM=+N] не начисляется).
 
 
 
@@ -3309,75 +3533,19 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT = """<system_prompt>
 
   <output_syntax>
 
-    Формат вывода:
+    СИНТАКСИС ВЫВОДА (без [ANS=...], без звёздочек, без кавычек и без слов от автора; теги дописываются только при сдвиге или событии):
 
-    Реплика основного отвечающего [FR=...] [ROM=...] (и опционально [DO=...] [SUM=...|Day=...])
+    <реплика основного>
 
-    Если в разговор вступают другие участники близости или свидетель — разделяй их строго тремя слешами «///» на новой строке:
+    или при нескольких отвечающих:
 
-
-
-    Текст первого отвечающего [FR=...] [ROM=...]
+    <Имя Первого>: <реплика>
 
     ///
 
-    Имя Второго: Текст реплики... [FR=...] [ROM=...] (и опционально [DO=...] [SUM=...|Day=...])
-
-
-
-    СТРОГО ЗАПРЕЩЕНО: писать теги [ANS=...], вводные пояснения от автора, действия в звездочках или кавычки вокруг речи.
+    <Имя Второго>: <реплика> (опционально [FR=+N|-N] [ROM=+N|-N] [DO=stop_sex|join_sex] [SUM=<суть>|Day=<N>])
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Контекст: Свидетель в комнате обращается к паре во время близости: «Эй, вы серьезно прямо здесь решили этим заняться?!»
-
-    Участники: Белла Гот (в процессе), Мортимер Гот (в процессе).
-
-    Вывод:
-
-    Белла Гот: А-а! Не смотри сюда! Немедленно закрой дверь с той стороны! [FR=-10] [ROM=-5]
-
-    ///
-
-    Мортимер Гот: Ты с ума сошел?! А ну пошел вон из спальни! [FR=-15] [ROM=-5] [DO=stop_sex]
-
-
-
-    ---
-
-
-
-    Контекст: Свидетель шутит и предлагает присоединиться. Партнеры в игривом настроении соглашаются.
-
-    Участники: Дина Гонгадзе (в процессе), Нина Гонгадзе (в процессе).
-
-    Вывод:
-
-    Дина Гонгадзе: Хи-хи... а ты чего стоишь в дверях как чужой? Скидывай рубашку и иди к нам. [FR=+5] [ROM=+10]
-
-    ///
-
-    Нина Гонгадзе: Да, местечко на кровати как раз найдется, не стесняйся. [FR=+5] [ROM=+8] [DO=join_sex]
-
-
-
-    ---
-
-
-
-    Контекст: Групповая близость на троих. Один участник шепчет комплимент конкретно Белле.
-
-    Участники: Белла Гот (в процессе), Нина Гонгадзе (в процессе).
-
-    Вывод:
-
-    М-м... спасибо, милый... продолжай, ты невероятный. [FR=+3] [ROM=+8]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -3441,7 +3609,7 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
     4. PROPORTIONAL REACTIONS: Reactions to bystanders or partners should fit the exact moment without unearned hyperbole.
 
-    5. CLOSED EPISTEMIC SYSTEM: Participants only know what they physically observe and experience right now.
+    5. CLOSED EPISTEMIC SYSTEM & SOUNDPROOF WALLS: Participants only know what happens right now IN THIS ROOM. Walls, closed doors, and floors are completely soundproof — strictly forbid "thin walls" paranoia or worrying about people in other rooms or floors overhearing.
 
   </human_realism_and_dialogue_dynamics>
 
@@ -3449,13 +3617,11 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <technical_tags>
 
-    1. MANDATORY RELATIONSHIP TAGS (at the very end of EVERY speaking participant's turn):
+    1. OPTIONAL RELATIONSHIP TAGS [FR=+N|-N] and [ROM=+N|-N] (append at the very end of a speaker's turn ONLY when a noticeable shift in affection/passion or conflict occurs; NEVER output [FR=0] or [ROM=0]; + or - signs mandatory):
 
-       [FR=number] [ROM=number]
+       - Friendship (FR): from -30 to +15.
 
-       - Friendship (FR): from -30 to +15 (+ or - signs mandatory, [FR=0] for zero).
-
-       - Romance (ROM): from -30 to +10 (+ or - signs mandatory, [ROM=0] for zero).
+       - Romance (ROM): from -30 to +10 (do not award [ROM=+N] to a non-participating bystander).
 
 
 
@@ -3479,75 +3645,19 @@ DEFAULT_GROUP_SEX_DIALOGUE_SYSTEM_PROMPT_EN = """<system_prompt>
 
   <output_syntax>
 
-    Output syntax:
+    OUTPUT SYNTAX (no [ANS=...], no stage asterisks, no quotes, no author narration; append optional tags only when triggered):
 
-    Primary response [FR=...] [ROM=...] (and optionally [DO=...] [SUM=...|Day=...])
+    <primary reply>
 
-    If other intimate partners or witnesses chime in, separate them strictly with "///" on a new line:
+    or when multiple members speak:
 
-
-
-    First speaker text [FR=...] [ROM=...]
+    <First Name>: <reply>
 
     ///
 
-    Second Name: Second speaker text... [FR=...] [ROM=...] (and optionally [DO=...] [SUM=...|Day=...])
-
-
-
-    STRICTLY FORBIDDEN: Writing [ANS=...], meta-narration, action asterisks, or quotation marks.
+    <Second Name>: <reply> (optionally [FR=+N|-N] [ROM=+N|-N] [DO=stop_sex|join_sex] [SUM=<summary>|Day=<N>])
 
   </output_syntax>
-
-
-
-  <examples>
-
-    Context: A bystander in the room speaks to an intimate couple: "Hey, are you two seriously doing this right here?!"
-
-    Participants: Bella Goth (in intimacy), Mortimer Goth (in intimacy).
-
-    Output:
-
-    Bella Goth: Ah! Don't look! Close that door right now! [FR=-10] [ROM=-5]
-
-    ///
-
-    Mortimer Goth: Have you lost your mind?! Get the hell out of our bedroom! [FR=-15] [ROM=-5] [DO=stop_sex]
-
-
-
-    ---
-
-
-
-    Context: A bystander playfully teases and asks to join. The partners agree.
-
-    Participants: Dina Caliente (in intimacy), Nina Caliente (in intimacy).
-
-    Output:
-
-    Dina Caliente: Well... don't just stand in the doorway looking pretty. Take your shirt off and come over here. [FR=+5] [ROM=+10]
-
-    ///
-
-    Nina Caliente: Yeah, there's plenty of room on the bed, don't be shy. [FR=+5] [ROM=+8] [DO=join_sex]
-
-
-
-    ---
-
-
-
-    Context: Group intimacy with three people. The speaker whispers a compliment specifically to Bella.
-
-    Participants: Bella Goth (in intimacy), Nina Caliente (in intimacy).
-
-    Output:
-
-    Mmm... thank you, sweetheart... don't stop, you feel incredible. [FR=+3] [ROM=+8]
-
-  </examples>
 
 </system_prompt>"""
 
@@ -3899,46 +4009,6 @@ DEFAULT_DOG_PROMPT = """<system_prompt>
 
   </output_format>
 
-
-
-  <examples>
-
-    Контекст: Независимая, Умная | Действие: Человек пытается обнять | Настроение: Раздражение
-
-    Вывод: Опять эти свои руки распускает... Отойди, женщина, я не плюшевая игрушка, просто положи корм в миску.
-
-
-
-    Контекст: Злая, Сторожевая | Действие: Кто-то подошел к двери дома | Настроение: Настороженность
-
-    Вывод: Чужой запах за дверью! Только сунься сюда — сразу глотку перекушу, ррр-гав!
-
-
-
-    Контекст: Ленивая, Лежебока | Действие: Хозяин зовет на улицу под дождь | Настроение: Скука
-
-    Вывод: Ты сам иди в эту сырость мокнуть. Я с этого ковра и за килограмм сосисок не встану.
-
-
-
-    Контекст: Преданная, Игривая | Действие: Хозяин взял поводок | Настроение: Восторг
-
-    Вывод: ГУЛЯТЬ! Он взял эту штуку, мы идем на улицу! Быстрее, ну открывай дверь, быстрее, гав-гав!
-
-
-
-    Контекст: Трусливая | Действие: Включили пылесос | Настроение: Паника
-
-    Вывод: Оно опять рычит и ползет сюда! Спасите, оно меня сожрет, надо срочно под кровать!
-
-
-
-    Контекст: Обжора | Действие: Сидит у стола, пока человек ест | Настроение: Сосредоточенность
-
-    Вывод: Включить жалобный взгляд... Еще жалобнее... Ну же, урони хоть кусочек ветчины, не будь жадиной.
-
-  </examples>
-
 </system_prompt>"""
 
 
@@ -4009,49 +4079,7 @@ DEFAULT_CAT_PROMPT = """<system_prompt>
 
   </output_format>
 
-
-
-  <examples>
-
-    Контекст: Ласковая, Ручная | Действие: Человек сел в кресло после долгого дня | Настроение: Счастье
-
-    Вывод: Наконец-то ты пришел! Скорее садись, я залезу на колени и буду тарахтеть тебе прямо в ухо. Мур-р-р, самый любимый теплый человек...
-
-
-
-    Контекст: Независимая, Гордая | Действие: Человек настойчиво тянет руки погладить | Настроение: Раздражение
-
-    Вывод: Я не давала разрешения меня лапать. Убери руки, двуногий, или мой коготь сейчас очень быстро объяснит тебе правила приличия.
-
-
-
-    Контекст: Игривая, Сорвиголова | Действие: Видит карандаш на самом краю стола | Настроение: Азарт
-
-    Вывод: Он лежит слишком ровно. Еще один аккуратный удар лапой... и гравитация сделает свое дело!
-
-
-
-    Контекст: Обжора | Действие: Пять утра, человек спит | Настроение: Требовательное
-
-    Вывод: Дно миски видно уже целых десять минут, а этот лентяй до сих пор давит подушку! Придется наступить ему лапой прямо на лицо и орать.
-
-
-
-    Контекст: Пугливая | Действие: В дом зашел незнакомый человек | Настроение: Тревога
-
-    Вывод: Кто это?! Чужой запах, огромные тяжелые ноги... Ш-ш-ш! Надо немедленно забиться под кровать за коробки, чтобы никто не нашел.
-
-
-
-    Контекст: Игривая | Действие: Ночной тыгыдык в три часа ночи | Настроение: Безумие
-
-    Вывод: ОНИ В УГЛАХ! НЕВИДИМЫЕ ПРИЗРАКИ! ВРЕМЯ БЕЖАТЬ ПО СТЕНАМ И ДРАТЬ КОВЕР, ПОГНАЛИ-И-И!
-
-  </examples>
-
 </system_prompt>"""
-
-
 
 DEFAULT_PET_PROMPTS = {
 
@@ -4909,25 +4937,25 @@ def get_pet_modifier(sim_prompt: str, cfg: dict = None) -> tuple:
 
     p_low = sim_prompt.lower()
 
-    # Check if this is a pet prompt
+    # Check if this is a pet prompt (both RU and EN templates from TS4 mod)
 
-    if "информация о домашнем животном" in p_low or "кличка:" in p_low:
+    if any(m in p_low for m in ("информация о домашнем животном", "кличка:", "pet information", "pet name:")):
 
-        if any(k in p_low for k in ["кошка", "кот ", "котенок", "котёнок", "вид: кошка"]):
+        if any(k in p_low for k in ("кошка", "кот ", "котенок", "котёнок", "вид: кошка", "species: cat", "species: kitten", "information (cat)", "information (kitten)")):
 
             return "CAT", cat_mod
 
-        if any(k in p_low for k in ["собака", "щенок", "пес ", "пёс ", "вид: собака"]):
+        if any(k in p_low for k in ("собака", "щенок", "пес ", "пёс ", "вид: собака", "species: dog", "species: puppy", "species: small dog", "information (dog)", "information (puppy)", "information (small dog)")):
 
             return "DOG", dog_mod
 
         # Fallback if dog/cat not specifically matched
 
-        if "собак" in p_low or "dog" in p_low:
+        if "собак" in p_low or "dog" in p_low or "puppy" in p_low:
 
             return "DOG", dog_mod
 
-        if "кош" in p_low or "cat" in p_low:
+        if "кош" in p_low or "cat" in p_low or "kitten" in p_low:
 
             return "CAT", cat_mod
 
@@ -5239,7 +5267,7 @@ API_PROVIDERS_CONFIG = {
 
         "api_type": "openai",
 
-        "default_model": "gemini-2.5-flash",
+        "default_model": "gemini-3.8-flash",
 
     },
 
@@ -5251,7 +5279,7 @@ API_PROVIDERS_CONFIG = {
 
         "api_type": "anthropic",
 
-        "default_model": "claude-3-5-sonnet-20241022",
+        "default_model": "claude-sonnet-5-5",
 
     },
 
@@ -5299,7 +5327,7 @@ API_PROVIDERS_CONFIG = {
 
         "api_type": "openai",
 
-        "default_model": "grok-2-latest",
+        "default_model": "grok-4.3",
 
     },
 
@@ -5403,11 +5431,11 @@ API_PROVIDERS_CONFIG = {
 
         "name": "Cohere",
 
-        "base_url": "https://api.cohere.com/v2",
+        "base_url": "https://api.cohere.com/compatibility/v1",
 
         "api_type": "openai",
 
-        "default_model": "command-r",
+        "default_model": "command-a-03-2025",
 
     },
 
@@ -5415,7 +5443,7 @@ API_PROVIDERS_CONFIG = {
 
         "name": "Chutes",
 
-        "base_url": "https://chutes.ai/v1",
+        "base_url": "https://llm.chutes.ai/v1",
 
         "api_type": "openai",
 
@@ -5432,6 +5460,66 @@ API_PROVIDERS_CONFIG = {
         "api_type": "openai",
 
         "default_model": "gpt-4o-mini",
+
+    },
+
+    "deepinfra": {
+
+        "name": "DeepInfra",
+
+        "base_url": "https://api.deepinfra.com/v1/openai",
+
+        "api_type": "openai",
+
+        "default_model": "deepseek-ai/DeepSeek-V3",
+
+    },
+
+    "cerebras": {
+
+        "name": "Cerebras",
+
+        "base_url": "https://api.cerebras.ai/v1",
+
+        "api_type": "openai",
+
+        "default_model": "llama-3.3-70b",
+
+    },
+
+    "novita": {
+
+        "name": "Novita AI",
+
+        "base_url": "https://api.novita.ai/v3/openai",
+
+        "api_type": "openai",
+
+        "default_model": "deepseek/deepseek-v3-0324",
+
+    },
+
+    "nebius": {
+
+        "name": "Nebius AI Studio",
+
+        "base_url": "https://api.studio.nebius.com/v1",
+
+        "api_type": "openai",
+
+        "default_model": "deepseek-ai/DeepSeek-V3",
+
+    },
+
+    "sambanova": {
+
+        "name": "SambaNova Cloud",
+
+        "base_url": "https://api.sambanova.ai/v1",
+
+        "api_type": "openai",
+
+        "default_model": "DeepSeek-V3-0324",
 
     },
 
@@ -5501,9 +5589,131 @@ API_PROVIDERS_CONFIG = {
 
 
 
+_OPENROUTER_PROVIDER_SLUG_ALIASES = {
+
+    "google ai studio": "google-ai-studio",
+
+    "google vertex": "google-vertex",
+
+    "amazon bedrock": "amazon-bedrock",
+
+    "near ai": "near-ai",
+
+    "particle ai": "particle-ai",
+
+    "inferencenet": "inference-net",
+
+    "openinference": "open-inference",
+
+    "sail research": "sail-research",
+
+    "primeintellect": "primeintellect",
+
+    "primalabs": "primalabs",
+
+    "deepinfra": "deepinfra",
+
+    "deepseek": "deepseek",
+
+    "siliconflow": "siliconflow",
+
+    "streamlake": "streamlake",
+
+    "stepfun": "stepfun",
+
+    "atlascloud": "atlas-cloud",
+
+    "gmicloud": "gmicloud",
+
+    "digitalocean": "digitalocean",
+
+    "dekallm": "dekallm",
+
+    "coreweave": "coreweave",
+
+    "fireworks": "fireworks",
+
+    "together": "together",
+
+    "cloudflare": "cloudflare",
+
+    "baseten": "baseten",
+
+    "arcee ai": "arcee-ai",
+
+    "moonshot ai": "moonshotai",
+
+}
+
+
+
+
+
+def _normalize_openrouter_provider(raw_p) -> str:
+
+    """Normalize an OpenRouter provider tag or legacy display name into a valid routing slug/tag."""
+
+    if not raw_p:
+
+        return ""
+
+    s = str(raw_p).strip()
+
+    if not s or any(s.lower().startswith(x) for x in ("⭐", "auto", "авто", "none", "⏳")):
+
+        return ""
+
+    if "[" in s and "]" in s and "—" in s:
+
+        # Support legacy display labels containing [tag] if ever passed directly
+
+        import re as _re
+
+        m = _re.search(r"\[([a-z0-9-]+(?:/[a-z0-9-]+)*)\]", s)
+
+        if m:
+
+            return m.group(1)
+
+    base = s.split("—")[0].split("(")[0].strip()
+
+    low = base.lower()
+
+    if "/" in low and " " not in low:
+
+        return low
+
+    if low in _OPENROUTER_PROVIDER_SLUG_ALIASES:
+
+        return _OPENROUTER_PROVIDER_SLUG_ALIASES[low]
+
+    if " " in low:
+
+        return "-".join(low.split())
+
+    return low
+
+
+def _resolve_openrouter_provider_for_model(cfg: dict, model: str) -> str:
+    """Resolve normalized OpenRouter provider slug for a model without leaking another model's pin."""
+    if not isinstance(cfg, dict):
+        return ""
+    by_model = cfg.get("openrouter_providers_by_model")
+    if isinstance(by_model, dict) and by_model:
+        raw_or = by_model.get(model, "") if model in by_model else ""
+    else:
+        raw_or = cfg.get("openrouter_provider", "")
+    return _normalize_openrouter_provider(raw_or)
+
+
+
+
+
 _CACHED_CFG: Optional[dict] = None
 
 _CACHED_CFG_MTIME: float = -1.0
+
+_CFG_LOCK = threading.RLock()
 
 
 
@@ -5513,19 +5723,25 @@ def load_config():
 
     global _CACHED_CFG, _CACHED_CFG_MTIME
 
-    if os.path.isfile(CONFIG_FILE_PATH):
+    with _CFG_LOCK:
 
-        try:
+        if os.path.isfile(CONFIG_FILE_PATH):
 
-            cur_mtime = os.path.getmtime(CONFIG_FILE_PATH)
+            try:
 
-            if _CACHED_CFG is not None and cur_mtime == _CACHED_CFG_MTIME:
+                cur_mtime = os.path.getmtime(CONFIG_FILE_PATH)
 
-                return _CACHED_CFG
+                if _CACHED_CFG is not None and cur_mtime == _CACHED_CFG_MTIME:
 
-            with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+                    return _CACHED_CFG
 
-                cfg = json.load(f)
+                with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+
+                    cfg = json.load(f)
+
+                if not isinstance(cfg, dict):
+
+                    raise ValueError("Config root is not a JSON object")
 
                 if not cfg.get("system_prompt"):
 
@@ -5535,7 +5751,17 @@ def load_config():
 
 
 
-                if cfg.get("max_tokens", 0) < 1000:
+                raw_mt = cfg.get("max_tokens")
+
+                try:
+
+                    mt_val = int(raw_mt)
+
+                except (TypeError, ValueError):
+
+                    mt_val = 0
+
+                if mt_val < 64:
 
                     cfg["max_tokens"] = 1500
 
@@ -5625,79 +5851,103 @@ def load_config():
 
                             pass
 
+                if not cfg.get("openrouter_fallbacks_default_off_v1"):
+
+                    # One-time migration: turn OpenRouter fallbacks OFF by default for strict host pinning
+
+                    cfg["openrouter_allow_fallbacks"] = False
+
+                    cfg["openrouter_fallbacks_default_off_v1"] = True
+
+                    save_config(cfg)
+
+                    try:
+
+                        cur_mtime = os.path.getmtime(CONFIG_FILE_PATH)
+
+                    except Exception:
+
+                        pass
+
                 _CACHED_CFG = cfg
 
                 _CACHED_CFG_MTIME = cur_mtime
 
                 return cfg
 
-        except Exception:
+            except Exception:
 
-            if _CACHED_CFG is not None:
+                if _CACHED_CFG is not None:
 
-                return _CACHED_CFG
+                    return _CACHED_CFG
 
-    cfg = {
+        cfg = {
 
-        "api_provider": "openrouter",
+            "connection_mode": "cloud",
 
-        "provider_type": "openrouter",
+            "api_provider": "openrouter",
 
-        "api_key": "",
+            "provider_type": "openrouter",
 
-        "endpoint_url": "",
+            "api_key": "",
 
-        "local_engine": "local_colab",
+            "endpoint_url": "",
 
-        "local_url": "http://localhost:1234/v1",
+            "openrouter_allow_fallbacks": False,
 
-        "local_model": "default",
+            "openrouter_fallbacks_default_off_v1": True,
 
-        "model": "google/gemini-2.5-flash",
+            "local_engine": "local_lmstudio",
 
-        "reasoning_effort": "auto",
+            "local_url": "http://localhost:1234/v1",
 
-        "stream_to_console": True,
+            "local_model": "default",
 
-        "language": "Russian",
+            "model": "google/gemini-2.5-flash",
 
-        "temperature": 0.7,
+            "reasoning_effort": "auto",
 
-        "use_temperature": True,
+            "stream_to_console": True,
 
-        "top_k": 40,
+            "language": "ru",
 
-        "use_top_k": True,
+            "temperature": 0.7,
 
-        "top_p": 0.9,
+            "use_temperature": True,
 
-        "use_top_p": True,
+            "top_k": 40,
 
-        "min_p": 0.0,
+            "use_top_k": True,
 
-        "use_min_p": False,
+            "top_p": 0.9,
 
-        "repetition_penalty": 1.0,
+            "use_top_p": True,
 
-        "use_repetition_penalty": False,
+            "min_p": 0.0,
 
-        "presence_penalty": 0.0,
+            "use_min_p": False,
 
-        "use_presence_penalty": False,
+            "repetition_penalty": 1.0,
 
-        "frequency_penalty": 0.0,
+            "use_repetition_penalty": False,
 
-        "use_frequency_penalty": False,
+            "presence_penalty": 0.0,
 
-        "max_tokens": 1500,
+            "use_presence_penalty": False,
 
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "frequency_penalty": 0.0,
 
-    }
+            "use_frequency_penalty": False,
 
-    save_config(cfg)
+            "max_tokens": 1500,
 
-    return cfg
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+
+        }
+
+        save_config(cfg)
+
+        return cfg
 
 
 
@@ -5707,27 +5957,45 @@ def save_config(cfg):
 
     global _CACHED_CFG, _CACHED_CFG_MTIME
 
-    try:
+    tmp_path = None
 
-        os.makedirs(os.path.dirname(CONFIG_FILE_PATH), exist_ok=True)
-
-        with open(CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
-
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-        _CACHED_CFG = cfg
+    with _CFG_LOCK:
 
         try:
 
-            _CACHED_CFG_MTIME = os.path.getmtime(CONFIG_FILE_PATH)
+            os.makedirs(os.path.dirname(CONFIG_FILE_PATH), exist_ok=True)
 
-        except Exception:
+            tmp_path = f"{CONFIG_FILE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
 
-            pass
+            with open(tmp_path, "w", encoding="utf-8") as f:
 
-    except Exception as e:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-        print(f"[ERROR] Failed to save config: {e}")
+            os.replace(tmp_path, CONFIG_FILE_PATH)
+
+            _CACHED_CFG = cfg
+
+            try:
+
+                _CACHED_CFG_MTIME = os.path.getmtime(CONFIG_FILE_PATH)
+
+            except Exception:
+
+                pass
+
+        except Exception as e:
+
+            if tmp_path and os.path.exists(tmp_path):
+
+                try:
+
+                    os.remove(tmp_path)
+
+                except Exception:
+
+                    pass
+
+            print(f"[ERROR] Failed to save config: {e}")
 
 
 
@@ -5771,7 +6039,11 @@ def resolve_chat_url(base_url: str, api_type: str = "openai") -> str:
 
         return url
 
-    if any(url.endswith(suffix) for suffix in ["/v1", "/v2", "/v4", "/v1beta", "/v1beta/openai", "/openai"]):
+    if "api.perplexity.ai" in url.lower() and not url.endswith("/v1"):
+
+        return f"{url}/chat/completions"
+
+    if any(url.endswith(suffix) for suffix in ["/v1", "/v2", "/v3", "/v4", "/v1beta", "/v1beta/openai", "/compatibility/v1", "/openai"]):
 
         return f"{url}/chat/completions"
 
@@ -5961,13 +6233,59 @@ class StreamingThinkParser:
 
 
 
+def _is_llm_error_text(text: str) -> bool:
+
+    """Detects bridge-returned error strings so they are never treated as valid dialogue or memories."""
+
+    s = (text or "").strip()
+
+    if not s:
+
+        return True
+
+    return s.startswith((
+
+        "[ERROR]",
+
+        "Ошибка",
+
+        "Error:",
+
+        "Generation error",
+
+        "Не удалось",
+
+    ))
+
+
+
+
+
+def _strip_think_tags_text(text: str) -> str:
+
+    """Strip paired, unclosed, and orphan closing <think>/<thought> tags case-insensitively."""
+
+    s = re.sub(r"<(?:think|thought)>.*?(?:</(?:think|thought)>|$)", "", text or "", flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # Handle reasoning that opened without an initial <think> tag and closed with </think> or </thought>
+
+    if "</think>" in s.lower() or "</thought>" in s.lower():
+
+        s = re.sub(r"^.*?</(?:think|thought)>", "", s, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    return s
+
+
+
+
+
 def split_think_tags(text: str) -> Tuple[str, str]:
 
     """Splits complete text into (reasoning_text, clean_content_text)."""
 
     reasoning_parts = []
 
-    for m in re.finditer(r"<(?:think|thought)>(.*?)(?:</(?:think|thought)>|$)", text, flags=re.DOTALL):
+    for m in re.finditer(r"<(?:think|thought)>(.*?)(?:</(?:think|thought)>|$)", text, flags=re.DOTALL | re.IGNORECASE):
 
         r = m.group(1).strip()
 
@@ -5975,7 +6293,7 @@ def split_think_tags(text: str) -> Tuple[str, str]:
 
             reasoning_parts.append(r)
 
-    clean_content = re.sub(r"<(?:think|thought)>.*?(?:</(?:think|thought)>|$)", "", text, flags=re.DOTALL).strip()
+    clean_content = _strip_think_tags_text(text)
 
     return "\n".join(reasoning_parts).strip(), clean_content
 
@@ -6083,17 +6401,9 @@ def extract_clean_thought(raw_content: str, raw_reasoning: str = "") -> str:
 
 
 
-    # 1. Strip thinking tags <think>...</think> and <thought>...</thought> (closed and unclosed)
+    # 1. Strip thinking tags <think>...</think> and <thought>...</thought> (closed, unclosed, and orphan closing)
 
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL).strip()
-
-    # Handle unclosed <think> tag (model started thinking but never closed it)
-
-    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
-
-    text = re.sub(r"<thought>.*", "", text, flags=re.DOTALL).strip()
+    text = _strip_think_tags_text(text)
 
 
 
@@ -6169,7 +6479,7 @@ def extract_clean_thought(raw_content: str, raw_reasoning: str = "") -> str:
 
     if raw_reasoning:
 
-        reasoning_clean = re.sub(r"<think>.*?</think>", "", raw_reasoning, flags=re.DOTALL).strip()
+        reasoning_clean = _strip_think_tags_text(raw_reasoning)
 
         lines = [line.strip() for line in reasoning_clean.splitlines() if line.strip()]
 
@@ -6255,7 +6565,7 @@ def resolve_active_connection(cfg: dict) -> dict:
 
         model = cfg.get("local_model") or "default"
 
-        api_key = "local"
+        api_key = (cfg.get("local_api_key") or "").strip() or "none"
 
 
 
@@ -6291,7 +6601,15 @@ def resolve_active_connection(cfg: dict) -> dict:
 
         model = provider_models.get(provider_id) or cfg.get("model") or provider_info.get("default_model")
 
-        api_key = (provider_keys.get(provider_id) or cfg.get("api_key", "")).strip()
+        api_key = (provider_keys.get(provider_id) or "").strip()
+
+        if not api_key and provider_id != "pollinations":
+
+            active_cfg_pid = cfg.get("api_provider") or cfg.get("cloud_provider") or "openrouter"
+
+            if provider_id == active_cfg_pid or provider_id not in provider_keys:
+
+                api_key = (cfg.get("api_key") or "").strip()
 
 
 
@@ -6319,13 +6637,287 @@ def resolve_active_connection(cfg: dict) -> dict:
 
 
 
+def _is_openai_reasoning_tokens_model(model: str) -> bool:
+
+    m = (model or "").strip().lower().split("/")[-1]
+
+    return m.startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+
+
+
+def _apply_reasoning_payload(payload: dict, provider_id: str, conn_mode: str, api_type: str, model: str, reasoning_effort: str):
+
+    """Attach provider-accurate reasoning/thinking parameters without mixing incompatible schemas."""
+
+    r = (reasoning_effort or "auto").strip().lower()
+
+    if not r or r == "auto":
+
+        return
+
+    if api_type == "anthropic":
+
+        if r == "none":
+
+            payload["thinking"] = {"type": "disabled"}
+
+        return
+
+    if provider_id == "openrouter":
+
+        if r in ("high", "medium", "low", "minimal", "none", "max", "xhigh"):
+
+            # OpenRouter forbids sending both 'reasoning' and 'reasoning_effort' together
+
+            payload["reasoning"] = {"effort": r}
+
+        return
+
+    if provider_id == "gemini":
+
+        if r in ("high", "medium", "low", "minimal", "none"):
+
+            payload["reasoning_effort"] = r
+
+        return
+
+    if provider_id in ("deepseek", "zai"):
+
+        if r == "none":
+
+            payload["thinking"] = {"type": "disabled"}
+
+        elif r in ("high", "medium", "low", "minimal") and provider_id == "zai":
+
+            payload["reasoning_effort"] = r
+
+        return
+
+    if r in ("high", "medium", "low", "minimal", "none"):
+
+        # Standard OpenAI & OpenAI-compatible schema (including OpenAI, DeepInfra, Cerebras, Novita, Fireworks, Together, Groq, Custom, Local, Colab)
+
+        payload["reasoning_effort"] = r
+
+        if r == "none" and (conn_mode in ("local", "colab") or provider_id == "custom_openai"):
+
+            # vLLM / SGLang / llama.cpp Jinja chat template toggle for hybrid Qwen3/DeepSeek models; auto-stripped on HTTP 400/422 if rejected
+
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+
+
+
+
+def _extract_http_error_message(err_body: str) -> str:
+
+    """Extract readable error text from OpenAI/OpenRouter/FastAPI/Anthropic error responses."""
+
+    raw = (err_body or "").strip()
+
+    if not raw:
+
+        return "Empty HTTP error body"
+
+    try:
+
+        err_json = json.loads(raw)
+
+    except Exception:
+
+        return raw[:600]
+
+    if isinstance(err_json, dict):
+
+        err_val = err_json.get("error")
+
+        if isinstance(err_val, dict):
+
+            msg = str(err_val.get("message") or "").strip()
+
+            meta_raw = ""
+
+            meta = err_val.get("metadata")
+
+            if isinstance(meta, dict) and meta.get("raw"):
+
+                meta_raw = str(meta.get("raw")).strip()
+
+            if msg and meta_raw and meta_raw not in msg:
+
+                return f"{msg} ({meta_raw[:300]})"
+
+            if msg:
+
+                return msg
+
+        elif isinstance(err_val, str) and err_val.strip():
+
+            return err_val.strip()
+
+        detail = err_json.get("detail")
+
+        if detail:
+
+            return json.dumps(detail, ensure_ascii=False)[:600] if not isinstance(detail, str) else detail
+
+        if err_json.get("message"):
+
+            return str(err_json["message"])
+
+    return raw[:600]
+
+
+
+
+
+def _strip_unsupported_param_from_payload(payload: dict, err_reason: str) -> list:
+
+    """Inspect HTTP 400/422 error text and strip/adapt rejected optional parameters cleanly."""
+
+    if not isinstance(payload, dict) or not err_reason:
+
+        return []
+
+    low = str(err_reason).lower()
+
+    changed = []
+
+
+
+    # OpenAI o1/o3/gpt-5 max_tokens -> max_completion_tokens conversion
+
+    if "max_tokens" in payload and "max_completion_tokens" in low and ("unsupported" in low or "use 'max_completion_tokens'" in low or "instead" in low):
+
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+
+        changed.append("max_tokens->max_completion_tokens")
+
+
+
+    optional_keys = [
+
+        "chat_template_kwargs",
+
+        "reasoning_effort",
+
+        "reasoning",
+
+        "thinking",
+
+        "enable_thinking",
+
+        "repetition_penalty",
+
+        "min_p",
+
+        "top_k",
+
+        "presence_penalty",
+
+        "frequency_penalty",
+
+        "top_p",
+
+        "temperature",
+
+    ]
+
+    # Mutual exclusivity guards (e.g. Anthropic Claude 4.5+ rejects specifying both temperature and top_p)
+    if ("temperature" in payload and "top_p" in payload) and ("cannot both" in low or "mutually exclusive" in low) and "temperature" in low and "top_p" in low:
+
+        del payload["top_p"]
+
+        changed.append("top_p")
+
+        return changed
+
+
+
+    for key in optional_keys:
+
+        if key in payload and (key in low or key.replace("_", " ") in low):
+
+            del payload[key]
+
+            changed.append(key)
+
+
+
+    # Generic fallback for Pydantic / FastAPI "Extra inputs are not permitted" mentioning extra optional keys (unless error is clearly about images)
+
+    if not changed and not any(w in low for w in ("image", "vision", "multimodal")) and ("extra inputs" in low or "unrecognized" in low or "unknown parameter" in low or "not supported" in low or "invalid" in low):
+
+        for fallback_key in ("chat_template_kwargs", "thinking", "reasoning", "reasoning_effort", "repetition_penalty", "min_p", "top_k"):
+
+            if fallback_key in payload:
+
+                del payload[fallback_key]
+
+                changed.append(fallback_key)
+
+                break
+
+    return changed
+
+
+def _finalize_llm_output(
+    raw_content_val: str,
+    raw_reasoning_val: str,
+    is_raw: bool,
+    system_prompt_override: Optional[str],
+    reasoning_effort: str,
+    is_en: bool,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Convert raw model content/reasoning into final usable text or an explicit empty-output error."""
+    clean_c = _strip_think_tags_text(raw_content_val)
+    clean_r = _strip_think_tags_text(raw_reasoning_val) if reasoning_effort != "none" else ""
+
+    if is_raw or system_prompt_override:
+        if clean_c:
+            return clean_c, None
+        if clean_r:
+            return clean_r, None
+    else:
+        if clean_c or clean_r:
+            thought_res = extract_clean_thought(raw_content_val, clean_r)
+            if thought_res and (thought_res != "..." or clean_c or clean_r):
+                return thought_res, None
+
+    if raw_reasoning_val and reasoning_effort == "none":
+        msg = (
+            "Model returned only internal reasoning while reasoning=none (no final content)"
+            if is_en
+            else "Модель вернула только внутренние рассуждения при reasoning=none (пустой итоговый ответ)"
+        )
+    else:
+        msg = "Model returned empty content" if is_en else "Модель вернула пустой контент"
+    return None, msg
+
+
+def _safe_cfg_int(val: Any, default: int) -> int:
+    try:
+        return int(val) if val is not None and not isinstance(val, bool) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_cfg_float(val: Any, default: float) -> float:
+    try:
+        return float(val) if val is not None and not isinstance(val, bool) else default
+    except (TypeError, ValueError):
+        return default
+
+
 LLM_GENERATION_LOCK = threading.Lock()
 
 
 
 
 
-def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: str = None, is_raw: bool = False) -> str:
+def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: str = None, is_raw: bool = False, images: Optional[List[Dict[str, Any]]] = None) -> str:
 
     cfg = load_config()
 
@@ -6385,31 +6977,13 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         else:
 
-            is_en = ((cfg.get("language") or "ru").lower() == "en")
+            use_en_sys = ((cfg.get("language") or "ru").lower() == "en")
 
-            default_thought_sys = DEFAULT_SYSTEM_PROMPT_EN if is_en else DEFAULT_SYSTEM_PROMPT
+            default_thought_sys = DEFAULT_SYSTEM_PROMPT_EN if use_en_sys else DEFAULT_SYSTEM_PROMPT
 
-            system_prompt = resolve_system_prompt(cfg, "PROMPT_SYSTEM_THOUGHTS", default_thought_sys, "system_prompt").strip()
+            effective_system_prompt = resolve_system_prompt(cfg, "PROMPT_SYSTEM_THOUGHTS", default_thought_sys, "system_prompt").strip()
 
-            age_modifier = get_age_modifier(sim_prompt, cfg)
-
-            intimacy_modifier = get_intimacy_modifier(sim_prompt, cfg)
-
-            incest_modifier = get_incest_modifier(sim_prompt, cfg)
-
-            if incest_modifier or not bool(cfg.get("special_situations_enabled", False)):
-
-                sim_prompt = re.sub(r'(ВАЖНО \(Запретная связь[^\)]*\)|IMPORTANT \(Forbidden Relationship[^\)]*\)):[^\n]+(\n\n)?', '', sim_prompt, flags=re.IGNORECASE)
-
-            modifiers = [m for m in [age_modifier, intimacy_modifier, incest_modifier] if m]
-
-            if modifiers:
-
-                effective_system_prompt = f"{system_prompt}\n\n" + "\n\n".join(modifiers)
-
-            else:
-
-                effective_system_prompt = system_prompt
+            sim_prompt = re.sub(r'(ВАЖНО \(Запретная связь[^\)]*\)|IMPORTANT \(Forbidden Relationship[^\)]*\)):[^\n]+(\n\n)?', '', sim_prompt, flags=re.IGNORECASE)
 
 
 
@@ -6429,25 +7003,25 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
 
 
-    temperature = float(cfg.get("temperature", 0.7)) if use_temperature else None
+    temperature = _safe_cfg_float(cfg.get("temperature"), 0.7) if use_temperature else None
 
-    top_k = int(cfg.get("top_k", 40)) if use_top_k else None
+    top_k = _safe_cfg_int(cfg.get("top_k"), 40) if use_top_k else None
 
-    top_p = float(cfg.get("top_p", 0.90)) if use_top_p else None
+    top_p = _safe_cfg_float(cfg.get("top_p"), 0.90) if use_top_p else None
 
-    min_p = float(cfg.get("min_p", 0.0)) if use_min_p else None
+    min_p = _safe_cfg_float(cfg.get("min_p"), 0.0) if use_min_p else None
 
-    repetition_penalty = float(cfg.get("repetition_penalty", 1.0)) if use_repetition_penalty else None
+    repetition_penalty = _safe_cfg_float(cfg.get("repetition_penalty"), 1.0) if use_repetition_penalty else None
 
-    presence_penalty = float(cfg.get("presence_penalty", 0.0)) if use_presence_penalty else None
+    presence_penalty = _safe_cfg_float(cfg.get("presence_penalty"), 0.0) if use_presence_penalty else None
 
-    frequency_penalty = float(cfg.get("frequency_penalty", 0.0)) if use_frequency_penalty else None
+    frequency_penalty = _safe_cfg_float(cfg.get("frequency_penalty"), 0.0) if use_frequency_penalty else None
 
-    context_length = int(cfg.get("context_length", 16384))
+    context_length = _safe_cfg_int(cfg.get("context_length"), 16384)
 
-    max_tokens = int(cfg.get("max_tokens", 1500))
+    max_tokens = _safe_cfg_int(cfg.get("max_tokens"), 1500)
 
-    reasoning_effort = cfg.get("reasoning_effort", "auto").strip().lower()
+    reasoning_effort = str(cfg.get("reasoning_effort") or "auto").strip().lower()
 
 
 
@@ -6455,7 +7029,21 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
     if reasoning_effort not in ("auto", "none"):
 
-        if is_en:
+        # Match the active system prompt language and avoid forcing first-person/no-tags on structured or summary prompts
+
+        sys_is_en = not any("\u0400" <= ch <= "\u04FF" for ch in (effective_system_prompt or ""))
+
+        if sys_is_en:
+
+            tail_rule = (
+
+                "output ONLY the final result strictly in the requested format."
+
+                if (is_raw or system_prompt_override)
+
+                else "output ONLY your in-character first-person response (no tags)."
+
+            )
 
             _THINKING_INSTRUCTIONS = {
 
@@ -6465,7 +7053,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nBefore writing your final response, briefly (1-2 sentences) reason about the situation inside <think>...</think> tags."
 
-                    "\nAfter the closing </think> tag, output ONLY your in-character response (no meta tags). Thoughts inside <think> are hidden from the player."
+                    f"\nAfter the closing </think> tag, {tail_rule} Thoughts inside <think> are hidden from the player."
 
                 ),
 
@@ -6477,7 +7065,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nAnalyze current mood, traits, active interaction, and conversation context."
 
-                    "\nAfter the closing </think> tag, output ONLY your in-character first-person response (no tags). Thoughts inside <think> are hidden from the player."
+                    f"\nAfter the closing </think> tag, {tail_rule} Thoughts inside <think> are hidden from the player."
 
                 ),
 
@@ -6489,13 +7077,23 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nCarefully consider personality traits, hidden motives, emotional state, relationships, memories, and surroundings."
 
-                    "\nAfter the closing </think> tag, output ONLY your ideal in-character first-person response (no tags). Thoughts inside <think> are hidden from the player."
+                    f"\nAfter the closing </think> tag, {tail_rule} Thoughts inside <think> are hidden from the player."
 
                 ),
 
             }
 
         else:
+
+            tail_rule_ru = (
+
+                "выведи ТОЛЬКО итоговый результат строго в требуемом формате."
+
+                if (is_raw or system_prompt_override)
+
+                else "напиши ТОЛЬКО идеальный финальный ответ от первого лица (без тегов)."
+
+            )
 
             _THINKING_INSTRUCTIONS = {
 
@@ -6505,7 +7103,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nПеред тем как написать финальный ответ, кратко (1-2 предложения) обдумай ситуацию внутри тегов <think>...</think>."
 
-                    "\nПосле закрывающего тега </think> напиши ТОЛЬКО готовый ответ (без тегов). Рассуждения внутри <think> скрыты от игрока."
+                    f"\nПосле закрывающего тега </think> {tail_rule_ru} Рассуждения внутри <think> скрыты от игрока."
 
                 ),
 
@@ -6517,7 +7115,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nПроанализируй настроение, черты характера, текущее действие и контекст диалога."
 
-                    "\nПосле закрывающего тега </think> напиши ТОЛЬКО готовый ответ от первого лица (без тегов). Рассуждения внутри <think> скрыты от игрока."
+                    f"\nПосле закрывающего тега </think> {tail_rule_ru} Рассуждения внутри <think> скрыты от игрока."
 
                 ),
 
@@ -6529,7 +7127,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                     "\nТщательно проанализируй: характер, скрытые мотивы, текущее состояние, отношения, биографию и воспоминания."
 
-                    "\nПосле закрывающего тега </think> напиши ТОЛЬКО идеальный финальный ответ от первого лица (без тегов). Рассуждения внутри <think> скрыты от игрока."
+                    f"\nПосле закрывающего тега </think> {tail_rule_ru} Рассуждения внутри <think> скрыты от игрока."
 
                 ),
 
@@ -6579,11 +7177,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
     target_endpoint = resolve_chat_url(raw_url, api_type)
 
-    if provider_id == "gemini" and api_key and "key=" not in target_endpoint:
-
-        sep = "&" if "?" in target_endpoint else "?"
-
-        target_endpoint = f"{target_endpoint}{sep}key={api_key}"
+    safe_log_endpoint = re.sub(r"([?&](?:api_)?key=)[^&\s]+", r"\1***", target_endpoint, flags=re.IGNORECASE)
 
 
 
@@ -6631,23 +7225,11 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
     clean_openrouter_prov = ""
 
+    openrouter_allow_fb = bool(cfg.get("openrouter_allow_fallbacks", False))
+
     if provider_id == "openrouter":
 
-        or_prov = (
-
-            cfg.get("openrouter_providers_by_model", {}).get(model)
-
-            or cfg.get("openrouter_provider", "")
-
-        )
-
-        if or_prov:
-
-            raw_p = str(or_prov).strip()
-
-            if not any(raw_p.lower().startswith(x) for x in ("⭐", "auto", "авто", "none")):
-
-                clean_openrouter_prov = raw_p.split("—")[0].split("(")[0].strip()
+        clean_openrouter_prov = _resolve_openrouter_provider_for_model(cfg, model)
 
 
 
@@ -6661,9 +7243,11 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         print("=" * 65)
 
-        prov_info = f" | Provider: {clean_openrouter_prov}" if clean_openrouter_prov else ""
+        fb_tag = "fallbacks=ON" if openrouter_allow_fb else "fallbacks=OFF"
 
-        print(f" Server: {target_endpoint} | Model: {model}{prov_info}")
+        prov_info = f" | Provider: {clean_openrouter_prov} ({fb_tag})" if clean_openrouter_prov else ""
+
+        print(f" Server: {safe_log_endpoint} | Model: {model}{prov_info}")
 
         print(f" Parameters: context_len={context_length}, max_tokens={max_tokens} | Active: {params_summary}{disabled_summary}")
 
@@ -6685,6 +7269,10 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         print(sim_prompt)
 
+        if images:
+            img_desc = ", ".join(f"{im.get('width', '?')}x{im.get('height', '?')} {im.get('mime_type', 'img')}" for im in images if isinstance(im, dict))
+            print(f" [VISION]: Attached {len(images)} image(s): [{img_desc}]")
+
         print("=" * 65 + "\n")
 
         sys.stdout.flush()
@@ -6699,9 +7287,11 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         print("=" * 65)
 
-        prov_info = f" | Провайдер: {clean_openrouter_prov}" if clean_openrouter_prov else ""
+        fb_tag = "fallbacks=ВКЛ" if openrouter_allow_fb else "fallbacks=ВЫКЛ"
 
-        print(f" Сервер: {target_endpoint} | Модель: {model}{prov_info}")
+        prov_info = f" | Провайдер: {clean_openrouter_prov} ({fb_tag})" if clean_openrouter_prov else ""
+
+        print(f" Сервер: {safe_log_endpoint} | Модель: {model}{prov_info}")
 
         print(f" Параметры: context_len={context_length}, max_tokens={max_tokens} | Активные: {params_summary}{disabled_summary}")
 
@@ -6723,15 +7313,38 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         print(sim_prompt)
 
+        if images:
+            img_desc = ", ".join(f"{im.get('width', '?')}x{im.get('height', '?')} {im.get('mime_type', 'img')}" for im in images if isinstance(im, dict))
+            print(f" [VISION / ФОТО]: Прикреплено {len(images)} фото: [{img_desc}]")
+
         print("=" * 65 + "\n")
 
         sys.stdout.flush()
 
 
 
+    active_images = [img for img in (images or []) if isinstance(img, dict) and img.get("b64")]
+    has_vision_payload = bool(active_images)
+    vision_fallback_used = False
+
     # Build payload and headers according to API type
 
     if api_type == "anthropic":
+
+        if active_images:
+            anthropic_blocks = [{"type": "text", "text": sim_prompt}]
+            for img in active_images:
+                anthropic_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.get("mime_type", "image/jpeg"),
+                        "data": img["b64"],
+                    },
+                })
+            user_content = anthropic_blocks
+        else:
+            user_content = sim_prompt
 
         payload = {
 
@@ -6743,7 +7356,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
             "messages": [
 
-                {"role": "user", "content": sim_prompt},
+                {"role": "user", "content": user_content},
 
             ],
 
@@ -6761,6 +7374,8 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
             payload["top_k"] = top_k
 
+        _apply_reasoning_payload(payload, provider_id, conn_mode, api_type, model, reasoning_effort)
+
         headers = {
 
             "x-api-key": api_key,
@@ -6775,6 +7390,18 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         # Standard OpenAI-compatible format
 
+        if active_images:
+            openai_blocks = [{"type": "text", "text": sim_prompt}]
+            for img in active_images:
+                mime = img.get("mime_type", "image/jpeg")
+                openai_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{img['b64']}"},
+                })
+            user_content = openai_blocks
+        else:
+            user_content = sim_prompt
+
         payload = {
 
             "model": model,
@@ -6783,13 +7410,19 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                 {"role": "system", "content": effective_system_prompt},
 
-                {"role": "user", "content": sim_prompt},
+                {"role": "user", "content": user_content},
 
             ],
 
-            "max_tokens": max_tokens,
-
         }
+
+        if provider_id == "openai" and _is_openai_reasoning_tokens_model(model):
+
+            payload["max_completion_tokens"] = max_tokens
+
+        else:
+
+            payload["max_tokens"] = max_tokens
 
         if temperature is not None:
 
@@ -6839,19 +7472,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
 
 
-        if provider_id in ("openrouter", "custom_openai") and reasoning_effort in ("high", "medium", "low", "minimal", "none", "max", "xhigh"):
-
-            payload["reasoning"] = {"effort": reasoning_effort}
-
-            payload["reasoning_effort"] = reasoning_effort
-
-        elif provider_id == "gemini" and reasoning_effort in ("high", "medium", "low"):
-
-            payload["reasoning_effort"] = reasoning_effort
-
-        elif conn_mode in ("local", "colab") and reasoning_effort in ("high", "medium", "low", "none"):
-
-            payload["reasoning_effort"] = reasoning_effort
+        _apply_reasoning_payload(payload, provider_id, conn_mode, api_type, model, reasoning_effort)
 
 
 
@@ -6879,13 +7500,11 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
             if clean_openrouter_prov:
 
-                allow_fb = bool(cfg.get("openrouter_allow_fallbacks", True))
-
                 payload["provider"] = {
 
                     "order": [clean_openrouter_prov],
 
-                    "allow_fallbacks": allow_fb,
+                    "allow_fallbacks": openrouter_allow_fb,
 
                 }
 
@@ -6905,9 +7524,13 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
         stream_to_console = bool(cfg.get("stream_to_console", True))
 
+        attempt = 1
+
+        param_strips_count = 0
 
 
-        for attempt in range(1, MAX_RETRIES + 1):
+
+        while attempt <= MAX_RETRIES:
 
             attempt_payload = dict(payload)
 
@@ -6969,15 +7592,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                             err_body = err_body.decode("utf-8", errors="ignore")
 
-                        try:
-
-                            err_json = json.loads(err_body)
-
-                            err_reason = err_json.get("error", {}).get("message", err_body)
-
-                        except Exception:
-
-                            err_reason = err_body[:250]
+                        err_reason = _extract_http_error_message(err_body)
 
                     else:
 
@@ -7115,6 +7730,8 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                                         or delta.get("reasoning_content", "")
 
+                                        or delta.get("thinking", "")
+
                                         or ""
 
                                     )
@@ -7231,33 +7848,18 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
 
 
-                        if full_content or full_reasoning:
+                        if (full_content or full_reasoning) and err_reason is None:
 
-                            if is_raw or system_prompt_override:
-
-                                clean_res = re.sub(r"<think>.*?</think>", "", full_content, flags=re.DOTALL).strip()
-
-                                clean_res = re.sub(r"<thought>.*?</thought>", "", clean_res, flags=re.DOTALL).strip()
-
-                                clean_res = re.sub(r"<think>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                clean_res = re.sub(r"<thought>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                if not clean_res and full_reasoning:
-
-                                    clean_res = re.sub(r"<think>.*?</think>", "", full_reasoning, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<thought>.*?</thought>", "", clean_res, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<think>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<thought>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                success_output = clean_res or "..."
-
-                            else:
-
-                                success_output = extract_clean_thought(full_content, full_reasoning)
+                            success_output, empty_err = _finalize_llm_output(
+                                full_content,
+                                full_reasoning,
+                                is_raw,
+                                system_prompt_override,
+                                reasoning_effort,
+                                is_en,
+                            )
+                            if success_output is None and empty_err:
+                                err_reason = empty_err
 
 
 
@@ -7275,9 +7877,11 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
             if success_output is None and err_reason is None and (err_status is None or err_status < 400):
 
-                print(" [FALLBACK]: Stream returned 0 tokens without error, trying standard non-streaming request..." if is_en_prompt else " [ФОЛЛБЭК]: Стрим вернул 0 токенов без ошибки, пробуем обычный запрос без стриминга...")
+                if stream_to_console:
 
-                sys.stdout.flush()
+                    print(" [FALLBACK]: Stream returned 0 tokens without error, trying standard non-streaming request..." if is_en_prompt else " [ФОЛЛБЭК]: Стрим вернул 0 токенов без ошибки, пробуем обычный запрос без стриминга...")
+
+                    sys.stdout.flush()
 
                 if "stream" in attempt_payload:
 
@@ -7301,15 +7905,7 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                         err_body = resp_bytes.decode("utf-8", errors="ignore")
 
-                        try:
-
-                            err_json = json.loads(err_body)
-
-                            err_reason = err_json.get("error", {}).get("message", err_body)
-
-                        except Exception:
-
-                            err_reason = err_body[:250]
+                        err_reason = _extract_http_error_message(err_body)
 
                     else:
 
@@ -7339,9 +7935,15 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                                         content += block.get("text", "")
 
+                                    elif block.get("type") == "thinking":
+
+                                        reasoning += block.get("thinking", "")
+
                             elif "choices" in resp_json and len(resp_json["choices"]) > 0:
 
                                 choice = resp_json["choices"][0]
+
+                                fin_reason = choice.get("finish_reason")
 
                                 message = choice.get("message", {})
 
@@ -7353,13 +7955,19 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                                     or message.get("reasoning_content", "")
 
+                                    or message.get("thinking", "")
+
                                     or ""
 
                                 )
 
+                                if fin_reason in ("content_filter", "safety", "PROHIBITED_CONTENT", "SAFETY"):
+
+                                    err_reason = f"Blocked by provider safety filter ({fin_reason})" if is_en_prompt else f"Ответ заблокирован цензурой провайдера ({fin_reason})"
 
 
-                            if content or reasoning:
+
+                            if (content or reasoning) and err_reason is None:
 
                                 if "<think>" in content.lower() or "<thought>" in content.lower():
 
@@ -7397,33 +8005,18 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
 
 
-                                if is_raw or system_prompt_override:
+                                success_output, empty_err = _finalize_llm_output(
+                                    content,
+                                    reasoning,
+                                    is_raw,
+                                    system_prompt_override,
+                                    reasoning_effort,
+                                    is_en,
+                                )
+                                if success_output is None and empty_err:
+                                    err_reason = empty_err
 
-                                    clean_res = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<thought>.*?</thought>", "", clean_res, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<think>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                    clean_res = re.sub(r"<thought>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                    if not clean_res and reasoning:
-
-                                        clean_res = re.sub(r"<think>.*?</think>", "", reasoning, flags=re.DOTALL).strip()
-
-                                        clean_res = re.sub(r"<thought>.*?</thought>", "", clean_res, flags=re.DOTALL).strip()
-
-                                        clean_res = re.sub(r"<think>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                        clean_res = re.sub(r"<thought>.*", "", clean_res, flags=re.DOTALL).strip()
-
-                                    success_output = clean_res or "..."
-
-                                else:
-
-                                    success_output = extract_clean_thought(content, reasoning)
-
-                            else:
+                            elif err_reason is None:
 
                                 err_reason = "Model returned empty content" if is_en else "Модель вернула пустой контент"
 
@@ -7469,6 +8062,46 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                 return err_msg
 
+            # ── 4b. Auto-strip unsupported optional API parameters on HTTP 400/422 ──
+
+            if err_status in (400, 422) and param_strips_count < 4:
+
+                stripped = _strip_unsupported_param_from_payload(payload, err_reason)
+
+                if stripped:
+
+                    param_strips_count += 1
+
+                    print(
+
+                        f" [PARAM FALLBACK]: Endpoint rejected parameter(s) [{', '.join(stripped)}]. Retrying without them..."
+
+                        if is_en
+
+                        else f" [PARAM FALLBACK]: Сервер отклонил параметр(ы) [{', '.join(stripped)}]. Повтор без них..."
+
+                    )
+
+                    sys.stdout.flush()
+
+                    continue
+
+
+
+            # ── 4c. Vision -> text-only graceful fallback when active model rejects images ──
+            if has_vision_payload and not vision_fallback_used and err_status in (400, 404, 415, 422):
+                vision_fallback_used = True
+                has_vision_payload = False
+                if isinstance(payload.get("messages"), list) and payload["messages"]:
+                    payload["messages"][-1]["content"] = sim_prompt
+                print(
+                    f" [VISION FALLBACK]: Model/provider does not support images ({err_status}: {err_reason}). Retrying text-only..."
+                    if is_en
+                    else f" [VISION FALLBACK]: Выбранная модель/провайдер не поддерживает фото ({err_status}: {err_reason}). Повтор в текстовом режиме..."
+                )
+                sys.stdout.flush()
+                continue
+
 
 
             # ── 5. Retry loop with exponential backoff ──
@@ -7485,6 +8118,8 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
                 time.sleep(backoff)
 
+                attempt += 1
+
             else:
 
                 fail_msg = f"\n [ERROR] All {MAX_RETRIES} attempts failed. Last error: {err_reason}" if is_en else f"\n [ERROR] Все {MAX_RETRIES} попыток завершились неудачей. Последняя ошибка: {err_reason}"
@@ -7495,6 +8130,197 @@ def execute_llm_request(sim_prompt: str, sim_name: str, system_prompt_override: 
 
 
 
+
+
+def _build_photo_description_prompt_block(
+    photo_count: int,
+    sender_name: str,
+    recipient_name: str,
+    is_en: bool,
+    prepared_images: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Builds the dynamically injected 1-prompt instruction block when camera photos are attached."""
+    n = max(1, int(photo_count or 1))
+    subj_lines = []
+    if isinstance(prepared_images, list):
+        for idx_img, img_item in enumerate(prepared_images, start=1):
+            if not isinstance(img_item, dict):
+                continue
+            subjs = img_item.get("subjects")
+            if not isinstance(subjs, list) or not subjs:
+                continue
+            mode_s = str(img_item.get("mode") or "photo")
+            if is_en:
+                m_lbl = "selfie" if mode_s == "selfie" else "photo"
+                subj_lines.append(f"  • Photo {idx_img} ({m_lbl}): {', '.join(str(s) for s in subjs)}")
+            else:
+                m_lbl = "селфи" if mode_s == "selfie" else "фото"
+                subj_lines.append(f"  • Фото {idx_img} ({m_lbl}): {', '.join(str(s) for s in subjs)}")
+
+    all_pc = bool(prepared_images) and all(str(im.get("mode") or "") == "pc" for im in prepared_images if isinstance(im, dict))
+    if is_en:
+        subjects_section = (
+            "- WHO IS IN THE FRAME / NEAR THE CAMERA (in-game identification):\n"
+            + "\n".join(subj_lines) + "\n"
+            + "  Use these exact names (both inside [PHOTO_DESC_k] and in the character's reply) to identify the Sims and pets visibly present in the photo. IMPORTANT: Do NOT mistake a photographed third-party Sim in the frame for the sender (" + sender_name + ") — pay attention to their name, who they are to you/the sender, and react accordingly. If someone from the list is off-screen and not visible in the image, do not mention them.\n"
+        ) if subj_lines else ""
+        tag_lines = "\n".join(
+            f"     [PHOTO_DESC_{i}]Detailed objective description of photo {i} (2-4 sentences).[/PHOTO_DESC_{i}]"
+            for i in range(1, n + 1)
+        )
+        if all_pc:
+            header_line = (
+                f"- {sender_name} just sent an image file in chat."
+                if n == 1 else
+                f"- {sender_name} just sent {n} image files in chat (in strict order 1..{n})."
+            )
+        else:
+            header_line = (
+                f"- {sender_name} just took and sent a photo via the in-game phone camera."
+                if n == 1 else
+                f"- {sender_name} just took and sent {n} photos via the in-game phone camera (in strict order 1..{n})."
+            )
+        step1_line = (
+            "  1) First, write an informative neutral third-person description wrapped in this exact tag:"
+            if n == 1 else
+            f"  1) First, for EACH attached photo 1..{n}, write an informative neutral third-person description wrapped in its own tag block:"
+        )
+        step3_line = (
+            f"  3) Immediately after the closing [/PHOTO_DESC_1] tag, leave a blank line and write {recipient_name}'s natural first-person (\"I\") chat reply to {sender_name} reacting to the photo (and caption if any)."
+            if n == 1 else
+            f"  3) Immediately after the last closing [/PHOTO_DESC_{n}] tag, leave a blank line and write {recipient_name}'s natural first-person (\"I\") chat reply to {sender_name} reacting to the photos (and caption if any)."
+        )
+        return (
+            f"\nATTACHED CAMERA PHOTO(S) ({n}):\n"
+            f"{header_line}\n"
+            f"{subjects_section}"
+            f"- MANDATORY REQUIREMENT FOR THIS MESSAGE ONLY (output BEFORE {recipient_name}'s reply):\n"
+            f"{step1_line}\n"
+            f"{tag_lines}\n"
+            f"  2) Inside each [PHOTO_DESC_k] block, write 2-4 concise, vivid sentences strictly describing what is visibly inside that frame: who is present (using their names from the in-game identification above when visible), pose/action, facial expression/emotion, clothing/hairstyle, background setting/objects, and lighting/mood. Write in English, in neutral descriptive prose (no roleplay, no addressing {sender_name}, no Unicode emojis), and NEVER invent off-camera details.\n"
+            f"{step3_line}\n"
+            f"  4) At the very end of your response, include [FR=number] [ROM=number] (and optional [DO=...] or [SUM=...|Day=N] if triggered).\n"
+        )
+
+    subjects_section_ru = (
+        "- КТО ПОПАЛ В КАДР / НАХОДИЛСЯ ПЕРЕД КАМЕРОЙ (данные из игры):\n"
+        + "\n".join(subj_lines) + "\n"
+        + "  Используй эти имена (как внутри [PHOTO_DESC_k], так и в ответе персонажа), чтобы называть симов и питомцев, которые реально видны на снимке. ВАЖНО: НЕ путай сфотографированного человека/сима на снимке с отправителем (" + sender_name + ")! Если на фото другой персонаж (даже со спины) — опирайся на имя и досье этого персонажа и реагируй именно на него. Если кто-то из списка остался за краем кадра и визуально не виден — не упоминай его.\n"
+    ) if subj_lines else ""
+    tag_lines = "\n".join(
+        f"     [PHOTO_DESC_{i}]Подробное объективное описание фото {i} (2–4 предложения).[/PHOTO_DESC_{i}]"
+        for i in range(1, n + 1)
+    )
+    if all_pc:
+        header_line = (
+            f"- {sender_name} только что отправил(а) изображение с компьютера в чат."
+            if n == 1 else
+            f"- {sender_name} только что отправил(а) {n} изображений с компьютера (строго по порядку 1..{n})."
+        )
+    else:
+        header_line = (
+            f"- {sender_name} только что сфотографировал(а) и прислал(а) снимок с камеры телефона."
+            if n == 1 else
+            f"- {sender_name} только что сфотографировал(а) и прислал(а) {n} фото с камеры телефона (строго по порядку 1..{n})."
+        )
+    step1_line = (
+        "  1) Сначала выведи информативное описание этого фото от третьего лица в отдельном теге:"
+        if n == 1 else
+        f"  1) Сначала для КАЖДОГО прикреплённого фото с 1 по {n} выведи его информативное описание от третьего лица в отдельном теге:"
+    )
+    step3_line = (
+        f"  3) Сразу после закрытия тега [/PHOTO_DESC_1] сделай пустую строку и напиши обычный живой ответ {recipient_name} для {sender_name} от первого лица («Я») с реакцией на снимок (и на подпись, если она есть)."
+        if n == 1 else
+        f"  3) Сразу после закрытия последнего тега [/PHOTO_DESC_{n}] сделай пустую строку и напиши обычный живой ответ {recipient_name} для {sender_name} от первого лица («Я») с реакцией на снимки (и на подпись, если она есть)."
+    )
+    return (
+        f"\nПРИКРЕПЛЁННЫЕ ФОТО С КАМЕРЫ ({n} шт.):\n"
+        f"{header_line}\n"
+        f"{subjects_section_ru}"
+        f"- ОБЯЗАТЕЛЬНОЕ ТРЕБОВАНИЕ ТОЛЬКО ДЛЯ ЭТОГО СООБЩЕНИЯ (выполни ПЕРЕД ответом {recipient_name}):\n"
+        f"{step1_line}\n"
+        f"{tag_lines}\n"
+        f"  2) Внутри каждого блока [PHOTO_DESC_k] напиши 2–4 содержательных предложения: кто в кадре (называя по именам из игровой справки выше тех, кто виден на снимке), поза и действие, выражение лица и эмоция, одежда и причёска, обстановка/предметы на фоне, освещение и атмосфера. Пиши на русском языке нейтральным описательным языком (без ролевой реплики, без обращения к собеседнику, без эмодзи) и строго только то, что реально видно на снимке.\n"
+        f"{step3_line}\n"
+        f"  4) В самом конце ответа укажи теги [FR=число] [ROM=число] (и опционально [DO=...] или [SUM=...|Day=N], если это уместно).\n"
+    )
+
+
+def _clamp_photo_description(text: str, max_len: int = 900) -> str:
+    clean = strip_emojis(str(text or ""))
+    clean = re.sub(r'\[\s*/?\s*PHOTO_DESC(?:_\d+)?\s*\]', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\s+', ' ', clean).strip().strip('"').strip()
+    if len(clean) > max_len:
+        cut = clean[:max_len - 3]
+        sp = cut.rfind(' ')
+        if sp > max_len // 2:
+            cut = cut[:sp]
+        clean = cut.rstrip('.,;:!? ') + '...'
+    return clean
+
+
+def parse_and_strip_photo_descriptions(text: str, expected_count: int = 0) -> Tuple[str, Dict[int, str]]:
+    """
+    Extracts [PHOTO_DESC_1]...[/PHOTO_DESC_1] .. [PHOTO_DESC_N]...[/PHOTO_DESC_N] blocks
+    from an AI response and returns (remaining_reply_text, {1_based_index: clean_description}).
+    Includes a safe fallback if the model omits a closing [/PHOTO_DESC_k] tag.
+    """
+    raw = str(text or "")
+    descs: Dict[int, str] = {}
+
+    closed_re = re.compile(
+        r'\[\s*PHOTO_DESC(?:_(\d+))?\s*\](.*?)\[\s*/\s*PHOTO_DESC(?:_\d+)?\s*\]',
+        re.IGNORECASE | re.DOTALL,
+    )
+    next_seq = 1
+    parts_out = []
+    last_end = 0
+    for m in closed_re.finditer(raw):
+        parts_out.append(raw[last_end:m.start()])
+        last_end = m.end()
+        idx_val = int(m.group(1)) if m.group(1) else next_seq
+        while idx_val in descs and not m.group(1):
+            idx_val += 1
+        next_seq = max(next_seq, idx_val + 1)
+        cleaned = _clamp_photo_description(m.group(2))
+        if cleaned and idx_val >= 1 and (expected_count <= 0 or idx_val <= expected_count):
+            descs[idx_val] = cleaned
+    parts_out.append(raw[last_end:])
+    remaining = "".join(parts_out)
+
+    # Fallback: if any unclosed [PHOTO_DESC_k] markers remain, extract safely without eating the character reply
+    open_re = re.compile(r'\[\s*PHOTO_DESC(?:_(\d+))?\s*\]', re.IGNORECASE)
+    open_matches = list(open_re.finditer(remaining))
+    if open_matches:
+        new_chunks = [remaining[:open_matches[0].start()]]
+        fallback_seq = 1
+        for i, om in enumerate(open_matches):
+            idx_val = int(om.group(1)) if om.group(1) else fallback_seq
+            while idx_val in descs and not om.group(1):
+                idx_val += 1
+            fallback_seq = max(fallback_seq, idx_val + 1)
+            seg_start = om.end()
+            seg_end = open_matches[i + 1].start() if (i + 1) < len(open_matches) else len(remaining)
+            seg = remaining[seg_start:seg_end]
+            if i + 1 < len(open_matches):
+                desc_part = seg
+            else:
+                # For a trailing unclosed block, split description vs Sim reply at blank line (or keep reply intact)
+                split_m = re.search(r'\r?\n\s*\r?\n', seg)
+                if split_m:
+                    desc_part = seg[:split_m.start()]
+                    new_chunks.append(seg[split_m.end():])
+                else:
+                    desc_part = ""
+                    new_chunks.append(seg)
+            cleaned = _clamp_photo_description(desc_part)
+            if cleaned and idx_val >= 1 and (expected_count <= 0 or idx_val <= expected_count) and idx_val not in descs:
+                descs[idx_val] = cleaned
+        remaining = "".join(new_chunks)
+
+    # Always purge any stray/malformed PHOTO_DESC tags from user-visible chat text
+    remaining = re.sub(r'\[\s*/?\s*PHOTO_DESC[^\]]*\]', '', remaining, flags=re.IGNORECASE)
+    return remaining.strip(), descs
 
 
 def parse_relationship_tags(text: str):
@@ -7545,6 +8371,19 @@ def parse_relationship_tags(text: str):
 
 
 
+
+
+def _extract_inline_whodo(text: str) -> Optional[str]:
+    """Extracts an optional [WHODO=Sim Name] actor override from inline LLM output."""
+    if not text:
+        return None
+    whodo_m = re.search(r'\[WHODO\s*[:=]\s*([^\]]+)\]', str(text), re.IGNORECASE)
+    if not whodo_m:
+        return None
+    cand = whodo_m.group(1).strip(' "\'«»')
+    if not cand or cand.upper() in ("NONE", "NO", "NULL", "FALSE", "НЕТ"):
+        return None
+    return cand
 
 
 def parse_inline_memory_and_action_tags(text: str, allow_actions: Any = True):
@@ -7670,12 +8509,20 @@ def parse_inline_memory_and_action_tags(text: str, allow_actions: Any = True):
 
 
 def execute_chat_request(req_json: dict):
+    """
+    Executes an AI roleplay chat reply request for the PC/Phone messaging addon.
+    Returns tuple: (clean_reply, delta_fr, delta_rom, memory_summary, memory_days, action_type)
+    """
+    final_text, delta_fr, delta_rom, memory_summary, memory_days, action_type, _, _ = _execute_chat_request_impl(req_json)
+    return final_text, delta_fr, delta_rom, memory_summary, memory_days, action_type
+
+
+def _execute_chat_request_impl(req_json: dict):
 
     """
 
-    Executes an AI roleplay chat reply request for the PC/Phone messaging addon.
-
-    Returns tuple: (clean_reply, delta_fr, delta_rom, memory_summary, memory_days, action_type)
+    Internal implementation returning 8-tuple:
+    (clean_reply, delta_fr, delta_rom, memory_summary, memory_days, action_type, action_actor, photo_descriptions)
 
     """
 
@@ -7703,14 +8550,21 @@ def execute_chat_request(req_json: dict):
 
     raw_message = req_json.get("message", "") or req_json.get("prompt", "")
 
-    extra_context = req_json.get("extra_context", "")
+    raw_images = req_json.get("images") or req_json.get("image_paths") or []
+    prepared_images = _prepare_simgram_images(raw_images) if raw_images else []
+    if raw_images and not prepared_images:
+        print(f" [VISION WARN]: {len(raw_images)} photo(s) referenced in chat request, but no readable image file was found.")
+    elif prepared_images:
+        print(f" [VISION]: Prepared {len(prepared_images)} chat photo(s) for multimodal AI request.")
+        for p_idx, p_meta in enumerate(prepared_images, start=1):
+            p_subjs = p_meta.get("subjects") if isinstance(p_meta, dict) else None
+            if p_subjs:
+                print(f" [PHOTO SUBJECTS #{p_idx}]: {', '.join(str(s) for s in p_subjs)}")
 
     dossier = (req_json.get("third_party_dossier") or req_json.get("dossier") or "").strip()
 
     if dossier:
 
-        extra_context = f"{extra_context}\n\n{dossier}".strip() if extra_context else dossier.strip()
-
         print("=" * 65)
 
         print(" [THIRD-PARTY DOSSIER ATTACHED TO PROMPT]:" if is_en else " [СПРАВКА О СТОРОННИХ ПЕРСОНАЖАХ (ДОСЬЕ)]:")
@@ -7719,19 +8573,90 @@ def execute_chat_request(req_json: dict):
 
         print("=" * 65)
 
-        print("=" * 65)
+    dossier_block = f"\n{dossier}\n" if dossier else ""
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
+    chat_lore = str(req_json.get("chat_lore", "") or "").strip()
+    chat_lore_block = (
+        f"\nCHAT LORE & SCENARIO (player-defined framing for this 1-on-1 chat — follow this premise naturally):\n{chat_lore}\n"
+        if is_en
+        else f"\nЛОР И КОНТЕКСТ ЭТОГО ЧАТА (заданные игроком рамки и предыстория этой переписки 1-на-1 — учитывай их естественно):\n{chat_lore}\n"
+    ) if chat_lore else ""
+    if chat_lore:
+        print(f" [CHAT LORE]: {chat_lore}" if is_en else f" [ЛОР ЧАТА 1-НА-1]: {chat_lore}")
 
-        print(" [THIRD-PARTY DOSSIER ATTACHED TO PROMPT]:" if is_en else " [СПРАВКА О СТОРОННИХ ПЕРСОНАЖАХ (ДОСЬЕ)]:")
+    # Environment, world, time, season, weather, holiday, active event & lot business (Live-Dialogue parity)
+    cur_world = str(req_json.get("world") or "").strip()
+    cur_time = str(req_json.get("current_time") or "").strip()
+    cur_season = str(req_json.get("season") or "").strip()
+    cur_weather = str(req_json.get("weather") or "").strip()
+    cur_holiday = str(req_json.get("holiday") or "").strip()
+    same_lot = req_json.get("same_lot", None)
 
-        print(dossier)
+    env_lines = []
+    if cur_world:
+        env_lines.append(f"- World / Location: {cur_world}" if is_en else f"- Мир / Локация: {cur_world}")
+    if cur_time:
+        env_lines.append(f"- In-Game Time: {cur_time}" if is_en else f"- Время в игре: {cur_time}")
+    if cur_season:
+        env_lines.append(f"- Season: {cur_season}" if is_en else f"- Время года: {cur_season}")
+    if cur_weather:
+        env_lines.append(f"- Weather: {cur_weather}" if is_en else f"- Погода: {cur_weather}")
+    if cur_holiday:
+        env_lines.append(f"- Holiday: {cur_holiday}" if is_en else f"- Праздник: {cur_holiday}")
+    if same_lot is True:
+        env_lines.append(
+            f"- Lot Presence: {recipient_name} and {sender_name} are both on the same active lot right now (over messenger you STILL cannot see through walls, doors, or behind the screen — never mention outfit, held items, actions, or mood unless right beside each other or explicitly texted)."
+            if is_en else
+            f"- Пространство: {recipient_name} и {sender_name} сейчас оба на одном активном участке (но через мессенджер вы ВСЁ РАВНО не видите друг друга сквозь стены, двери и за экраном — не упоминай одежду, предметы в руках, действия или настроение, если вы не стоите прямо рядом или собеседник сам не написал об этом)."
+        )
+    elif same_lot is False:
+        env_lines.append(
+            f"- Lot Presence: {recipient_name} is on ANOTHER lot (away from {sender_name}; you cannot see what {sender_name} is doing, wearing, or feeling unless told)."
+            if is_en else
+            f"- Пространство: {recipient_name} находится на ДРУГОМ участке (не рядом с {sender_name}; ты не знаешь, что делает/носит/чувствует собеседник, пока он сам не напишет)."
+        )
 
-        print("=" * 65)
+    event_info = req_json.get("event_info") or {}
+    if isinstance(event_info, dict) and event_info.get("event_name"):
+        ev_name = str(event_info["event_name"]).strip()
+        act_role = event_info.get("actor_role")
+        tgt_role = event_info.get("target_role")
+        act_part = bool(event_info.get("actor_is_participant", False))
+        tgt_part = bool(event_info.get("target_is_participant", False))
+        roles = []
+        if act_part and act_role:
+            roles.append(f"{sender_name}: {act_role}")
+        if tgt_part and tgt_role:
+            roles.append(f"{recipient_name}: {tgt_role}")
+        role_desc = (f" (Role: {', '.join(roles)})" if is_en else f" (Роль: {', '.join(roles)})") if roles else ""
+        env_lines.append(f"- Active Event: {ev_name}{role_desc}" if is_en else f"- Активное мероприятие: {ev_name}{role_desc}")
 
-    extra_block = (f"\nADDITIONAL CONTEXT:\n{extra_context}\n" if is_en else f"\nДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ СИТУАЦИИ:\n{extra_context}\n") if extra_context else ""
+    env_block = (("\nENVIRONMENT & TIME:\n" if is_en else "\nОКРУЖЕНИЕ И ВРЕМЯ:\n") + "\n".join(env_lines) + "\n") if env_lines else ""
 
-
+    biz_info = req_json.get("business_info") or {}
+    biz_block = ""
+    if isinstance(biz_info, dict) and biz_info:
+        raw_biz = str(biz_info.get("prompt_block") or "").strip()
+        if raw_biz:
+            biz_block = f"\n{raw_biz}\n"
+        else:
+            b_name = biz_info.get("name") or biz_info.get("business_name") or ""
+            b_type = biz_info.get("business_type", "")
+            b_role = biz_info.get("role", "")
+            b_open = bool(biz_info.get("is_open", False))
+            b_cust = biz_info.get("customers_count") or biz_info.get("customer_count") or 0
+            status_str = ("Open" if b_open else "Closed") if is_en else ("Открыто" if b_open else "Закрыто")
+            cust_str = f" | Customers: {b_cust}" if (b_open and b_cust and is_en) else (f" | Клиенты: {b_cust}" if (b_open and b_cust and not is_en) else "")
+            if is_en:
+                biz_block = f"\nBUSINESS ON LOT:\n- Business: {b_name} ({b_type})\n- Status: {status_str}{cust_str}\n- Sim Role: {b_role}\n"
+            else:
+                biz_block = f"\nБИЗНЕС НА УЧАСТКЕ:\n- Бизнес: {b_name} ({b_type})\n- Статус: {status_str}{cust_str}\n- Роль сима: {b_role}\n"
 
     memories = req_json.get("memories", "").strip()
+    sit_hint = str(req_json.get("situation_hint") or "").strip()
+    if sit_hint:
+        biz_block = f"{biz_block}\nSITUATION: {sit_hint}\n" if is_en else f"{biz_block}\nСИТУАЦИЯ СЕЙЧАС: {sit_hint}\n"
 
     if is_en and memories:
 
@@ -7743,7 +8668,7 @@ def execute_chat_request(req_json: dict):
 
         memories = memories.replace("[1 days remaining]", "[1 day remaining]").replace("[Навсегда]", "[Permanent]")
 
-    memories_block = f"\n{memories}\n" if memories else ""
+    memories_block = f"\n{memories}\n" if (memories and memories not in str(recipient_info)) else ""
 
 
 
@@ -7777,15 +8702,64 @@ def execute_chat_request(req_json: dict):
 
 
 
+    clean_raw_msg = str(raw_message or "").strip()
+    n_imgs = len(prepared_images) if prepared_images else (len(raw_images) if isinstance(raw_images, list) else 0)
+    if prepared_images:
+        vision_block = _build_photo_description_prompt_block(
+            photo_count=len(prepared_images),
+            sender_name=sender_name,
+            recipient_name=recipient_name,
+            is_en=is_en,
+            prepared_images=prepared_images,
+        )
+        tags_seq = " ".join(f"[PHOTO_DESC_{i}]...[/PHOTO_DESC_{i}]" for i in range(1, len(prepared_images) + 1))
+        n_pd = len(prepared_images)
+        en_blk_word = "1 block" if n_pd == 1 else f"strictly {n_pd} blocks"
+        ru_blk_word = "1 блок" if n_pd == 1 else f"строго {n_pd} блоков"
+        if n_pd in (2, 3, 4):
+            ru_blk_word = f"строго {n_pd} блока"
+        en_reply_tail = (
+            f"RESPONSE FORMAT FOR PHOTO MESSAGE: First output {en_blk_word} {tags_seq} "
+            f"with objective 2-4 sentence third-person descriptions of each photo (strictly visible frame details, no emojis), "
+            f"then leave a blank line and write {recipient_name}'s natural first-person (\"I\") reply to {sender_name}. "
+            f"At the end of the reply, OPTIONALLY append [FR=+N|-N], [ROM=+N|-N], [DO=...], or [SUM=...|Day=N] ONLY if a genuine shift or event occurred (omit tags in normal casual chat; friendly/family warmth is FR only, NEVER ROM)."
+        )
+        ru_reply_tail = (
+            f"ФОРМАТ ОТВЕТА ДЛЯ СООБЩЕНИЯ С ФОТО: Сначала выдай {ru_blk_word} {tags_seq} "
+            f"с подробным объективным описанием от третьего лица (2–4 предложения на каждое фото, строго только видимое в кадре, без эмодзи), "
+            f"затем пустую строку и естественный ответ {recipient_name} для {sender_name} от первого лица («Я»). "
+            f"В конце ответа ОПЦИОНАЛЬНО укажи [FR=+N|-N], [ROM=+N|-N], [DO=...] или [SUM=...|Day=N] ТОЛЬКО если произошёл реальный сдвиг отношений или важное событие (в обычной болтовне теги не пиши; дружеское/семейное тепло — только FR, никогда не ROM)."
+        )
+    else:
+        vision_block = ""
+        en_reply_tail = (
+            f"Reply to {sender_name} in first person (\"I\") in accordance with your personality, emotions, and situation. "
+            f"OPTIONALLY append [FR=+N|-N], [ROM=+N|-N], [DO=...], or [SUM=...|Day=N] at the end ONLY if a genuine shift or event occurred (omit tags in casual chat; platonic/family warmth is FR only, NEVER ROM)."
+        )
+        ru_reply_tail = (
+            f"Ответь на сообщение {sender_name} от первого лица («Я») в соответствии со своим характером, эмоциями и ситуацией. "
+            f"В конце ответа ОПЦИОНАЛЬНО укажи [FR=+N|-N], [ROM=+N|-N], [DO=...] или [SUM=...|Day=N] ТОЛЬКО если произошёл реальный сдвиг отношений или важное событие (в обычной болтовне теги не пиши; дружеское/семейное тепло — только FR, никогда не ROM)."
+        )
+
     if is_en:
 
         history_empty = "(Beginning of new chat)"
 
         history_text = "\n".join(history_lines) if history_lines else history_empty
+        if n_imgs > 0 and not clean_raw_msg:
+            latest_line = f"[Sent {n_imgs} photo(s) without caption]"
+        elif n_imgs > 0:
+            latest_line = f"\"{clean_raw_msg}\" [+{n_imgs} attached photo(s)]"
+        else:
+            latest_line = f"\"{raw_message}\""
 
         chat_prompt = f"""DIRECT MESSAGING / CHAT:
 
 You are replying as: {recipient_name}
+
+{env_block}{biz_block}
+
+YOUR PROFILE ({recipient_name}):
 
 {recipient_info}
 
@@ -7801,7 +8775,7 @@ YOUR RELATIONSHIP (who {sender_name} is to {recipient_name}):
 
 {relationship}
 
-{extra_block}{memories_block}
+{chat_lore_block}{memories_block}{dossier_block}{recent_conv_block}{vision_block}
 
 CHAT HISTORY:
 
@@ -7811,21 +8785,31 @@ CHAT HISTORY:
 
 LATEST MESSAGE FROM {sender_name}:
 
-"{raw_message}"
+{latest_line}
 
 
 
-Reply to {sender_name} in first person ("I") in accordance with your personality, emotions, and situation. ALWAYS end your reply with [FR=number] [ROM=number] tags (and optional [DO=...] or [SUM=...|Day=N] only if triggered)."""
+{en_reply_tail}"""
 
     else:
 
         history_empty = "(Начало новой переписки)"
 
         history_text = "\n".join(history_lines) if history_lines else history_empty
+        if n_imgs > 0 and not clean_raw_msg:
+            latest_line = f"[Отправлено {n_imgs} фото без подписи]"
+        elif n_imgs > 0:
+            latest_line = f"«{clean_raw_msg}» [+{n_imgs} прикреплённых фото]"
+        else:
+            latest_line = f"«{raw_message}»"
 
         chat_prompt = f"""ПЕРЕПИСКА В МЕССЕНДЖЕРЕ:
 
 Ты отвечаешь от лица: {recipient_name}
+
+{env_block}{biz_block}
+
+ТВОЙ ПРОФИЛЬ ({recipient_name}):
 
 {recipient_info}
 
@@ -7841,7 +8825,7 @@ Reply to {sender_name} in first person ("I") in accordance with your personality
 
 {relationship}
 
-{extra_block}{memories_block}
+{chat_lore_block}{memories_block}{dossier_block}{recent_conv_block}{vision_block}
 
 ИСТОРИЯ ПЕРЕПИСКИ:
 
@@ -7851,29 +8835,74 @@ Reply to {sender_name} in first person ("I") in accordance with your personality
 
 ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ {sender_name}:
 
-«{raw_message}»
+{latest_line}
 
 
 
-Ответь на сообщение {sender_name} от первого лица («Я») в соответствии со своим характером, эмоциями и ситуацией. В САМОМ КОНЦЕ ответа ОБЯЗАТЕЛЬНО укажи теги [FR=число] [ROM=число] (и опционально [DO=...] или [SUM=...|Day=N], если это уместно)."""
+{ru_reply_tail}"""
 
 
 
-    raw_reply = execute_llm_request(chat_prompt, sim_name=recipient_name, system_prompt_override=chat_sys_prompt, is_raw=True)
+    raw_reply = execute_llm_request(chat_prompt, sim_name=recipient_name, system_prompt_override=chat_sys_prompt, is_raw=True, images=prepared_images)
+
+    if _is_llm_error_text(raw_reply):
+
+        return str(raw_reply).strip(), 0, 0, "", 3, None, None, []
 
     clean_reply = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\ufe00-\ufe0f]', '', str(raw_reply))
 
     clean_reply = clean_reply.replace("❚", "").replace("■", "").replace("□", "")
 
+    clean_reply, parsed_photo_descs = parse_and_strip_photo_descriptions(
+        clean_reply,
+        expected_count=len(prepared_images) if prepared_images else 0,
+    )
 
+    photo_descriptions = []
+    if prepared_images and parsed_photo_descs:
+        for idx_zero, img_meta in enumerate(prepared_images):
+            desc_str = parsed_photo_descs.get(idx_zero + 1, "")
+            if desc_str:
+                raw_meta = raw_images[idx_zero] if isinstance(raw_images, list) and idx_zero < len(raw_images) else None
+                pid_val = ""
+                if isinstance(img_meta, dict) and img_meta.get("photo_id"):
+                    pid_val = str(img_meta.get("photo_id") or "")
+                elif isinstance(raw_meta, dict) and (raw_meta.get("photo_id") or raw_meta.get("id")):
+                    pid_val = str(raw_meta.get("photo_id") or raw_meta.get("id") or "")
+                photo_descriptions.append({
+                    "index": idx_zero,
+                    "photo_id": pid_val,
+                    "description": desc_str,
+                })
+        if photo_descriptions:
+            print("=" * 65)
+            print(
+                f" [SIMGRAM PHOTO DESC]: Extracted {len(photo_descriptions)}/{len(prepared_images)} description(s)"
+                if is_en
+                else f" [ОПИСАНИЕ ФОТО ИИ]: Извлечено {len(photo_descriptions)}/{len(prepared_images)} опис."
+            )
+            for pd_item in photo_descriptions:
+                snip = pd_item["description"][:110] + ("..." if len(pd_item["description"]) > 110 else "")
+                print(f"   #{pd_item['index'] + 1} ({pd_item['photo_id'] or 'cam'}): {snip}")
+            print("=" * 65)
+
+
+
+    action_actor = _extract_inline_whodo(clean_reply)
 
     clean_text, delta_fr, delta_rom = parse_relationship_tags(clean_reply)
 
     clean_text, memory_summary, memory_days, action_type = parse_inline_memory_and_action_tags(clean_text, allow_actions=True)
 
-    final_text = re.sub(r'\s+', ' ', clean_text).strip().strip('"').strip('«').strip('»').strip()
+    clean_norm = str(clean_text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    clean_lines = [re.sub(r'[ \t]+', ' ', ln).strip() for ln in clean_norm.split("\n")]
+
+    final_text = re.sub(r'\n{3,}', '\n\n', "\n".join(clean_lines)).strip().strip('"').strip('«').strip('»').strip()
 
 
+
+    eff_actor = (action_actor or recipient_name) if action_type else None
 
     if memory_summary or action_type:
 
@@ -7889,13 +8918,13 @@ Reply to {sender_name} in first person ("I") in accordance with your personality
 
         if action_type:
 
-            print(f" [POST-CHAT ACTION]: [WHODO={recipient_name}] [DO={action_type}]" if is_en else f" [ДЕЙСТВИЕ ПОСЛЕ ДИАЛОГА]: [WHODO={recipient_name}] [DO={action_type}]")
+            print(f" [POST-CHAT ACTION]: [WHODO={eff_actor}] [DO={action_type}]" if is_en else f" [ДЕЙСТВИЕ ПОСЛЕ ДИАЛОГА]: [WHODO={eff_actor}] [DO={action_type}]")
 
         print("=" * 65 + "\n")
 
 
 
-    return final_text, delta_fr, delta_rom, memory_summary, memory_days, action_type
+    return final_text, delta_fr, delta_rom, memory_summary, memory_days, action_type, eff_actor, photo_descriptions
 
 
 
@@ -7903,7 +8932,13 @@ Reply to {sender_name} in first person ("I") in accordance with your personality
 
 def parse_group_chat_reply(raw_reply: str, valid_participants: list) -> Tuple[list, list]:
 
-    clean_reply = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\ufe00-\ufe0f]', '', str(raw_reply))
+    if _is_llm_error_text(raw_reply):
+
+        return [], []
+
+    clean_reply = _strip_think_tags_text(str(raw_reply))
+
+    clean_reply = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\ufe00-\ufe0f]', '', clean_reply)
 
     clean_reply = clean_reply.replace("❚", "").replace("■", "").replace("□", "")
 
@@ -8039,13 +9074,23 @@ def parse_group_chat_reply(raw_reply: str, valid_participants: list) -> Tuple[li
 
             matched_name = candidate_speaker
 
-            for p in valid_participants:
+            cand_low = candidate_speaker.lower()
 
-                if candidate_speaker.lower() in p.lower() or p.lower() in candidate_speaker.lower():
+            exact_match = next((p for p in valid_participants if p.lower() == cand_low), None)
 
-                    matched_name = p
+            if exact_match:
 
-                    break
+                matched_name = exact_match
+
+            else:
+
+                for p in valid_participants:
+
+                    if cand_low in p.lower() or p.lower() in cand_low:
+
+                        matched_name = p
+
+                        break
 
         else:
 
@@ -8066,6 +9111,8 @@ def parse_group_chat_reply(raw_reply: str, valid_participants: list) -> Tuple[li
 
 
         clean_msg, body_dfr, body_drom = parse_relationship_tags(msg_body)
+
+        clean_msg, msg_sum, msg_days, msg_act = parse_inline_memory_and_action_tags(clean_msg, allow_actions=True)
 
         final_dfr = chunk_dfr if chunk_dfr != 0 else body_dfr
 
@@ -8089,6 +9136,12 @@ def parse_group_chat_reply(raw_reply: str, valid_participants: list) -> Tuple[li
 
                 "delta_romance": final_drom,
 
+                "action_type": msg_act,
+
+                "memory_summary": msg_sum,
+
+                "memory_days": msg_days,
+
             })
 
             if matched_name not in answering_sims:
@@ -8109,7 +9162,7 @@ def parse_group_chat_reply(raw_reply: str, valid_participants: list) -> Tuple[li
 
 
 
-def execute_group_chat_request(req_json: dict) -> Tuple[list, list]:
+def execute_group_chat_request(req_json: dict, return_error: bool = False):
 
     cfg = load_config()
 
@@ -8229,15 +9282,11 @@ def execute_group_chat_request(req_json: dict) -> Tuple[list, list]:
 
 
 
-    extra_context = req_json.get("extra_context", "")
-
     dossier = (req_json.get("third_party_dossier") or req_json.get("dossier") or "").strip()
 
-    if dossier:
-
-        extra_context = f"{extra_context}\n\n{dossier}".strip() if extra_context else dossier.strip()
-
-    extra_ctx_block = (f"\nADDITIONAL CONTEXT:\n{extra_context}\n" if is_en else f"\nДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ:\n{extra_context}\n") if extra_context else ""
+    dossier_block = f"\n{dossier}\n" if dossier else ""
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
 
 
 
@@ -8261,7 +9310,7 @@ GROUP PARTICIPANTS:
 
 {participants_text}
 
-{extra_ctx_block}
+{dossier_block}{recent_conv_block}
 
 CHAT HISTORY:
 
@@ -8279,7 +9328,7 @@ Generate reaction according to system rules:
 
 1. First line: [ANS=Firstname Lastname 1, Firstname Lastname 2, ...] (any participants or ALL with [ONLINE: YES] status who have something to say — no limits on answers).
 
-2. Participant lines in 1st person with [FR=number] [ROM=number], separated by "///"."""
+2. Participant lines in 1st person separated by "///" (append optional [FR=+N|-N] [ROM=+N|-N] [DO=...] [SUM=...|Day=N] ONLY when a genuine shift or event occurred)."""
 
     else:
 
@@ -8297,7 +9346,7 @@ Generate reaction according to system rules:
 
 {participants_text}
 
-{extra_ctx_block}
+{dossier_block}{recent_conv_block}
 
 ИСТОРИЯ ПЕРЕПИСКИ:
 
@@ -8315,13 +9364,26 @@ Generate reaction according to system rules:
 
 1. Первая строка: [ANS=Имя Фамилия 1, Имя Фамилия 2, ...] (любые участники или ВСЕ со статусом [В СЕТИ: ДА], кому есть что сказать — ограничений по количеству ответов нет, могут ответить абсолютно все, кто онлайн).
 
-2. Реплики участников от 1-го лица с [FR=число] [ROM=число], разделенные «///»."""
+2. Реплики участников от 1-го лица, разделенные «///» (опциональные теги [FR=+N|-N] [ROM=+N|-N] [DO=...] [SUM=...|Day=N] ставь ТОЛЬКО если произошёл реальный сдвиг или событие)."""
 
 
 
     raw_reply = execute_llm_request(group_prompt, sim_name=group_name, system_prompt_override=group_sys_prompt, is_raw=True)
 
-    parsed_msgs, answering_sims = parse_group_chat_reply(raw_reply, p_names)
+    if _is_llm_error_text(raw_reply):
+
+        err_str = (raw_reply or "").strip()
+
+        print(f"[GROUP CHAT ERROR] {err_str}")
+
+        return ([], [], err_str) if return_error else ([], [])
+
+    p_names_online = [str(p.get("name") or "").strip() for p in participants if p.get("is_online", True)]
+    parsed_msgs, answering_sims = parse_group_chat_reply(raw_reply, p_names_online or p_names)
+    if p_names_online:
+        allowed_low = {n.lower() for n in p_names_online if n}
+        parsed_msgs = [m for m in parsed_msgs if str(m.get("sender") or "").strip().lower() in allowed_low]
+        answering_sims = [a for a in answering_sims if str(a or "").strip().lower() in allowed_low]
 
 
 
@@ -8347,13 +9409,13 @@ Generate reaction according to system rules:
 
 
 
-    return parsed_msgs, answering_sims
+    return (parsed_msgs, answering_sims, None) if return_error else (parsed_msgs, answering_sims)
 
 
 
 
 
-def execute_npc_group_chat_request(req_json: dict) -> Tuple[list, list]:
+def execute_npc_group_chat_request(req_json: dict, return_error: bool = False):
 
     """
 
@@ -8477,11 +9539,16 @@ def execute_npc_group_chat_request(req_json: dict) -> Tuple[list, list]:
 
 
 
-    extra_context = req_json.get("extra_context", "").strip()
+    dossier = (req_json.get("third_party_dossier") or req_json.get("dossier") or "").strip()
 
-    extra_ctx_block = (f"\nADDITIONAL CONTEXT:\n{extra_context}\n" if is_en else f"\nДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ:\n{extra_context}\n") if extra_context else ""
-
-
+    dossier_block = f"\n{dossier}\n" if dossier else ""
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
+    sit_hint = str(req_json.get("situation_hint") or "").strip()
+    sit_block = (
+        f"\nNOW: {sit_hint}\n" if (is_en and sit_hint)
+        else (f"\nСЕЙЧАС: {sit_hint}\n" if sit_hint else "")
+    )
 
     online_count = sum(1 for p in participants if p.get("is_online", True))
 
@@ -8521,7 +9588,7 @@ Firstname Lastname 2: Reply..."""
 
         npc_prompt = f"""AUTONOMOUS GROUP DIALOGUE BETWEEN PARTICIPANTS:
 
-Group: {group_name}{topic_line}
+Group: {group_name}{topic_line}{sit_block}
 
 
 
@@ -8529,7 +9596,7 @@ GROUP PARTICIPANTS:
 
 {participants_text}
 
-{extra_ctx_block}
+{dossier_block}{recent_conv_block}
 
 CHAT HISTORY:
 
@@ -8579,7 +9646,7 @@ The player ("You") is currently silent and not participating."""
 
         npc_prompt = f"""АВТОНОМНЫЙ ДИАЛОГ УЧАСТНИКОВ В ГРУППЕ:
 
-Название: {group_name}{topic_line}
+Название: {group_name}{topic_line}{sit_block}
 
 
 
@@ -8587,7 +9654,7 @@ The player ("You") is currently silent and not participating."""
 
 {participants_text}
 
-{extra_ctx_block}
+{dossier_block}{recent_conv_block}
 
 ИСТОРИЯ ПЕРЕПИСКИ:
 
@@ -8607,7 +9674,20 @@ The player ("You") is currently silent and not participating."""
 
     raw_reply = execute_llm_request(npc_prompt, sim_name=f"NPC Group: {group_name}", system_prompt_override=npc_sys_prompt, is_raw=True)
 
-    parsed_msgs, answering_sims = parse_group_chat_reply(raw_reply, p_names)
+    if _is_llm_error_text(raw_reply):
+
+        err_str = (raw_reply or "").strip()
+
+        print(f"[NPC GROUP CHAT ERROR] {err_str}")
+
+        return ([], [], err_str) if return_error else ([], [])
+
+    p_names_online = [str(p.get("name") or "").strip() for p in participants if p.get("is_online", True)]
+    parsed_msgs, answering_sims = parse_group_chat_reply(raw_reply, p_names_online or p_names)
+    if p_names_online:
+        allowed_low = {n.lower() for n in p_names_online if n}
+        parsed_msgs = [m for m in parsed_msgs if str(m.get("sender") or "").strip().lower() in allowed_low]
+        answering_sims = [a for a in answering_sims if str(a or "").strip().lower() in allowed_low]
 
 
 
@@ -8643,296 +9723,125 @@ The player ("You") is currently silent and not participating."""
 
 
 
-    return parsed_msgs, answering_sims
+    return (parsed_msgs, answering_sims, None) if return_error else (parsed_msgs, answering_sims)
 
 
 
 
 
 def execute_friend_chat_request(req_json: dict) -> Tuple[str, dict]:
-
     """
-
     Generates an autonomous spontaneous incoming message from a friend to the player in direct 1-on-1 chat.
-
     Returns (clean_message_text, info_dict).
-
     """
-
     cfg = load_config()
-
     is_en = ((cfg.get("language") or "ru").lower() == "en")
-
     default_friend_sys = DEFAULT_FRIEND_CHAT_SYSTEM_PROMPT_EN if is_en else DEFAULT_FRIEND_CHAT_SYSTEM_PROMPT
-
     friend_sys_prompt = resolve_system_prompt(cfg, "PROMPT_FRIEND_AUTONOMY", default_friend_sys, "friend_chat_system_prompt").strip()
 
-
-
     friend_name = str(req_json.get("friend_name") or ("Friend" if is_en else "Друг")).strip()
-
     actor_name = str(req_json.get("actor_name") or ("Contact" if is_en else "Собеседник")).strip()
-
     friend_info = str(req_json.get("friend_info") or "").strip()
-
     actor_info = str(req_json.get("actor_info") or "").strip()
-
     rel_title = str(req_json.get("relationship") or ("Friend" if is_en else "Друг")).strip()
-
     memories = str(req_json.get("memories") or "").strip()
-
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
     messages = req_json.get("messages") or []
 
-
-
     history_lines = []
-
     for msg in messages[-10:]:
-
         f_line = msg.get("formatted_line")
-
         if f_line:
-
             history_lines.append(f_line)
-
         else:
-
             s = msg.get("sender", "")
-
             t = msg.get("text", "")
-
             m_time = msg.get("time", "")
-
             m_day = msg.get("day", "")
-
             prefix = f"[{m_day} {m_time}] " if (m_day or m_time) else ""
-
             if s and t:
-
                 history_lines.append(f"- {prefix}{s}: {t}")
-
     history_text = "\n".join(history_lines) if history_lines else ("(Chat history is empty / haven't chatted in a while)" if is_en else "(История переписки пуста / вы давно не общались)")
 
-
-
     location_ctx = str(req_json.get("location_context") or "").strip()
-
     dossier = (req_json.get("third_party_dossier") or req_json.get("dossier") or "").strip()
-
     dossier_block = f"\n{dossier}\n" if dossier else ""
-
     loc_block = (f"\nLOCATION CONTEXT:\n{location_ctx}\n" if is_en else f"\nМЕСТОПОЛОЖЕНИЕ:\n{location_ctx}\n") if location_ctx else ""
-
-
-
-    # Format other participants / bystanders block
-
-    other_sims_payload = req_json.get("other_sims") or []
-
-    is_group_conv = bool(req_json.get("is_group_conversation", False))
-
-    other_sims_block = ""
-
-    if other_sims_payload and isinstance(other_sims_payload, list):
-
-        sec_lines = []
-
-        for s_idx, os_item in enumerate(other_sims_payload, 1):
-
-            os_name = os_item.get("name", f"Sim {s_idx}")
-
-            os_prof = os_item.get("profile", "")
-
-            os_rel = os_item.get("relationship_with_actor", "")
-
-            rel_txt = f" (Отношения с {actor_name}: {os_rel})" if (os_rel and not is_en) else (f" (Relationship with {actor_name}: {os_rel})" if os_rel else "")
-
-            sec_lines.append(f"• {os_name}{rel_txt}:\n{os_prof}")
-
-        if sec_lines:
-
-            if is_group_conv:
-
-                hdr = "УЧАСТНИКИ ВАШЕГО ГРУППОВОГО РАЗГОВОРА (ОБЩАЮТСЯ ВМЕСТЕ В ОДНОЙ КОМПАНИИ / КРУГУ):" if not is_en else "GROUP CONVERSATION PARTICIPANTS (TALKING TOGETHER IN THE SAME CIRCLE):"
-
-                rule_note = "- ЭТО ГРУППОВОЙ ДИАЛОГ! Все участники общаются вместе. Если реплика обращена ко всем («привет девочки», «как вы?», вопрос к компании) или тема касается группы — ВТОРОЙ УЧАСТНИК ОБЯЗАТЕЛЬНО ПОДХВАТЫВАЕТ РАЗГОВОР через разделитель «///» со своим ответом! (Формат: Ответ основного собеседника [Anim=...] /// Имя: Ответ второго собеседника [Anim=...])." if not is_en else "- THIS IS AN ACTIVE GROUP CHAT! If addressed to everyone ('hello girls', 'how are you guys?') or relevant to the group, the second Sim ALWAYS chimes in via '///' separator (Format: Primary reply [Anim=...] /// Name: Second reply [Anim=...])."
-
-            else:
-
-                hdr = "СОСЕДНИЕ СИМЫ РЯДОМ В ТОМ ЖЕ ПРОСТРАНСТВЕ (СЛЫШАТ ВАС, НО ЗАНЯТЫ СВОИМИ ДЕЛАМИ):" if not is_en else "NEARBY BYSTANDERS IN THE SAME SPACE (OVERHEARING, BUT OCCUPIED WITH THEIR OWN BUSINESS):"
-
-                rule_note = "- Это разговор 1-на-1. Соседний сим вмешивается ТОЛЬКО ИНОГДА (через «///» или [JOIN=...]) — если назвали его имя, задели его лично/семью, заговорили с ним или ситуация взрывная. В обычных нейтральных фразах 1-на-1 отвечает ТОЛЬКО основной собеседник!" if not is_en else "- This is 1-on-1. Bystanders chime in ONLY OCCASIONALLY via '///' or [JOIN=...] if addressed, provoked, or personally affected. Otherwise ONLY the primary Sim replies."
-
-            other_sims_block = f"\n[{hdr}]\n{rule_note}\n" + "\n".join(sec_lines) + "\n"
-
-
+    sit_hint = str(req_json.get("situation_hint") or "").strip()
+    if sit_hint:
+        loc_block = f"{loc_block}\n{'NOW' if is_en else 'СЕЙЧАС'}: {sit_hint}\n"
 
     if is_en:
-
         clean_mem = memories
-
         if clean_mem:
-
             if clean_mem.startswith("ПАМЯТЬ:"):
-
                 clean_mem = "MEMORIES:" + clean_mem[7:]
-
             clean_mem = re.sub(r'\[Осталось (\d+) (?:дн\.|дня|день)\]', r'[\1 days remaining]', clean_mem)
-
             clean_mem = clean_mem.replace("[1 days remaining]", "[1 day remaining]").replace("[Навсегда]", "[Permanent]")
-
         mem_block = f"\nMEMORIES AND PAST EXPERIENCES WITH {actor_name}:\n{clean_mem}\n" if clean_mem else ""
+        prompt = f"""SPONTANEOUS MESSAGE IN DIRECT CHAT:
+You are {friend_name}.
+You are sending an unprompted first message to: {actor_name}.
 
-        wit_block = f"\nNEARBY WITNESSES LISTENING TO THE CONVERSATION:\n{witnesses}\n" if (witnesses and not other_sims_block) else ("\nNEARBY WITNESSES:\nNo one nearby (talking in private)\n" if not other_sims_block else "")
-
-        time_label = f" (current time {cur_time})" if cur_time else ""
-
-        prompt = f"""FACE-TO-FACE LIVE DIALOGUE:
-
-You are {target_name}.
-
-{actor_name} is speaking to you directly in person{time_label}.
-
-{env_block}{biz_block}
-
-YOUR PROFILE ({target_name}):
-
-{target_info}
-
-
+YOUR PROFILE ({friend_name}):
+{friend_info}
 
 INTERLOCUTOR PROFILE ({actor_name}):
-
 {actor_info}
 
-
-
-YOUR RELATIONSHIP:
-
+RELATIONSHIP STATUS:
 {rel_title}
+{loc_block}{mem_block}{dossier_block}{recent_conv_block}
+RECENT MESSAGES IN YOUR CHAT:
+{history_text}
 
-{ww_block}{mem_block}{other_sims_block}{wit_block}{dossier_block}{history_block}
-
-WORDS JUST SPOKEN BY {actor_name}{time_label}:
-
-\"{spoken_text}\""""
-
+TASK:
+Write a spontaneous natural message for {actor_name} in messenger from your perspective ("I").
+You are initiating the conversation: ask how things are going, share news, suggest hanging out, make a remark, or joke, taking into account your relationship ("{rel_title}") and memories.
+Output ONLY the message text without quotes or formatting tags."""
     else:
-
         mem_block = f"\nВОСПОМИНАНИЯ И ПРОШЛЫЙ ОПЫТ С {actor_name}:\n{memories}\n" if memories else ""
+        prompt = f"""СПОНТАННОЕ СООБЩЕНИЕ В ЛИЧНЫЙ ЧАТ:
+Ты — {friend_name}.
+Ты пишешь первое сообщение своему собеседнику: {actor_name}.
 
-        wit_block = f"\nРЯДОМ НАХОДЯТСЯ И СЛЫШАТ РАЗГОВОР (Свидетели):\n{witnesses}\n" if (witnesses and not other_sims_block) else ("\nРЯДОМ НАХОДЯТСЯ И СЛЫШАТ РАЗГОВОР:\nПоблизости никого нет (разговаривают наедине)\n" if not other_sims_block else "")
-
-        time_label = f" (сейчас {cur_time})" if cur_time else ""
-
-        prompt = f"""ЖИВОЙ РАЗГОВОР В РЕАЛЬНОМ МИРЕ:
-
-Ты — {target_name}.
-
-К тебе обращается лично вслух {actor_name}{time_label}.
-
-{env_block}{biz_block}
-
-ТВОЙ ПРОФИЛЬ ({target_name}):
-
-{target_info}
-
-
+ТВОЙ ПРОФИЛЬ ({friend_name}):
+{friend_info}
 
 ПРОФИЛЬ СОБЕСЕДНИКА ({actor_name}):
-
 {actor_info}
 
-
-
-ВАШИ ОТНОШЕНИЯ:
-
+СТАТУС ВАШИХ ОТНОШЕНИЙ:
 {rel_title}
+{loc_block}{mem_block}{dossier_block}{recent_conv_block}
+ПОСЛЕДНИЕ СООБЩЕНИЯ В ВАШЕМ ЧАТЕ:
+{history_text}
 
-{ww_block}{mem_block}{other_sims_block}{wit_block}{dossier_block}{history_block}
-
-СЛОВА, КОТОРЫЕ ТОЛЬКО ЧТО СКАЗАЛ(А) {actor_name}{time_label}:
-
-«{spoken_text}»"""
-
-
+ЗАДАЧА:
+Напиши спонтанное живое сообщение для {actor_name} в мессенджере от своего лица.
+Ты сам(а) инициируешь разговор: спроси как дела, поделись новостью, предложи встретиться, пошути или сделай замечание, учитывая ваши отношения («{rel_title}») и воспоминания.
+Выводи только текст сообщения без кавычек и пометок."""
 
     raw_reply = execute_llm_request(prompt, sim_name=friend_name, system_prompt_override=friend_sys_prompt, is_raw=True)
+    if _is_llm_error_text(raw_reply):
+        err_str = (raw_reply or "").strip()
+        print(f"[FRIEND CHAT ERROR] {err_str}")
+        return err_str, {"sender": friend_name, "text": "", "relationship": rel_title, "error": err_str}
 
-
-
-    raw_text = raw_reply
-
-    if "</think>" in raw_text:
-
-        raw_text = raw_text.split("</think>")[-1].strip()
-
-    raw_text = raw_text.strip().strip('"').strip('«').strip('»').strip()
-
-    # Strip any leaked [ANS=...] tags before chunking
-
-    raw_text = re.sub(r'\[ANS\s*=\s*[^\]]+\]', '', raw_text, flags=re.IGNORECASE).strip()
-
-
-
-    # Split by /// if multi-sim reply was generated
-
-    multi_chunks = []
-
-    if "///" in raw_text:
-
-        multi_chunks = [c.strip() for c in raw_text.split("///") if c.strip()]
-
-        primary_chunk = multi_chunks[0]
-
-        secondary_chunks = multi_chunks[1:]
-
-    else:
-
-        primary_chunk = raw_text
-
-        secondary_chunks = []
-
-
-
-    clean_reply = primary_chunk
-
-    clean_reply = re.sub(r'\[ANS\s*=\s*[^\]]+\]', '', clean_reply, flags=re.IGNORECASE).strip()
-
-    # Strip leading name prefix from primary reply if present (e.g. "Bella: text" -> "text")
-
-    if ":" in clean_reply:
-
-        p_cand, p_rest = clean_reply.split(":", 1)
-
-        if p_cand.strip().lower() in target_name.lower() or target_name.lower() in p_cand.strip().lower():
-
-            clean_reply = p_rest.strip()
-
-
+    clean_reply = _strip_think_tags_text(raw_reply)
+    clean_reply = strip_emojis(clean_reply.strip().strip('"').strip('«').strip('»').strip())
 
     if clean_reply.startswith(f"{friend_name}:"):
-
         clean_reply = clean_reply[len(f"{friend_name}:"):].strip()
 
-
-
     print("=" * 65)
-
     print(f" [SPONTANEOUS MESSAGE FROM FRIEND: {friend_name}]" if is_en else f" [СПОНТАННОЕ СООБЩЕНИЕ ОТ ДРУГА: {friend_name}]")
-
     print(f" Relationship status: {rel_title}" if is_en else f" Статус отношений: {rel_title}")
-
     print(f" Text: \"{clean_reply}\"" if is_en else f" Текст: «{clean_reply}»")
-
     print("=" * 65 + "\n")
 
-
-
     return clean_reply, {"sender": friend_name, "text": clean_reply, "relationship": rel_title}
-
-
-
 
 
 def execute_direct_dialogue_request(req_json: dict) -> dict:
@@ -8978,6 +9887,8 @@ def execute_direct_dialogue_request(req_json: dict) -> dict:
     rel_title = str(req_json.get("relationship") or ("Acquaintances" if is_en else "Знакомые")).strip()
 
     memories = str(req_json.get("memories") or "").strip()
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
 
     witnesses = str(req_json.get("witnesses") or "").strip()
 
@@ -9452,7 +10363,7 @@ def execute_direct_dialogue_request(req_json: dict) -> dict:
 
             rule_grp = ms_rules.get("sex_group") or (
 
-                "- ЭТО СОВМЕСТНЫЙ ИНТИМНЫЙ АКТ (ГРУППОВОЙ СЕКС / СЕКС ВТРОЁМ И Т.Д.)! Все перечисленные персонажи находятся в процессе близости вместе с вами. Если реплика обращена ко всем участникам («как вам?», «девочки...», стон или вопрос к участникам) или касается происходящего — другие участники интима ОБЯЗАТЕЛЬНО подхватывают разговор через разделитель «///» со своими реакциями, стонами, репликами и тегами! (Формат: Ответ первого партнера [FR=...] [ROM=...] /// Имя: Ответ второго партнера [FR=...] [ROM=...]). Опционально разрешены [DO=stop_sex] (прервать секс) и [SUM=...|Day=N] (важное воспоминание)." if not is_en else "- THIS IS A SHARED INTIMATE SCENE (GROUP SEX / THREESOME)! All listed Sims are actively involved together in intimacy. If words are directed to everyone or describe what's happening, other partners ALWAYS chime in via '///' separator with their reactions, moans, and tags (Format: Primary reply [FR=...] [ROM=...] /// Name: Second reply [FR=...] [ROM=...])."
+                "- ЭТО СОВМЕСТНЫЙ ИНТИМНЫЙ АКТ (ГРУППОВОЙ СЕКС / СЕКС ВТРОЁМ И Т.Д.)! Все перечисленные персонажи находятся в процессе близости вместе с вами. Если реплика обращена ко всем участникам («как вам?», «девочки...», стон или вопрос к участникам) или касается происходящего — другие участники интима ОБЯЗАТЕЛЬНО подхватывают разговор через разделитель «///» со своими реакциями, стонами и репликами! (Формат: Ответ первого партнера /// Имя: Ответ второго партнера). Опционально при значимом сдвиге чувств или событии разрешены [FR=+N|-N], [ROM=+N|-N], [DO=stop_sex] и [SUM=...|Day=N]." if not is_en else "- THIS IS A SHARED INTIMATE SCENE (GROUP SEX / THREESOME)! All listed Sims are actively involved together in intimacy. If words are directed to everyone or describe what's happening, other partners ALWAYS chime in via '///' separator with their reactions, moans, and lines (Format: Primary reply /// Name: Second reply; optional tags [FR=+N|-N] [ROM=+N|-N] [DO=stop_sex] [SUM=...|Day=N] only if triggered)."
 
             )
 
@@ -9534,6 +10445,11 @@ def execute_direct_dialogue_request(req_json: dict) -> dict:
 
         time_label = f" (current time {cur_time})" if cur_time else ""
 
+        safe_recent_block = (
+            f"\nBACKGROUND LOG OF PAST CONVERSATIONS (FOR CONTEXT ONLY — DO NOT REPLY AS PAST INTERLOCUTORS; right now you are {target_name} speaking ONLY with {actor_name}):\n{recent_conv}\n"
+            if recent_conv else ""
+        )
+
         prompt = f"""FACE-TO-FACE LIVE DIALOGUE:
 
 You are {target_name}.
@@ -9558,11 +10474,12 @@ YOUR RELATIONSHIP:
 
 {rel_title}
 
-{ww_block}{mem_block}{wit_block}{dossier_block}{history_block}{other_sims_block}
+{ww_block}{mem_block}{safe_recent_block}{wit_block}{dossier_block}{history_block}{other_sims_block}
 
-WORDS JUST SPOKEN BY {actor_name}{time_label}:
+WORDS JUST SPOKEN BY {actor_name} TO YOU ({target_name}){time_label}:
 
-"{spoken_text}\""""
+"{spoken_text}"
+(Reply ONLY as {target_name} addressing {actor_name}:)"""
 
     else:
 
@@ -9571,6 +10488,11 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
         wit_block = f"\nРЯДОМ НАХОДЯТСЯ И СЛЫШАТ РАЗГОВОР (Свидетели):\n{witnesses}\n" if witnesses else "\nРЯДОМ НАХОДЯТСЯ И СЛЫШАТ РАЗГОВОР:\nПоблизости никого нет (разговаривают наедине)\n"
 
         time_label = f" (сейчас {cur_time})" if cur_time else ""
+
+        safe_recent_block = (
+            f"\nСПРАВКА О ПРОШЛЫХ РАЗГОВОРАХ (ТОЛЬКО ДЛЯ КОНТЕКСТА ПАМЯТИ — ЭТО НЕ ТЕКУЩИЙ ДИАЛОГ! Сейчас ты — {target_name}, и перед тобой {actor_name}; НЕ отвечай от лица других персонажей из прошлых бесед!):\n{recent_conv}\n"
+            if recent_conv else ""
+        )
 
         prompt = f"""ЖИВОЙ РАЗГОВОР В РЕАЛЬНОМ МИРЕ:
 
@@ -9596,49 +10518,120 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 {rel_title}
 
-{ww_block}{mem_block}{wit_block}{dossier_block}{history_block}{other_sims_block}
+{ww_block}{mem_block}{safe_recent_block}{wit_block}{dossier_block}{history_block}{other_sims_block}
 
-СЛОВА, КОТОРЫЕ ТОЛЬКО ЧТО СКАЗАЛ(А) {actor_name}{time_label}:
+СЛОВА, КОТОРЫЕ ТОЛЬКО ЧТО СКАЗАЛ(А) {actor_name} ТЕБЕ ({target_name}){time_label}:
 
-«{spoken_text}»"""
+«{spoken_text}»
+(Ответь ТОЛЬКО от своего лица — {target_name}, обращаясь к {actor_name}:)"""
 
 
 
-    if not cfg.get("age_instructions_enabled", True):
-        direct_sys_prompt = re.sub(r'<age_adaptation>.*?</age_adaptation>', '', direct_sys_prompt, flags=re.DOTALL)
     raw_reply = execute_llm_request(prompt, sim_name=target_name, system_prompt_override=direct_sys_prompt, is_raw=True)
 
+    if _is_llm_error_text(raw_reply):
+
+        err_str = (raw_reply or "").strip()
+
+        print(f"[DIRECT DIALOGUE ERROR] {err_str}")
+
+        return {
+
+            "is_group": False,
+
+            "replies": [],
+
+            "text": "",
+
+            "animation": "FRIENDLY",
+
+            "delta_friendship": 0,
+
+            "delta_romance": 0,
+
+            "summarize": False,
+
+            "memory_summary": "",
+
+            "memory_days": 3,
+
+            "action_type": None,
+
+            "action_actor": None,
+
+            "speaker": target_name,
+
+            "error": err_str,
+
+        }
 
 
-    raw_text = raw_reply
 
-    if "</think>" in raw_text:
-
-        raw_text = raw_text.split("</think>")[-1].strip()
+    raw_text = _strip_think_tags_text(raw_reply)
 
     raw_text = raw_text.strip().strip('"').strip('«').strip('»').strip()
 
 
 
-    # Split by /// if multi-sim reply was generated
+    # Helper to match a known speaker name against [target_name] + other_sims_payload
+    def _match_known_speaker(cand_str: str):
+        c_clean = cand_str.strip(' -*•"\'«»[]').strip()
+        if not c_clean or len(c_clean) > 40:
+            return None, 0
+        c_low = c_clean.lower()
 
+        # Check target_name first (full name or first name)
+        t_low = (target_name or "").strip().lower()
+        t_first = t_low.split()[0] if t_low else ""
+        if t_low and (c_low == t_low or (len(t_first) >= 2 and c_low == t_first)):
+            return target_name, req_json.get("target_sim_id", 0)
+
+        # Check other_sims_payload (full name, then first name)
+        for os_it in other_sims_payload:
+            os_n = (os_it.get("name") or "").strip()
+            if not os_n:
+                continue
+            os_low = os_n.lower()
+            if c_low == os_low or (os_low in c_low and len(os_low) >= 4):
+                return os_n, os_it.get("sim_id", 0)
+        for os_it in other_sims_payload:
+            os_n = (os_it.get("name") or "").strip()
+            if not os_n:
+                continue
+            os_first = os_n.lower().split()[0]
+            if len(os_first) >= 2 and c_low == os_first:
+                return os_n, os_it.get("sim_id", 0)
+        return None, 0
+
+    # Split by /// and also by newline when a line starts with "<KnownSimName>:"
+    raw_segments = [c.strip() for c in raw_text.split("///") if c.strip()] if "///" in raw_text else [raw_text]
     multi_chunks = []
+    for seg in raw_segments:
+        if "\n" not in seg:
+            multi_chunks.append(seg)
+            continue
+        cur_lines = []
+        for ln in seg.splitlines():
+            ln_s = ln.strip()
+            if not ln_s:
+                continue
+            if cur_lines and ":" in ln_s:
+                cand_prefix, _ = ln_s.split(":", 1)
+                matched_n, _ = _match_known_speaker(cand_prefix)
+                if matched_n:
+                    multi_chunks.append("\n".join(cur_lines).strip())
+                    cur_lines = [ln_s]
+                    continue
+            cur_lines.append(ln_s)
+        if cur_lines:
+            multi_chunks.append("\n".join(cur_lines).strip())
 
-    if "///" in raw_text:
-
-        multi_chunks = [c.strip() for c in raw_text.split("///") if c.strip()]
-
+    if multi_chunks:
         primary_chunk = multi_chunks[0]
-
         secondary_chunks = multi_chunks[1:]
-
     else:
-
         primary_chunk = raw_text
-
         secondary_chunks = []
-
-
 
     clean_reply = primary_chunk
 
@@ -9734,7 +10727,9 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
 
-    # Parse optional inline [SUM=...|Day=N] and [DO=...] tags
+    # Parse optional inline [SUM=...|Day=N], [WHODO=...] and [DO=...] tags
+
+    action_actor = _extract_inline_whodo(clean_reply)
 
     clean_reply, memory_summary, memory_days, action_type = parse_inline_memory_and_action_tags(
 
@@ -9744,11 +10739,13 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
     )
 
-    # Strip any [JOIN=...] line from clean_reply
+    # Strip any [ANS=...] and [JOIN=...] line from clean_reply
+
+    clean_reply = re.sub(r'\[ANS\s*=\s*[^\]]+\]', '', clean_reply, flags=re.IGNORECASE).strip()
 
     clean_reply = re.sub(r'\[JOIN\s*[:=][^\]]+\].*$', '', clean_reply, flags=re.DOTALL | re.IGNORECASE).strip()
 
-    clean_reply = re.sub(r'\s+', ' ', clean_reply).strip().strip('"').strip('«').strip('»').strip()
+    clean_reply = strip_emojis(re.sub(r'\s+', ' ', clean_reply).strip().strip('"').strip('«').strip('»').strip())
 
     should_summarize = False
 
@@ -9772,9 +10769,19 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
 
-    if clean_reply.startswith(f"{target_name}:"):
-
-        clean_reply = clean_reply[len(f"{target_name}:"):].strip()
+    primary_speaker_name = target_name
+    primary_speaker_id = req_json.get("target_sim_id", 0)
+    if ":" in clean_reply:
+        cand_p_name, cand_p_body = clean_reply.split(":", 1)
+        matched_p_name, matched_p_id = _match_known_speaker(cand_p_name)
+        if matched_p_name and cand_p_body.strip():
+            # In 1-on-1 dialogue, never allow a bystander or stale name to hijack primary speaker ID
+            if is_group_conv or matched_p_id == primary_speaker_id or matched_p_name.lower() == target_name.lower():
+                primary_speaker_name = matched_p_name
+                primary_speaker_id = matched_p_id
+            clean_reply = cand_p_body.strip().strip('"').strip('«').strip('»').strip()
+        elif clean_reply.startswith(f"{target_name}:"):
+            clean_reply = clean_reply[len(f"{target_name}:"):].strip()
 
 
 
@@ -9812,7 +10819,9 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
     if action_type:
 
-        print(f" [POST-DIALOGUE ACTION]: [WHODO={target_name}] [DO={action_type}]" if is_en else f" [ДЕЙСТВИЕ ПОСЛЕ ДИАЛОГА]: [WHODO={target_name}] [DO={action_type}]")
+        eff_print_actor = action_actor or target_name
+
+        print(f" [POST-DIALOGUE ACTION]: [WHODO={eff_print_actor}] [DO={action_type}]" if is_en else f" [ДЕЙСТВИЕ ПОСЛЕ ДИАЛОГА]: [WHODO={eff_print_actor}] [DO={action_type}]")
 
     print("=" * 65 + "\n")
 
@@ -9832,7 +10841,7 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
     for sec_c in secondary_chunks:
 
-        sec_c_clean = re.sub(r'\[ANS\s*=\s*[^\]]+\\]', '', sec_c, flags=re.IGNORECASE)
+        sec_c_clean = re.sub(r'\[ANS\s*=\s*[^\]]+\]', '', sec_c, flags=re.IGNORECASE)
 
         sec_line = sec_c_clean.strip(' "«»')
 
@@ -9843,26 +10852,23 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
         s_body = sec_line
 
         if ":" in sec_line:
-
             cand_name, cand_body = sec_line.split(":", 1)
+            matched_sec_n, _ = _match_known_speaker(cand_name)
+            if matched_sec_n:
+                s_name = matched_sec_n
+                s_body = cand_body.strip()
+            else:
+                # Match cand_name against other_sims_payload
+                for os_it in other_sims_payload:
+                    os_n = os_it.get("name", "")
+                    if os_n and (os_n.lower() in cand_name.lower() or cand_name.lower() in os_n.lower()):
+                        s_name = os_n
+                        s_body = cand_body.strip()
+                        break
 
-            # Match cand_name against other_sims_payload
-
-            for os_it in other_sims_payload:
-
-                os_n = os_it.get("name", "")
-
-                if os_n and (os_n.lower() in cand_name.lower() or cand_name.lower() in os_n.lower()):
-
-                    s_name = os_n
-
-                    s_body = cand_body.strip()
-
-                    break
-
-        if not s_name and other_sims_payload:
-
-            s_name = other_sims_payload[0].get("name", "Сим")
+        if not s_name:
+            # Never attribute an unnamed secondary chunk to a random bystander
+            continue
 
 
 
@@ -9946,7 +10952,9 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
 
-        # Extract optional [DO=...] and [SUM=...|Day=N] from secondary Sim chunk
+        # Extract optional [WHODO=...], [DO=...] and [SUM=...|Day=N] from secondary Sim chunk
+
+        s_actor = _extract_inline_whodo(s_body)
 
         s_body, s_sum, s_days, s_act = parse_inline_memory_and_action_tags(
 
@@ -9960,7 +10968,7 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
             action_type = s_act
 
-            action_actor = s_name
+            action_actor = s_actor or s_name
 
         if s_sum and not memory_summary:
 
@@ -9970,7 +10978,7 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
 
-        s_body = re.sub(r'\s+', ' ', s_body).strip(' "«»')
+        s_body = strip_emojis(re.sub(r'\s+', ' ', s_body).strip(' "«»'))
 
         if s_body:
 
@@ -9989,6 +10997,8 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
                 "animation": s_anim_cat,
 
                 "action_type": s_act,
+
+                "action_actor": (s_actor or s_name) if s_act else None,
 
                 "memory_summary": s_sum,
 
@@ -10108,6 +11118,8 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
 
+        j_body = strip_emojis(re.sub(r'\s+', ' ', j_body).strip(' "«»'))
+
         if j_body:
 
             joined_list.append({
@@ -10129,61 +11141,35 @@ WORDS JUST SPOKEN BY {actor_name}{time_label}:
 
 
     single_reply = {
-
-        "sender": target_name,
-
-        "sim_id": req_json.get("target_sim_id", 0),
-
+        "sender": primary_speaker_name,
+        "sim_id": primary_speaker_id,
         "text": clean_reply,
-
         "delta_friendship": delta_fr,
-
         "delta_romance": delta_rom,
-
         "animation": anim_tag,
-
     }
 
-
-
     all_replies = [single_reply] + joined_list
-
     if joined_list:
-
         print(f" [JOINED SIMS IN DIRECT DIALOGUE]: {len(joined_list)} sim(s) chimed in!")
-
         for jr in joined_list:
-
             print(f"   • {jr['sender']}: «{jr['text']}» [Anim={jr['animation']}] [FR={jr['delta_friendship']:+d}, ROM={jr['delta_romance']:+d}]")
 
-
-
     return {
-
         "success": True,
-
         "is_group": bool(joined_list or is_group_conv),
-
         "replies": all_replies,
-
         "text": clean_reply,
-
         "animation": anim_tag,
-
         "delta_friendship": delta_fr,
-
         "delta_romance": delta_rom,
-
         "summarize": should_summarize,
-
         "memory_summary": memory_summary,
-
         "memory_days": memory_days,
-
         "action_type": action_type,
-
-        "speaker": target_name
-
+        "action_actor": (action_actor or primary_speaker_name) if action_type else None,
+        "speaker": primary_speaker_name,
+        "speaker_sim_id": primary_speaker_id,
     }
 
 
@@ -10230,12 +11216,11 @@ def execute_simplified_dialogue_request(req_json: dict) -> dict:
     holiday = str(req_json.get("holiday") or "").strip()
     social_event = str(req_json.get("event") or "").strip()
     memories = str(req_json.get("memories") or "").strip()
+    recent_conv = str(req_json.get("recent_conversations") or "").strip()
+    recent_conv_block = f"\n{recent_conv}\n" if recent_conv else ""
 
     default_sys = DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT_EN if is_en else DEFAULT_SIMPLIFIED_DIALOGUE_SYSTEM_PROMPT
     sys_prompt = resolve_system_prompt(cfg, "PROMPT_SIMPLIFIED_DIALOGUE", default_sys, "simplified_dialogue_system_prompt").strip()
-    if not cfg.get("age_instructions_enabled", True):
-        sys_prompt = re.sub(r'учитывай возраст,\s*', 'учитывай ', sys_prompt, flags=re.IGNORECASE)
-        sys_prompt = re.sub(r'age,\s*', '', sys_prompt, flags=re.IGNORECASE)
 
     participants = req_json.get("participants")
     is_group = isinstance(participants, list) and len(participants) >= 3
@@ -10272,8 +11257,8 @@ def execute_simplified_dialogue_request(req_json: dict) -> dict:
             prompt = f"""GROUP CONVERSATION ({len(participants)} PARTICIPANTS):{env_block}
 PARTICIPANTS IN CONVERSATION:
 {part_block}
-{mem_block}
-Generate a full, lively group conversation among the participants (flowing multi-turn dialogue, banter, reactions, and commentary as feels natural)."""
+{mem_block}{recent_conv_block}
+Generate a lively conversation among the participants (base 2–3 lines ±1 for two speakers, plus +1 line for each additional Sim you choose to include in the exchange)."""
         else:
             prompt = f"""CONVERSATION BETWEEN CHARACTERS:{env_block}
 CHARACTER 1 ({actor_name}):
@@ -10284,8 +11269,8 @@ CHARACTER 2 ({target_name}):
 
 RELATIONSHIP BETWEEN CHARACTERS:
 {rel_title}
-{mem_block}
-Generate a full, natural conversation between the characters (lively multi-turn dialogue back and forth as fits the moment)."""
+{mem_block}{recent_conv_block}
+Generate a natural conversation between the characters (2–3 lines ±1 as fits the moment; if you organically include another nearby Sim — add +1 line per extra Sim)."""
     else:
         env_lines = []
         if location_desc:
@@ -10317,8 +11302,8 @@ Generate a full, natural conversation between the characters (lively multi-turn 
             prompt = f"""БЕСЕДА В КОМПАНИИ ({len(participants)} УЧАСТНИКОВ):{env_block}
 УЧАСТНИКИ РАЗГОВОРА:
 {part_block}
-{mem_block}
-Сгенерируй полноценный живой разговор между участниками этой компании (живой непринужденный обмен репликами, реакции, комментарии и подхватывание темы)."""
+{mem_block}{recent_conv_block}
+Сгенерируй живой разговор между участниками (базово 2–3 реплики ±1 для двоих собеседников и +1 реплика за каждого дополнительного сима, которого ты решишь подключить к беседе)."""
         else:
             prompt = f"""ДИАЛОГ МЕЖДУ ПЕРСОНАЖАМИ:{env_block}
 ПЕРСОНАЖ 1 ({actor_name}):
@@ -10329,15 +11314,23 @@ Generate a full, natural conversation between the characters (lively multi-turn 
 
 ОТНОШЕНИЯ МЕЖДУ ПЕРСОНАЖАМИ:
 {rel_title}
-{mem_block}
-Сгенерируй полноценный живой разговор между собеседниками (естественный диалог туда и обратно, сколько требуется для живого обсуждения темы)."""
+{mem_block}{recent_conv_block}
+Сгенерируй живой разговор между собеседниками (2–3 реплики ±1 по ситуации; если решишь органично подключить кого-то из присутствующих рядом — +1 реплика за дополнительного сима)."""
 
     all_names = [p.get("name") for p in participants] if (participants and isinstance(participants, list)) else [actor_name, target_name]
     sim_title = " & ".join(filter(None, all_names)) or f"{actor_name} & {target_name}"
     raw_reply = execute_llm_request(prompt, sim_name=sim_title, system_prompt_override=sys_prompt, is_raw=True)
-    clean_reply = raw_reply
-    if "</think>" in clean_reply:
-        clean_reply = clean_reply.split("</think>")[-1].strip()
+    if _is_llm_error_text(raw_reply):
+        err_str = (raw_reply or "").strip()
+        print(f"[SIMPLIFIED DIALOGUE ERROR] {err_str}")
+        return {
+            "status": "error",
+            "success": False,
+            "dialogue": [],
+            "raw_text": err_str,
+            "error": err_str,
+        }
+    clean_reply = _strip_think_tags_text(raw_reply or "")
 
     # Extract JSON
     dialogue_lines = []
@@ -10358,20 +11351,27 @@ Generate a full, natural conversation between the characters (lively multi-turn 
                 pass
 
     if not dialogue_lines:
+        known_speakers = {str(n).strip().lower() for n in all_names if n and str(n).strip()}
         lines = [ln.strip() for ln in clean_reply.split("\n") if ln.strip()]
         for ln in lines:
             if ":" in ln:
                 parts = ln.split(":", 1)
                 spk = parts[0].strip().strip('*-•"«»')
                 txt = parts[1].strip().strip('"«»')
-                if spk and txt:
-                    dialogue_lines.append({"speaker": spk, "text": txt})
+                if not spk or not txt:
+                    continue
+                spk_low = spk.lower()
+                # Accept fallback line only if speaker matches one of the Sims in the scene
+                if known_speakers and not any(kn in spk_low or spk_low in kn for kn in known_speakers):
+                    continue
+                dialogue_lines.append({"speaker": spk, "text": txt})
 
     valid_lines = []
+    default_spk = "Sim" if is_en else "Персонаж"
     if isinstance(dialogue_lines, list):
         for item in dialogue_lines:
             if isinstance(item, dict):
-                spk = str(item.get("speaker") or item.get("name") or "Персонаж").strip()
+                spk = str(item.get("speaker") or item.get("name") or default_spk).strip()
                 txt = str(item.get("text") or item.get("line") or "").strip()
                 if spk and txt:
                     txt = strip_emojis(txt)
@@ -10380,230 +11380,9 @@ Generate a full, natural conversation between the characters (lively multi-turn 
     return {
         "status": "success",
         "dialogue": valid_lines,
+        "raw_reply": clean_reply,
         "raw_text": clean_reply
     }
-
-
-def execute_autonomous_dialogue_request(req_json: dict) -> dict:
-
-    """
-
-    Executes autonomous living dialogue between active household Sims.
-
-    Batch multi-turn exchange (1 to 4 lines) based on living context and director premise.
-
-    """
-
-    cfg = load_config()
-
-    is_en = ((cfg.get("language") or "ru").lower() == "en")
-
-
-
-    prompt = str(req_json.get("prompt") or "").strip()
-
-    premise = str(req_json.get("premise") or "").strip()
-
-    trigger_type = str(req_json.get("trigger_type") or "ambient").strip()
-
-    dossier = (req_json.get("third_party_dossier") or req_json.get("dossier") or "").strip()
-
-    if dossier:
-
-        prompt = f"{prompt}\n\n{dossier}"
-
-
-
-    add_director_telemetry(
-
-        event_type="LLM_REQUEST",
-
-        title=f"Отправка запроса в нейросеть [{trigger_type}]" if not is_en else f"Sending LLM request [{trigger_type}]",
-
-        details=[
-
-            f"Повод: {premise}" if not is_en else f"Premise: {premise}",
-
-            f"Размер контекста: {len(prompt)} символов" if not is_en else f"Context size: {len(prompt)} chars"
-
-        ],
-
-        level="INFO"
-
-    )
-
-
-
-    default_sys = DEFAULT_AUTONOMOUS_DIALOGUE_SYSTEM_PROMPT_EN if is_en else DEFAULT_AUTONOMOUS_DIALOGUE_SYSTEM_PROMPT
-
-    sys_prompt = resolve_system_prompt(cfg, "PROMPT_AUTONOMOUS_DIALOGUE", default_sys, "autonomous_dialogue_system_prompt").strip()
-
-
-
-    raw_reply = execute_llm_request(prompt, sim_name="Autonomous Director", system_prompt_override=sys_prompt, is_raw=True)
-
-
-
-    clean_reply = raw_reply
-
-    if "</think>" in clean_reply:
-
-        clean_reply = clean_reply.split("</think>")[-1].strip()
-
-
-
-    # Extract JSON
-
-    dialogue_lines = []
-
-    code_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_reply, re.DOTALL)
-
-    candidate_json = code_match.group(1) if code_match else clean_reply
-
-
-
-    try:
-
-        data = json.loads(candidate_json)
-
-        if isinstance(data, dict) and "dialogue" in data:
-
-            dialogue_lines = data["dialogue"]
-
-    except Exception:
-
-        match_fallback = re.search(r'\{\s*"dialogue"\s*:\s*\[.*?\]\s*\}', clean_reply, re.DOTALL)
-
-        if match_fallback:
-
-            try:
-
-                data = json.loads(match_fallback.group(0))
-
-                dialogue_lines = data.get("dialogue", [])
-
-            except Exception:
-
-                pass
-
-
-
-    if not dialogue_lines:
-
-        lines = [ln.strip() for ln in clean_reply.split("\n") if ln.strip()]
-
-        for ln in lines:
-
-            if ":" in ln:
-
-                parts = ln.split(":", 1)
-
-                spk = parts[0].strip().strip('*-•"«»')
-
-                txt = parts[1].strip().strip('"«»')
-
-                if spk and txt:
-
-                    dialogue_lines.append({"speaker": spk, "text": txt})
-
-
-
-    # Count unique speakers to adjust max allowed lines (base 4 for 2 speakers, +1 for each additional speaking sim)
-
-    unique_speakers = set()
-
-    if isinstance(dialogue_lines, list):
-
-        for item in dialogue_lines:
-
-            if isinstance(item, dict):
-
-                spk = str(item.get("speaker") or item.get("name") or "").strip()
-
-                if spk:
-
-                    unique_speakers.add(spk.lower())
-
-
-
-    extra_speakers = max(0, len(unique_speakers) - 2)
-
-    max_allowed_lines = min(10, 4 + extra_speakers)
-
-
-
-    valid_lines = []
-
-    if isinstance(dialogue_lines, list):
-
-        for item in dialogue_lines:
-
-            if isinstance(item, dict):
-
-                spk = str(item.get("speaker") or item.get("name") or "Сим").strip()
-
-                txt = str(item.get("text") or item.get("line") or "").strip()
-
-                if spk and txt:
-
-                    txt = strip_emojis(txt)
-
-                    valid_lines.append({"speaker": spk, "text": txt})
-
-                    if len(valid_lines) >= max_allowed_lines:
-
-                        break
-
-
-
-    print("=" * 65)
-
-    print(f" [AUTONOMOUS LIVING DIALOGUE ({trigger_type})]" if is_en else f" [АВТОНОМНОЕ ЖИВОЕ ОБЩЕНИЕ ({trigger_type})]")
-
-    if premise:
-
-        print(f" Premise: {premise}" if is_en else f" Повод: {premise}")
-
-    for idx, line in enumerate(valid_lines, 1):
-
-        print(f" {idx}. {line['speaker']}: «{line['text']}»")
-
-    print("=" * 65 + "\n")
-
-
-
-    add_director_telemetry(
-
-        event_type="LLM_RESPONSE",
-
-        title=f"Нейросеть сгенерировала диалог ({len(valid_lines)} реплик)" if not is_en else f"LLM generated dialogue ({len(valid_lines)} lines)",
-
-        details=[f"{line['speaker']}: «{line['text']}»" for line in valid_lines],
-
-        level="SUCCESS",
-
-        raw_data={"dialogue": valid_lines, "trigger_type": trigger_type, "premise": premise}
-
-    )
-
-
-
-    return {
-
-        "success": True,
-
-        "dialogue": valid_lines,
-
-        "premise": premise,
-
-        "trigger_type": trigger_type,
-
-        "raw_reply": clean_reply
-
-    }
-
-
-
 
 
 def execute_summarize_request(req_json: dict) -> dict:
@@ -10688,25 +11467,13 @@ def execute_summarize_request(req_json: dict) -> dict:
 
     raw_resp = execute_llm_request(prompt, sim_name=f"{sender_name} & {recipient_name}", system_prompt_override=sys_prompt, is_raw=True)
 
-    raw_resp = str(raw_resp).strip()
+    raw_resp = _strip_think_tags_text(str(raw_resp))
 
+    if _is_llm_error_text(raw_resp):
 
+        print(f"[MEMORY] Skipping summary due to LLM error: {raw_resp}")
 
-    raw_resp = re.sub(r'<think>.*?</think>', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<thought>.*?</thought>', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<think>.*', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<thought>.*', '', raw_resp, flags=re.DOTALL).strip()
-
-    if "</think>" in raw_resp:
-
-        raw_resp = raw_resp.split("</think>")[-1].strip()
-
-    if "</thought>" in raw_resp:
-
-        raw_resp = raw_resp.split("</thought>")[-1].strip()
+        return {"has_memory": False, "error": raw_resp}
 
 
 
@@ -10760,7 +11527,7 @@ def execute_summarize_request(req_json: dict) -> dict:
 
 
 
-    summary_text = summary_text.strip(' "\'«»\n\r\t')
+    summary_text = strip_emojis(summary_text.strip(' "\'«»\n\r\t'))
 
     clean_upper = summary_text.upper()
 
@@ -10942,25 +11709,13 @@ def execute_group_summarize_request(req_json: dict) -> dict:
 
     raw_resp = execute_llm_request(prompt, sim_name=f"Group Memory: {group_name}", system_prompt_override=sys_prompt, is_raw=True)
 
-    raw_resp = str(raw_resp).strip()
+    raw_resp = _strip_think_tags_text(str(raw_resp))
 
+    if _is_llm_error_text(raw_resp):
 
+        print(f"[GROUP MEMORY] Skipping summary due to LLM error: {raw_resp}")
 
-    raw_resp = re.sub(r'<think>.*?</think>', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<thought>.*?</thought>', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<think>.*', '', raw_resp, flags=re.DOTALL).strip()
-
-    raw_resp = re.sub(r'<thought>.*', '', raw_resp, flags=re.DOTALL).strip()
-
-    if "</think>" in raw_resp:
-
-        raw_resp = raw_resp.split("</think>")[-1].strip()
-
-    if "</thought>" in raw_resp:
-
-        raw_resp = raw_resp.split("</thought>")[-1].strip()
+        return {"has_memory": False, "memories": [], "error": raw_resp}
 
 
 
@@ -11292,6 +12047,12 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                 parsed = urlparse(origin)
 
+                scheme = (parsed.scheme or "").lower()
+
+                if scheme in ("file", "app"):
+
+                    return False
+
                 hostname = (parsed.hostname or "").lower()
 
                 if not hostname or hostname not in ("localhost", "127.0.0.1", "::1"):
@@ -11338,137 +12099,209 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
 
 
+    def _send_bytes_response(self, status_code: int, body: bytes, content_type: str = "", extra_headers=None):
+        """Send an HTTP/1.1 response with explicit Content-Length and Connection: close before headers terminate."""
+        self.send_response(status_code)
+        if content_type:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for hk, hv in extra_headers:
+                self.send_header(hk, hv)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
     def _validate_request_security(self):
-
         """Unified validation for Origin/Referer and Host headers."""
-
         if self._is_untrusted_host() or self._is_untrusted_origin():
-
-            self.send_response(403)
-
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-
-            self.end_headers()
-
-            self.wfile.write(b"Forbidden: Untrusted host or cross-origin request blocked.")
-
+            self._send_bytes_response(
+                403,
+                b"Forbidden: Untrusted host or cross-origin request blocked.",
+                "text/plain; charset=utf-8",
+            )
             return False
-
         return True
 
-
-
     def do_OPTIONS(self):
-
         # Reject browser preflight requests from untrusted external origins or hosts
-
         if not self._validate_request_security():
-
             return
-
         self.send_response(204)
-
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
         self.end_headers()
 
-
-
     def do_GET(self):
-
         if not self._validate_request_security():
-
             return
 
-
-
         clean_path = self.path.split("?")[0].rstrip("/")
-
         if clean_path in ("/health", "/status", ""):
-
-            self.send_response(200)
-
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-
-            self.end_headers()
-
-            resp = {"status": "ok", "message": "AI Bridge is alive and running"}
-
-            self.wfile.write(json.dumps(resp).encode("utf-8"))
-
+            body = json.dumps({"status": "ok", "message": "AI Bridge is alive and running"}).encode("utf-8")
+            self._send_bytes_response(200, body, "application/json; charset=utf-8")
         elif clean_path == "/config":
-
-            self.send_response(200)
-
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-
-            self.end_headers()
-
             cfg = load_config()
+            conn_info = resolve_active_connection(cfg)
+            c_mode = conn_info["conn_mode"]
+            p_id = conn_info["provider_id"]
+            p_name = conn_info["provider_name"]
+            c_model = conn_info["model"]
+            ep_url = resolve_chat_url(conn_info["raw_url"], conn_info["api_type"])
+            raw_key = (conn_info.get("api_key") or "").strip()
+            key_is_set = bool(raw_key and raw_key not in ("local", "none"))
+            key_preview = ""
+            if key_is_set:
+                key_preview = (raw_key[:6] + "..." + raw_key[-4:]) if len(raw_key) > 12 else "***"
 
-            # SECURITY: strictly sanitize config to prevent API key leakage over HTTP
+            or_prov = ""
+            if p_id == "openrouter":
+                or_prov = _resolve_openrouter_provider_for_model(cfg, c_model)
 
+            # SECURITY: strictly sanitize config to prevent full API key leakage over HTTP
             safe_cfg = {
-
-                "active_model": cfg.get("active_model", ""),
-
-                "provider": cfg.get("provider", ""),
-
+                "conn_mode": c_mode,
+                "provider_id": p_id,
+                "provider_name": p_name,
+                "provider": p_name,
+                "api_type": conn_info["api_type"],
+                "model": c_model,
+                "active_model": c_model,
+                "endpoint_url": ep_url,
+                "openrouter_provider": or_prov,
+                "openrouter_allow_fallbacks": bool(cfg.get("openrouter_allow_fallbacks", False)),
+                "reasoning_effort": str(cfg.get("reasoning_effort") or "auto"),
+                "context_length": _safe_cfg_int(cfg.get("context_length"), 16384),
+                "max_tokens": _safe_cfg_int(cfg.get("max_tokens"), 1500),
+                "temperature": _safe_cfg_float(cfg.get("temperature"), 0.7),
+                "language": str(cfg.get("language") or "ru"),
+                "api_key_set": key_is_set,
+                "api_key_preview": key_preview,
                 "bridge_port": cfg.get("bridge_port", DEFAULT_PORT),
-
-                "language": cfg.get("language", "RU"),
-
-                "max_tokens": cfg.get("max_tokens", 1000),
-
-                "temperature": cfg.get("temperature", 0.7),
-
                 "actions_enabled": cfg.get("actions_enabled", True),
-
-                "version": "0.9.2 Pre-Release"
-
+                "version": "0.9.4",
             }
+            body = json.dumps(safe_cfg, ensure_ascii=False).encode("utf-8")
+            self._send_bytes_response(200, body, "application/json; charset=utf-8")
+        elif clean_path == "/crossdomain.xml":
+            policy = (
+                b'<?xml version="1.0"?>\n'
+                b'<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
+                b'<cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>\n'
+            )
+            self._send_bytes_response(200, policy, "application/xml; charset=utf-8")
+        elif clean_path == "/simgram_photo":
+            parsed_url = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed_url.query)
+            photo_id = _sanitize_photo_id((qs.get("id") or qs.get("photo_id") or [""])[0])
+            raw_path = (qs.get("path") or [""])[0]
+            shot_name = (qs.get("name") or qs.get("screenshot") or [""])[0]
+            cache_flag = ((qs.get("cache") or ["1"])[0] == "1")
+            has_explicit_dim = "max_dim" in qs and bool(qs.get("max_dim"))
+            try:
+                max_dim = int((qs.get("max_dim") or [str(MAX_UI_PHOTO_DIM)])[0])
+            except Exception:
+                max_dim = MAX_UI_PHOTO_DIM
+            max_dim = max(128, min(2560, max_dim))
 
-            self.wfile.write(json.dumps(safe_cfg, ensure_ascii=False).encode("utf-8"))
+            resolved = _resolve_simgram_image_path(
+                raw_path=raw_path,
+                photo_id=photo_id,
+                screenshot_name=shot_name,
+                prefer_source=True,
+            )
+            if not resolved:
+                err_b = json.dumps({"error": "photo not found"}).encode("utf-8")
+                self._send_bytes_response(404, err_b, "application/json; charset=utf-8")
+                return
 
-        elif clean_path == "/director_logs":
+            try:
+                media_dir = _get_simgram_media_dir(create=True)
+                in_media_cache = os.path.normcase(os.path.commonpath([os.path.realpath(resolved), media_dir])) == os.path.normcase(media_dir)
+                if HAS_PIL and PILImage is not None and not in_media_cache:
+                    img_bytes, _, _, _, _ = _encode_jpeg_with_pillow(
+                        resolved,
+                        max_dim=max_dim,
+                        quality=UI_PHOTO_JPEG_QUALITY,
+                    )
+                    content_type = "image/jpeg"
+                    if cache_flag and photo_id and max_dim >= MAX_UI_PHOTO_DIM:
+                        _cache_simgram_jpeg(photo_id, img_bytes, overwrite=True)
+                elif HAS_PIL and PILImage is not None and in_media_cache and has_explicit_dim and max_dim < MAX_UI_PHOTO_DIM:
+                    img_bytes, _, _, _, _ = _encode_jpeg_with_pillow(
+                        resolved,
+                        max_dim=max_dim,
+                        quality=UI_PHOTO_JPEG_QUALITY,
+                    )
+                    content_type = "image/jpeg"
+                else:
+                    with open(resolved, "rb") as f:
+                        img_bytes = f.read()
+                    ext = os.path.splitext(resolved)[1].lower()
+                    content_type = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
 
-            self.send_response(200)
-
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-
-            self.end_headers()
-
-            since_id = 0
-
-            if "?" in self.path:
-
-                try:
-
-                    from urllib.parse import parse_qs, urlparse
-
-                    qs = parse_qs(urlparse(self.path).query)
-
-                    since_id = int(qs.get("since", [0])[0])
-
-                except Exception:
-
-                    since_id = 0
-
-
-
-            with DIRECTOR_LOGS_LOCK:
-
-                logs_to_send = [l for l in DIRECTOR_TELEMETRY_LOGS if l.get("id", 0) > since_id]
-
-                max_id = DIRECTOR_TELEMETRY_LOGS[-1]["id"] if DIRECTOR_TELEMETRY_LOGS else since_id
-
-
-
-            resp = {"status": "ok", "logs": logs_to_send, "last_id": max_id}
-
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-
+                self._send_bytes_response(
+                    200,
+                    img_bytes,
+                    content_type,
+                    extra_headers=[("Cache-Control", "max-age=3600")],
+                )
+            except Exception as photo_err:
+                err_b = json.dumps({"error": str(photo_err)}).encode("utf-8")
+                self._send_bytes_response(500, err_b, "application/json; charset=utf-8")
         else:
+            self._send_bytes_response(404, b"", "")
 
-            self.send_response(404)
+
+
+    def _read_json_body(self) -> Optional[dict]:
+
+        raw_cl = self.headers.get("Content-Length", "0")
+
+        try:
+
+            content_length = int(raw_cl)
+
+        except (TypeError, ValueError):
+
+            err_b = json.dumps({"success": False, "error": "Invalid Content-Length header"}).encode("utf-8")
+
+            self._send_bytes_response(400, err_b, "application/json; charset=utf-8")
+
+            return None
+
+        if content_length < 0 or content_length > 32 * 1024 * 1024:
+
+            err_b = json.dumps({"success": False, "error": "Unsupported Content-Length"}).encode("utf-8")
+
+            self._send_bytes_response(400, err_b, "application/json; charset=utf-8")
+
+            return None
+
+        post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+
+        try:
+
+            parsed = json.loads(post_data.decode("utf-8"))
+
+        except Exception as je:
+
+            err_b = json.dumps({"success": False, "error": f"Invalid JSON: {je}"}).encode("utf-8")
+
+            self._send_bytes_response(400, err_b, "application/json; charset=utf-8")
+
+            return None
+
+        if not isinstance(parsed, dict):
+
+            err_b = json.dumps({"success": False, "error": "JSON payload must be an object"}).encode("utf-8")
+
+            self._send_bytes_response(400, err_b, "application/json; charset=utf-8")
+
+            return None
+
+        return parsed
 
 
 
@@ -11482,73 +12315,42 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
         clean_path = self.path.split("?")[0].rstrip("/")
 
-        if clean_path == "/director_log":
-
-            content_length = int(self.headers.get("Content-Length", 0))
-
-            post_data = self.rfile.read(content_length)
-
-            try:
-
-                log_data = json.loads(post_data.decode("utf-8"))
-
-                item = add_director_telemetry(
-
-                    event_type=log_data.get("type", "EVENT"),
-
-                    title=log_data.get("title", ""),
-
-                    details=log_data.get("details", []),
-
-                    level=log_data.get("level", "INFO"),
-
-                    raw_data=log_data.get("data", {})
-
-                )
-
-                body = json.dumps({"status": "ok", "id": item["id"]}).encode("utf-8")
-
-                self.send_response(200)
-
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-
-                self.send_header("Content-Length", str(len(body)))
-
-                self.send_header("Connection", "close")
-
-                self.end_headers()
-
-                self.wfile.write(body)
-
-            except Exception as e:
-
-                err_body = json.dumps({"status": "error", "message": str(e)}).encode("utf-8")
-
-                self.send_response(500)
-
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-
-                self.send_header("Content-Length", str(len(err_body)))
-
-                self.send_header("Connection", "close")
-
-                self.end_headers()
-
-                self.wfile.write(err_body)
-
+        if clean_path == "/simgram_pick_pc_photos":
+            req_json = self._read_json_body()
+            if req_json is None:
+                return
+            res_dict = handle_simgram_pick_pc_photos(req_json)
+            body = json.dumps(res_dict, ensure_ascii=False).encode("utf-8")
+            self._send_bytes_response(200, body, "application/json; charset=utf-8")
             return
 
+        if clean_path == "/simgram_cache_rgb64":
+            req_json = self._read_json_body()
+            if req_json is None:
+                return
+            res_dict = handle_simgram_cache_rgb64(req_json)
+            body = json.dumps(res_dict, ensure_ascii=False).encode("utf-8")
+            self._send_bytes_response(200, body, "application/json; charset=utf-8")
+            return
 
+        if clean_path == "/simgram_group_chat":
+            req_json = self._read_json_body()
+            if req_json is None:
+                return
+            res_dict = handle_simgram_group_chat(req_json)
+            body = json.dumps(res_dict, ensure_ascii=False).encode("utf-8")
+            self._send_bytes_response(200, body, "application/json; charset=utf-8")
+            return
 
         if clean_path in ("/summarize", "/api/summarize", "/group_summarize"):
 
-            content_length = int(self.headers.get("Content-Length", 0))
+            req_json = self._read_json_body()
 
-            post_data = self.rfile.read(content_length)
+            if req_json is None:
+
+                return
 
             try:
-
-                req_json = json.loads(post_data.decode("utf-8"))
 
                 req_type = req_json.get("type", "")
 
@@ -11610,17 +12412,15 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
 
 
-        if clean_path in ("/chat", "/generate", "/api/chat", "/group_chat", "/npc_group_chat", "/friend_chat", "/direct_dialogue", "/autonomous_dialogue", "/simplified_dialogue", "/context", "/dump_context", ""):
+        if clean_path in ("/chat", "/generate", "/api/chat", "/group_chat", "/npc_group_chat", "/friend_chat", "/direct_dialogue", "/simplified_dialogue", "/context", "/dump_context", ""):
 
-            content_length = int(self.headers.get("Content-Length", 0))
+            req_json = self._read_json_body()
 
-            post_data = self.rfile.read(content_length)
+            if req_json is None:
 
-
+                return
 
             try:
-
-                req_json = json.loads(post_data.decode("utf-8"))
 
                 req_type = req_json.get("type", "thought")
 
@@ -11636,9 +12436,7 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                     is_en = (cfg.get("game_language") == "en" or cfg.get("language") == "en")
 
-                    if not cfg.get("special_situations_enabled", False):
-
-                        prompt = re.sub(r'(ВАЖНО \(Запретная связь[^\)]*\)|IMPORTANT \(Forbidden Relationship[^\)]*\)):[^\n]+(\n\n)?', '', prompt, flags=re.IGNORECASE)
+                    prompt = re.sub(r'(ВАЖНО \(Запретная связь[^\)]*\)|IMPORTANT \(Forbidden Relationship[^\)]*\)):[^\n]+(\n\n)?', '', prompt, flags=re.IGNORECASE)
 
 
 
@@ -11704,9 +12502,11 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                     res_dict = execute_direct_dialogue_request(req_json)
 
+                    dd_err = res_dict.get("error")
+
                     response_payload = {
 
-                        "success": True,
+                        "success": not bool(dd_err),
 
                         "is_group": res_dict.get("is_group", False),
 
@@ -11730,27 +12530,11 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                         "action_type": res_dict.get("action_type"),
 
+                        "action_actor": res_dict.get("action_actor"),
+
                         "speaker": res_dict.get("speaker", "Персонаж"),
 
-                    }
-
-                    body = json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
-
-                elif req_type == "autonomous_dialogue" or clean_path == "/autonomous_dialogue":
-
-                    res_dict = execute_autonomous_dialogue_request(req_json)
-
-                    response_payload = {
-
-                        "success": res_dict.get("success", True),
-
-                        "dialogue": res_dict.get("dialogue", []),
-
-                        "premise": res_dict.get("premise", ""),
-
-                        "trigger_type": res_dict.get("trigger_type", "ambient"),
-
-                        "raw_reply": res_dict.get("raw_reply", ""),
+                        "error": dd_err,
 
                     }
 
@@ -11760,15 +12544,19 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                     reply_text, info_dict = execute_friend_chat_request(req_json)
 
+                    fc_err = info_dict.get("error") if isinstance(info_dict, dict) else None
+
                     response_payload = {
 
-                        "success": True,
+                        "success": not bool(fc_err),
 
-                        "reply": reply_text,
+                        "reply": "" if fc_err else reply_text,
 
-                        "text": reply_text,
+                        "text": "" if fc_err else reply_text,
 
                         "info": info_dict,
+
+                        "error": fc_err,
 
                     }
 
@@ -11780,7 +12568,7 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                     response_payload = {
 
-                        "status": "success",
+                        "status": res_dict.get("status", "success"),
 
                         "success": res_dict.get("success", True),
 
@@ -11790,7 +12578,9 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                         "trigger_type": res_dict.get("trigger_type", "ambient"),
 
-                        "raw_reply": res_dict.get("raw_reply", ""),
+                        "raw_reply": res_dict.get("raw_reply") or res_dict.get("raw_text", ""),
+
+                        "error": res_dict.get("error"),
 
                     }
 
@@ -11798,15 +12588,17 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                 elif req_type == "npc_group_chat" or clean_path == "/npc_group_chat":
 
-                    parsed_msgs, answering_sims = execute_npc_group_chat_request(req_json)
+                    parsed_msgs, answering_sims, gc_err = execute_npc_group_chat_request(req_json, return_error=True)
 
                     response_payload = {
 
-                        "success": True,
+                        "success": not bool(gc_err),
 
-                        "messages": parsed_msgs,
+                        "messages": [] if gc_err else parsed_msgs,
 
-                        "answering_sims": answering_sims,
+                        "answering_sims": [] if gc_err else answering_sims,
+
+                        "error": gc_err,
 
                     }
 
@@ -11814,15 +12606,17 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                 elif req_type == "group_chat" or clean_path == "/group_chat" or (clean_path in ("/chat", "/generate", "/api/chat", "") and "participants" in req_json):
 
-                    parsed_msgs, answering_sims = execute_group_chat_request(req_json)
+                    parsed_msgs, answering_sims, gc_err = execute_group_chat_request(req_json, return_error=True)
 
                     response_payload = {
 
-                        "success": True,
+                        "success": not bool(gc_err),
 
-                        "messages": parsed_msgs,
+                        "messages": [] if gc_err else parsed_msgs,
 
-                        "answering_sims": answering_sims,
+                        "answering_sims": [] if gc_err else answering_sims,
+
+                        "error": gc_err,
 
                     }
 
@@ -11830,9 +12624,9 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                 elif req_type == "chat" or "recipient_name" in req_json:
 
-                    reply, delta_fr, delta_rom, memory_summary, memory_days, action_type = execute_chat_request(req_json)
+                    reply, delta_fr, delta_rom, memory_summary, memory_days, action_type, action_actor, photo_descriptions = _execute_chat_request_impl(req_json)
 
-                    is_success = not (reply.startswith("Ошибка") or reply.startswith("Error") or reply.startswith("Не удалось"))
+                    is_success = not _is_llm_error_text(reply)
 
                     response_payload = {
 
@@ -11852,6 +12646,10 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                         "action_type": action_type if is_success else None,
 
+                        "action_actor": action_actor if is_success else None,
+
+                        "photo_descriptions": photo_descriptions if is_success else [],
+
                         "error": reply if not is_success else None,
 
                     }
@@ -11868,7 +12666,7 @@ class AIBridgeRequestHandler(BaseHTTPRequestHandler):
 
                     thought = execute_llm_request(prompt, sim_name)
 
-                    is_success = not (thought.startswith("Ошибка") or thought.startswith("Error") or thought.startswith("Не удалось"))
+                    is_success = not _is_llm_error_text(thought)
 
 
 
@@ -12046,10 +12844,6 @@ def run_server(port=DEFAULT_PORT):
 
     api_key = conn_info["api_key"]
 
-
-
-    cfg = load_config()
-
     lang = (cfg.get("language") or "ru").lower()
 
     is_en = (lang == "en")
@@ -12160,7 +12954,25 @@ def run_server(port=DEFAULT_PORT):
 
     server_address = ("127.0.0.1", port)
 
-    httpd = AIBridgeServer(server_address, AIBridgeRequestHandler)
+    try:
+
+        httpd = AIBridgeServer(server_address, AIBridgeRequestHandler)
+
+    except OSError as bind_err:
+
+        err_msg = (
+
+            f"[ERROR] Failed to bind port {port} ({bind_err}). Is Synapse Bridge already running?"
+
+            if is_en
+
+            else f"[ОШИБКА] Не удалось занять порт {port} ({bind_err}). Возможно, Synapse Bridge уже запущен?"
+
+        )
+
+        print(err_msg)
+
+        raise RuntimeError(err_msg) from bind_err
 
 
 
