@@ -1,59 +1,82 @@
 SYNAPSE — LICENSE AND TERMS OF USE
-Version 0.4 · Project Author: Thistle (ThistleInHeart)
-Official Project Page: https://github.com/ThistleInHeart/Synapse
+Version 0.5 · Project Author: Thistle (ThistleInHeart)
+Official Project Page on GitHub: https://github.com/ThistleInHeart/Synapse
+Official Author Contacts:
+- Russian-speaking Community (Synthira): https://synthira.ru/user/Thistle/
+- International Community (LoversLab): https://www.loverslab.com/profile/10089097-t-h-i-s-t-l-e/
 
 0. GENERAL PROVISIONS
 Synapse is a free project. It has always been, is, and will remain completely free of charge.
 
-This license applies to all parts of the project:
+This license applies to all original parts of the project:
 - In-game mod (.package and .ts4script)
 - Bridge application and launcher (ai_bridge.py, launcher.py, .bat files, any .exe files)
-- Original presets, system prompts, configuration files, and settings
+- Original author presets, system prompts, configuration files, and settings
 - Icons, UI design, visual assets, and graphics
 - Documentation, texts, and descriptions
 
 Distribution terms are divided into two parts:
-- Creative materials (graphics, icons, UI design, texts, original prompts and author's presets, documentation) are licensed under the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License (CC BY-NC-ND 4.0): https://creativecommons.org/licenses/by-nc-nd/4.0/
+- Creative materials (graphics, icons, UI design, texts, original prompts and author presets, documentation) are licensed under the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License (CC BY-NC-ND 4.0): https://creativecommons.org/licenses/by-nc-nd/4.0/
 - Software code (mod, bridge application, launcher, scripts, executable files) is governed by the author's proprietary Source-Available terms set forth below. Creative Commons officially does not recommend its licenses for software; therefore, the code is licensed separately.
+
+Third-Party Components. The terms of this license do not apply to third-party open-source libraries and components included in the project or its builds (including .exe binaries). Such components are used and distributed under the terms of their respective original licenses.
 
 The permissions described in Section 1 (specifically regarding translations and user presets) constitute express individual exceptions granted by the author to the NoDerivatives condition of the CC BY-NC-ND 4.0 license and apply strictly within the scope defined in this document.
 
 1. WHAT IS PERMITTED
-- Free Redistribution. You may share the original, unmodified mod and bridge application on any websites, forums, and file-hosting services, provided all of the following conditions are met: mandatory attribution to the author (Thistle / ThistleInHeart), indication of the current version number, and a direct active link to the official project repository (https://github.com/ThistleInHeart/Synapse); download access must be strictly free of charge and unmonetized; the archive and all files must be distributed strictly separately (outside of collections and modpacks) and in their original state, without any modifications or repackaging of executable files.
-- Translations into Any Language. Full freedom is granted for standalone translation files: early access, subscriptions, donations, and any form of monetization. No royalties to the author are required. Translation files are strictly defined as: a standalone .package file for the game installed on top of the original mod; a standalone .txt / .json localization file for the bridge application. Conditions: the translation must be distributed strictly as a separate file, and the release must not include files of the original mod or bridge; the translator must explicitly state that the translation is unofficial (fan-made) and that the mod author (Thistle) is not affiliated with any fundraising for the localization; translators are solely responsible for complying with the EA Modding Policy.
-- Custom Presets and Prompts. Users are permitted to create their own (authored from scratch) character, lore presets, and system prompts for Synapse, share them with the community, or monetize them under any terms. Conditions: they must be distributed strictly as standalone configuration/text files without bundling code, original author presets, or files of the mod or bridge itself; in case of paid distribution, the preset creator must explicitly state that the material is unofficial and that the mod author (Thistle) is not affiliated with any fundraising.
+- Personal Non-Commercial Use. You are permitted to download, install, and run the mod, bridge application, and accompanying files free of charge for personal, non-commercial use.
+- Local Modification Strictly for Personal Use. You are permitted to modify the source code, scripts, configuration files, as well as locally adapt the author's original presets and prompts strictly for your own personal use on your own device, subject to the following conditions:
+  * any modified files are strictly prohibited from being published (including in public repositories and forks), uploaded publicly, or shared with third parties in any form (including private chats, channels, and acquaintances);
+  * you assume all risks related to the functionality, stability, and consequences of any changes you make.
+- Free Redistribution. You may share the original, unmodified mod and bridge application on any websites, forums, and file-hosting services, provided all of the following conditions are met:
+  * mandatory attribution to the author (Thistle / ThistleInHeart), indication of the exact version number of the distributed release, its edition type (SFW / NSFW / NSFW EXTRA, preserving the 18+ label where applicable), and a direct active link to the official project repository (https://github.com/ThistleInHeart/Synapse);
+  * download access must be strictly free of charge — without paid subscriptions, paid roles, donation walls, or mandatory ad-viewing services (standard website banner ads or optional file-host premium plans for faster downloads are permitted);
+  * the archive and all files must be distributed strictly separately (outside of compilations and modpacks) and in their original state, without any modifications or repackaging of executable files.
+- Translations into Any Language. No monetization restrictions are imposed by the Synapse author on standalone translation files (early access, subscriptions, donations are at the translator's discretion; no royalties to the author are required), provided the translator independently complies with the current EA Modding Policy. Translation files are strictly defined as: a standalone .package file for the game installed on top of the original mod; or a standalone .txt / .json localization file for the bridge application. Conditions:
+  * the translation must be distributed strictly as a separate file, and the release must not include files of the original mod or bridge;
+  * the translator must explicitly state that the translation is unofficial (fan-made) and that the mod author (Thistle) has no affiliation with any fundraising for the localization.
+- Custom Presets and Prompts. Users are permitted to create their own (written from scratch) character, lore presets, and system prompts for Synapse, share them with the community, or monetize them under any terms. Conditions:
+  * they must be distributed strictly as standalone configuration/text files without including code, the author's original presets, or files of the mod or bridge itself;
+  * in case of paid distribution, the preset creator must explicitly state that the material is unofficial and that the mod author (Thistle) has no affiliation with any fundraising.
 - Integrations and Add-ons. Creation of external scripts and applications that communicate with the mod's API is permitted, provided they contain no Synapse code and are distributed free of charge.
 - Streaming, Videos, Reviews, and Guides. Permitted, including on monetized channels and publications, provided proper attribution and a link to the official project repository are included.
-- Code Inspection. Studying the project's source code (Source-Available) for educational and informational purposes, as well as for personal security auditing, is permitted.
+- Source Code Inspection and Project Contributions (GitHub). You are permitted to study the project's source code (Source-Available) for educational and informational purposes, as well as for personal security auditing. Creating a fork on GitHub is permitted solely for inspecting the code or submitting a Pull Request to the official repository; distributing builds from forks or maintaining independent public modifications without the author's consent is prohibited. By submitting a Pull Request, the contributor agrees to the inclusion and distribution of their contribution as part of the project under the terms of this license.
 
 2. WHAT IS STRICTLY PROHIBITED
-- Selling the mod, bridge application, their code, original presets and prompts of the author, any of their parts, assets, or modifications.
-- Distributing the mod, bridge, or any forks thereof via paid early access, paid roles, subscriptions, or paywalls (Patreon, Boosty, Ko-fi, private Telegram/Discord channels, and similar platforms). The only exception is strictly standalone translation files and custom presets/prompts created from scratch (Section 1).
+- Selling the mod, bridge application, their code, original author presets and prompts, or any parts, assets, or modifications thereof.
+- Distributing the mod, bridge, or any forks thereof via paid early access, paid roles, subscriptions, or paywalls (Patreon, Boosty, Ko-fi, private Telegram/Discord channels, and similar platforms). The only exception applies strictly to standalone localization files and user-created presets/prompts written from scratch (Section 1).
 - Collecting funds, donations, or tips in the name of the author (Thistle / ThistleInHeart) or under the pretext of funding the development or maintenance of the Synapse project.
-- Using mandatory ad-viewing link shorteners or monetized redirects (adf.ly, Linkvertise, and similar services) when publishing links to the mod or official repository.
 - Including the mod, bridge application, or any project files in any mod compilations, modpacks, game repacks, or pre-made Mods folders (whether paid or free).
-- Claiming authorship, or removing, modifying, or obscuring copyright notices, metadata, version numbers, or credits to the author.
-- Publishing modified versions of the mod, bridge, executable files, or assets without the express written consent of the author.
-- Using the "Synapse" name, icons, or project branding for third-party projects in a manner that misleads users regarding authorship.
-- Reuploading files to platforms where compliance with the above conditions is impossible.
+- Claiming authorship, or removing, modifying, or obscuring copyright notices, metadata, version numbers, or author credits.
+- Publishing, uploading to public access, or sharing with third parties modified versions of the mod, bridge, executable files, or assets without the express written consent of the author (local edits strictly for personal use on your own device without redistribution are permitted under Section 1; creating a GitHub fork is permitted solely for code inspection or submitting a Pull Request).
+- Using the "Synapse" name, icons, or project branding for your own projects in a manner that misleads users regarding authorship.
+- Reuploading files to platforms where compliance with the conditions above is impossible.
 
 3. IMPORTANT PROVISIONS
 - All prohibitions apply in full to any reworked, forked, or derivative versions.
 - Obtaining permission to modify the code does not grant the right to monetize it.
-- Permissions granted individually by the author are personal, non-transferable, and may be revoked upon violation of these terms.
-- Automatic Termination. Upon violation of any condition, the rights granted under this license terminate automatically and immediately. With respect to the software code, rights may be reinstated upon curing the violation solely at the author's discretion; with respect to materials covered by CC BY-NC-ND 4.0, reinstatement follows Section 6(b) of that license.
-- Versioning. The author reserves the right to modify the terms for future versions of the project. Previously released versions remain governed by the terms under which they were published; rights granted under CC BY-NC-ND 4.0 are irrevocable within the scope of that license.
-- Severability. If any provision of this license is found to be unenforceable, the remaining provisions shall remain in full force and effect.
+- Individual Permissions. To obtain express written consent from the author, you must contact the author via the official contacts listed in the header of this document (Synthira or LoversLab). Permissions granted by the author are personal, non-transferable, and may be revoked upon violation of these terms.
+- Automatic Termination. Upon violation of any condition, the rights granted under this license terminate automatically and immediately. With respect to the software code, they may be reinstated upon curing the violation solely at the author's decision; with respect to materials under CC BY-NC-ND 4.0, reinstatement follows Section 6(b) of that license.
+- Versioning. The author reserves the right to modify the terms for future versions of the project while maintaining the project's status as completely free of charge. Previously published versions remain governed by the terms under which they were released; rights granted under CC BY-NC-ND 4.0 are irrevocable within the scope of that license.
+- Governing Language. In the event that translations of this document into other languages exist and any discrepancies arise, the original Russian version shall prevail.
+- Severability. If any provision is found to be unenforceable, the remaining provisions shall remain in full force and effect.
 
-4. DISCLAIMER OF WARRANTIES AND LIMITATION OF LIABILITY
-Synapse is provided "AS IS", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, functionality, and compatibility (including compatibility with third-party translations and custom presets following mod updates).
+4. DISCLAIMER OF WARRANTIES, LIABILITY, AND AGE RESTRICTIONS (18+)
+Synapse is provided "AS IS", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, functionality, and compatibility (including compatibility with third-party translations and custom presets after mod updates).
 
-In no event shall the author be liable for any direct, indirect, incidental, special, or consequential damages arising out of the use of this project, including (but not limited to):
+The author shall not be liable for any direct or indirect damages arising out of the use of the project, including (but not limited to):
 - loss or corruption of game saves, damage to game files, or operating system malfunctions;
-- any financial charges, billing, token consumption, account suspensions, or rate-limit exhaustion incurred while using third-party API keys and cloud services;
-- the nature, accuracy, appropriateness, censorship, or legality of any text or other content generated by connected Large Language Models (LLMs). The mod author does not control and is not responsible for the outputs of third-party AI models;
+- any financial expenses, charges, token overuse, account bans, or limit exhaustion incurred when using third-party API keys and cloud services;
+- leakage or unauthorized use of the user's API keys and credentials;
+- the content, nature, accuracy, appropriateness, censorship, or legality of any text or other content generated by connected Large Language Models (LLMs). The mod author does not control third-party neural network outputs and bears no responsibility for them;
 - any consequences of transmitting user data to third-party AI service providers.
 
-The user is solely responsible for backing up their data, monitoring billing and usage limits on their API accounts, and complying with the Terms of Service of any third-party AI providers connected via the bridge application.
+The user is solely responsible for backing up their data, safeguarding their API keys and confidential information in configuration files and logs (including removing them before publishing files or requesting support), monitoring expenses on their API accounts, and complying with the terms of use of third-party AI services connected via the bridge application.
+
+Age Restrictions (18+) and Project Editions. The Synapse project is released in three editions: SFW, NSFW, and NSFW EXTRA. If the release title, archive name, or description of a specific version does not indicate its edition type, that version is automatically considered the NSFW EXTRA edition.
+- The NSFW and NSFW EXTRA editions (as well as any versions without an explicit edition label) are intended exclusively for adult users (18+ or the age of majority established by the laws of the user's country of residence).
+- By downloading, installing, or using the NSFW or NSFW EXTRA editions, the user confirms that they have reached the age of majority and assumes sole responsibility for complying with the laws of their jurisdiction.
+- Even when using the SFW edition, the author does not guarantee complete censorship of generated texts, as they are produced by third-party Large Language Models (LLMs).
+- When freely redistributing (Section 1) the NSFW and NSFW EXTRA editions, you must preserve the edition type label and the appropriate 18+ age warning, as well as comply with the rules of the hosting platform.
 
 DISCLAIMER: Synapse is not affiliated with, sponsored, or endorsed by Electronic Arts Inc. or Maxis. The Sims and The Sims logos are trademarks of Electronic Arts Inc. This mod is provided free of charge in accordance with the EA User Agreement and EA Modding Policy.
