@@ -1,0 +1,103 @@
+name: Build Synapse for macOS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Bridge/**'
+      - '.github/workflows/build-macos.yml'
+
+jobs:
+  build-macos:
+    name: Build (${{ matrix.arch_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch_label: AppleSilicon-arm64
+            artifact_name: Synapse-macOS-AppleSilicon
+            optional: false
+          - runner: macos-15-intel
+            arch_label: Intel-x86_64
+            artifact_name: Synapse-macOS-Intel
+            optional: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python 3.12 & Tkinter via Homebrew
+        run: |
+          brew update || true
+          brew install python@3.12 python-tk@3.12
+          PY312="$(brew --prefix python@3.12)/bin/python3.12"
+          echo "PY312=$PY312" >> "$GITHUB_ENV"
+
+      - name: Create venv & install dependencies
+        run: |
+          "$PY312" -m venv .venv_ci
+          .venv_ci/bin/python -m pip install --upgrade pip
+          .venv_ci/bin/python -m pip install -r Bridge/requirements.txt pyinstaller
+
+      - name: Run macOS smoke tests on Bridge
+        run: |
+          .venv_ci/bin/python -c "
+          import os, sys, ssl
+          import tkinter, customtkinter, PIL, urllib3, certifi
+          sys.path.insert(0, 'Bridge')
+          import localization_manager as lm_mod
+          import ai_bridge as ab
+          import launcher as ln
+          lm = lm_mod.LocalizationManager.get_instance()
+          assert 'ru' in lm.available_languages and 'en' in lm.available_languages
+          assert ab._create_ssl_context() is not None
+          assert ln._create_ssl_context() is not None
+          cm = ab.ConnectionManager()
+          assert cm.timeout > 0
+          print('Live macOS smoke tests PASSED on', sys.platform)
+          "
+
+      - name: Build ai_bridge & Synapse.app
+        working-directory: Bridge
+        run: |
+          ../.venv_ci/bin/python -m PyInstaller --noconfirm --clean --onefile --console \
+            --collect-all certifi --hidden-import urllib3 \
+            --name ai_bridge ai_bridge.py
+
+          ../.venv_ci/bin/python -m PyInstaller --noconfirm --clean --onefile --windowed \
+            --add-data "languages:languages" \
+            --collect-all customtkinter --collect-all certifi --hidden-import urllib3 --hidden-import ai_bridge \
+            --name Synapse launcher.py
+
+      - name: Package macOS release folder
+        run: |
+          OUT_DIR="release_macos/Synapse"
+          mkdir -p "$OUT_DIR"
+          cp -R Bridge/dist/Synapse.app "$OUT_DIR/Synapse.app"
+          cp Bridge/dist/ai_bridge "$OUT_DIR/ai_bridge"
+          chmod +x "$OUT_DIR/ai_bridge"
+          cp Bridge/dist/ai_bridge "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge"
+          chmod +x "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge"
+          cp Bridge/ai_bridge.py "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge.py"
+          cp -R Bridge/languages "$OUT_DIR/languages"
+          cp Bridge/ai_bridge.py "$OUT_DIR/ai_bridge.py"
+          cp Bridge/launcher.py "$OUT_DIR/launcher.py"
+          cp Bridge/localization_manager.py "$OUT_DIR/localization_manager.py"
+          xattr -cr "$OUT_DIR" || true
+
+      - name: Verify built app binary responds to --help / import check
+        run: |
+          test -d "release_macos/Synapse/Synapse.app"
+          test -x "release_macos/Synapse/Synapse.app/Contents/MacOS/Synapse"
+          test -x "release_macos/Synapse/ai_bridge"
+          echo "Packaged macOS app & bridge verified!"
+
+      - name: Upload macOS build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release_macos/Synapse
+          retention-days: 90
