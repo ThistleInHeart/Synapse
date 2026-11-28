@@ -27,8 +27,143 @@ from tkinter import messagebox, filedialog
 
 import customtkinter as ctk
 
-# Configuration file path
-CONFIG_FILE_PATH = os.path.join(os.path.expanduser("~"), "Documents", "Electronic Arts", "The Sims 4", "ai_mod_config.json")
+try:
+    import voice_manager as _voice_mgr
+    _HAS_VOICE = True
+except Exception:
+    _voice_mgr = None
+    _HAS_VOICE = False
+
+def _norm_real_key(path):
+    ap = os.path.abspath(os.path.normpath(str(path)))
+    try:
+        rp = os.path.realpath(ap)
+    except Exception:
+        rp = ap
+    return os.path.normcase(rp) if sys.platform == "win32" else rp
+
+
+def _get_documents_dirs():
+    """
+    Cross-platform OS Documents folder resolver (Windows & macOS).
+    Windows: Shell API (CSIDL_PERSONAL), Registry Personal, OneDrive envs, ~/OneDrive/Documents, ~/Documents.
+    macOS: ~/Documents, iCloud Drive Documents.
+    """
+    candidates = []
+    seen = set()
+
+    def _add(p):
+        if not p:
+            return
+        try:
+            expanded = os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(str(p).strip().strip('"')))))
+        except Exception:
+            return
+        if not expanded:
+            return
+        key = os.path.normcase(expanded) if sys.platform == "win32" else expanded
+        if key not in seen:
+            seen.add(key)
+            candidates.append(expanded)
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:
+                _add(buf.value)
+        except Exception:
+            pass
+        try:
+            import winreg
+            for subkey in (
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+            ):
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as key:
+                        val, _ = winreg.QueryValueEx(key, "Personal")
+                        _add(val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        for env_key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+            od_root = os.environ.get(env_key, "")
+            if od_root:
+                _add(os.path.join(od_root, "Documents"))
+                _add(os.path.join(od_root, "Документы"))
+        home = os.path.expanduser("~")
+        _add(os.path.join(home, "OneDrive", "Documents"))
+        _add(os.path.join(home, "Documents"))
+    elif sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        _add(os.path.join(home, "Documents"))
+        _add(os.path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs", "Documents"))
+    else:
+        xdg_docs = os.environ.get("XDG_DOCUMENTS_DIR", "")
+        if xdg_docs:
+            _add(xdg_docs)
+        home = os.path.expanduser("~")
+        _add(os.path.join(home, "Documents"))
+    return candidates
+
+
+def _get_windows_documents_dirs():
+    return _get_documents_dirs()
+
+
+def _get_all_sims4_candidate_dirs():
+    out = []
+    seen_norm = set()
+    seen_real = set()
+    for d in _get_documents_dirs():
+        sdir = os.path.abspath(os.path.normpath(os.path.join(d, "Electronic Arts", "The Sims 4")))
+        nk = os.path.normcase(sdir) if sys.platform == "win32" else sdir
+        rk = _norm_real_key(sdir)
+        if nk in seen_norm:
+            continue
+        if os.path.isdir(sdir) and rk in seen_real:
+            continue
+        seen_norm.add(nk)
+        if os.path.isdir(sdir):
+            seen_real.add(rk)
+        out.append(sdir)
+    return out
+
+
+def _get_sims4_root_dir():
+    """
+    Returns the user's real 'Electronic Arts/The Sims 4' directory for Mods, Options.ini,
+    saves, and Synapse configuration/data files across Windows and macOS.
+    """
+    sims_cands = _get_all_sims4_candidate_dirs()
+    for sdir in sims_cands:
+        if os.path.isdir(os.path.join(sdir, "Mods")) and any(
+            os.path.exists(os.path.join(sdir, m)) for m in ("saves", "Options.ini", "Config.log", "GameVersion.txt")
+        ):
+            return sdir
+    for sdir in sims_cands:
+        if os.path.isdir(os.path.join(sdir, "Mods")):
+            return sdir
+    for sdir in sims_cands:
+        if any(os.path.exists(os.path.join(sdir, m)) for m in ("saves", "Options.ini")):
+            return sdir
+    for sdir in sims_cands:
+        if os.path.isdir(sdir):
+            return sdir
+    if sims_cands:
+        return sims_cands[0]
+    return os.path.join(os.path.expanduser("~"), "Documents", "Electronic Arts", "The Sims 4")
+
+
+def get_config_file_path():
+    return os.path.join(_get_sims4_root_dir(), "ai_mod_config.json")
+
+
+# Configuration file path (resolved to active Sims 4 user folder)
+CONFIG_FILE_PATH = get_config_file_path()
 BRIDGE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_bridge.py")
 BRIDGE_PORT = 8765
 
@@ -1813,6 +1948,8 @@ def _safe_dict(val):
 
 
 def load_config():
+    global CONFIG_FILE_PATH
+    CONFIG_FILE_PATH = get_config_file_path()
     if os.path.isfile(CONFIG_FILE_PATH):
         try:
             with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
@@ -1869,8 +2006,10 @@ def load_config():
 
 
 def save_config(cfg):
+    global CONFIG_FILE_PATH
     tmp_path = None
     try:
+        CONFIG_FILE_PATH = get_config_file_path()
         exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
         bridge_bin = "ai_bridge.exe" if sys.platform == "win32" else "ai_bridge"
         candidate_bridge = os.path.join(exe_dir, bridge_bin)
@@ -1899,74 +2038,6 @@ SYNAPSE_MOD_FILES = (
     "Synapse_SimMind.ts4script",
     "Synapse_SocialMessenger.ts4script",
 )
-
-
-def _get_windows_documents_dirs():
-    """
-    Resolves the real Windows Documents folder(s) via Shell API (CSIDL_PERSONAL),
-    Windows Registry (User Shell Folders / Shell Folders), OneDrive, and ~/Documents.
-    Does NOT alter CONFIG_FILE_PATH (JSONs stay in ~/Documents on C:).
-    """
-    candidates = []
-
-    def _add(p):
-        if not p:
-            return
-        expanded = os.path.normpath(os.path.expandvars(str(p).strip().strip('"')))
-        if expanded and expanded not in candidates:
-            candidates.append(expanded)
-
-    if sys.platform == "win32":
-        # 1. Windows Shell API: SHGetFolderPathW(CSIDL_PERSONAL=5)
-        try:
-            import ctypes
-            from ctypes import wintypes
-            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
-            if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:
-                _add(buf.value)
-        except Exception:
-            pass
-
-        # 2. Windows Registry: User Shell Folders / Shell Folders -> Personal
-        try:
-            import winreg
-            for subkey in (
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
-            ):
-                try:
-                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as key:
-                        val, _ = winreg.QueryValueEx(key, "Personal")
-                        _add(val)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    home = os.path.expanduser("~")
-    _add(os.path.join(home, "OneDrive", "Documents"))
-    _add(os.path.join(home, "Documents"))
-    return candidates
-
-
-def _get_sims4_root_dir():
-    """
-    Returns the user's real 'Electronic Arts/The Sims 4' directory for Mods/Options.ini lookup.
-    Prefers the folder that actually contains 'Mods', then 'The Sims 4', else the primary
-    Windows Documents folder (e.g. D:\\User\\Documents when redirected).
-    """
-    doc_dirs = _get_windows_documents_dirs()
-    sims_cands = [os.path.join(d, "Electronic Arts", "The Sims 4") for d in doc_dirs]
-
-    for sdir in sims_cands:
-        if os.path.isdir(os.path.join(sdir, "Mods")):
-            return sdir
-    for sdir in sims_cands:
-        if os.path.isdir(sdir):
-            return sdir
-    if sims_cands:
-        return sims_cands[0]
-    return os.path.dirname(CONFIG_FILE_PATH)
 
 
 def _find_synapse_mod_source_dirs():
@@ -2095,10 +2166,10 @@ def repair_mods_installation():
             break
 
     # Remove misplaced or duplicate Synapse mod files outside Mods/SynapseMod
-    target_norm = os.path.abspath(target_dir).lower()
+    target_norm = os.path.normcase(os.path.abspath(target_dir))
     for fn in SYNAPSE_MOD_FILES:
         for old_path, _, _ in info["found"].get(fn, []):
-            old_dir = os.path.dirname(os.path.abspath(old_path)).lower()
+            old_dir = os.path.normcase(os.path.dirname(os.path.abspath(old_path)))
             if old_dir != target_norm and os.path.isfile(old_path):
                 try:
                     os.remove(old_path)
@@ -2107,6 +2178,335 @@ def repair_mods_installation():
                     pass
 
     return True, f"Installed/repaired into {target_dir} (updated: {copied}, cleaned duplicates/misplaced: {removed_dups})"
+
+
+SYNAPSE_MIGRATION_FILES = (
+    "ai_mod_config.json",
+    "ai_sim_lore.json",
+    "ai_sim_races.json",
+    "ai_world_lore.json",
+    "ai_social_memories.json",
+    "ai_social_recent_conversations.json",
+    "ai_social_dd_settings.json",
+    "synapse_simgram_chats.json",
+    "synapse_simgram_profiles.json",
+    "synapse_sulnet_settings.json",
+    "ai_mind_reader.log",
+    "ai_social_pc.log",
+    "synapse_balloons.log",
+)
+
+SYNAPSE_MIGRATION_DIRS = (
+    "synapse_simgram_media",
+)
+
+
+def _is_sims4_process_running():
+    """Returns True if The Sims 4 game process appears to be running."""
+    try:
+        if sys.platform == "win32":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            for exe_name in ("TS4_x64.exe", "TS4.exe", "TS4_DX9_x64.exe"):
+                res = subprocess.run(
+                    ["tasklist", "/NH", "/FI", f"IMAGENAME eq {exe_name}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    creationflags=flags,
+                )
+                if exe_name.lower() in (res.stdout or "").lower():
+                    return True
+        elif sys.platform == "darwin":
+            res = subprocess.run(
+                ["pgrep", "-ix", "The Sims 4"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if res.returncode == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _make_bak_path(path):
+    """Generates a non-colliding `.bak` backup path next to `path`."""
+    cand = f"{path}.bak"
+    if not os.path.exists(cand):
+        return cand
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cand = f"{path}.{ts}.bak"
+    if not os.path.exists(cand):
+        return cand
+    idx = 2
+    while True:
+        c2 = f"{path}.{ts}_{idx}.bak"
+        if not os.path.exists(c2):
+            return c2
+        idx += 1
+
+
+def _rewrite_media_paths_in_obj(obj, src_media_dir, dst_media_dir):
+    if isinstance(obj, str):
+        if not src_media_dir or not dst_media_dir:
+            return obj
+        src_clean = os.path.normpath(src_media_dir)
+        obj_clean = os.path.normpath(obj)
+        src_norm = os.path.normcase(src_clean)
+        obj_norm = os.path.normcase(obj_clean)
+        if obj_norm.startswith(src_norm + os.sep) or obj_norm.startswith(src_norm + "/"):
+            rel = obj_clean[len(src_clean):].lstrip("\\/")
+            return os.path.join(dst_media_dir, rel)
+        return obj
+    if isinstance(obj, list):
+        return [_rewrite_media_paths_in_obj(x, src_media_dir, dst_media_dir) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _rewrite_media_paths_in_obj(v, src_media_dir, dst_media_dir) for k, v in obj.items()}
+    return obj
+
+
+def _merge_list_entries(dst_list, src_list):
+    out = list(dst_list)
+    seen = set()
+    for item in dst_list:
+        try:
+            seen.add(json.dumps(item, ensure_ascii=False, sort_keys=True))
+        except Exception:
+            seen.add(repr(item))
+    for item in src_list:
+        try:
+            sig = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            sig = repr(item)
+        if sig not in seen:
+            seen.add(sig)
+            out.append(item)
+    return out
+
+
+def _deep_merge_prefer_target(dst_obj, src_obj):
+    if isinstance(dst_obj, dict) and isinstance(src_obj, dict):
+        merged = dict(dst_obj)
+        for k, sv in src_obj.items():
+            if k not in merged or merged[k] is None:
+                merged[k] = sv
+            else:
+                dv = merged[k]
+                if isinstance(dv, dict) and isinstance(sv, dict):
+                    merged[k] = _deep_merge_prefer_target(dv, sv)
+                elif isinstance(dv, list) and isinstance(sv, list):
+                    merged[k] = _merge_list_entries(dv, sv)
+                elif isinstance(dv, str) and not dv.strip() and isinstance(sv, str) and sv.strip():
+                    merged[k] = sv
+        return merged
+    return dst_obj
+
+
+def _merge_config_dicts(dst_cfg, src_cfg):
+    merged = _deep_merge_prefer_target(dst_cfg, src_cfg)
+    # If target config had no API key configured while source config had one, import active provider/model/prompt fields too
+    dst_key = str(dst_cfg.get("api_key") or "").strip()
+    src_key = str(src_cfg.get("api_key") or "").strip()
+    if not dst_key and src_key:
+        for k in ("connection_mode", "api_provider", "provider_type", "api_key", "endpoint_url", "model", "colab_url", "colab_model", "local_engine", "local_url", "local_model", "local_api_key", "system_prompt", "language"):
+            if src_cfg.get(k):
+                merged[k] = src_cfg[k]
+    return merged
+
+
+def _write_json_atomic(target_path, payload):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    tmp_path = f"{target_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, target_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def inspect_synapse_data_migration():
+    """
+    Scans alternate 'Electronic Arts/The Sims 4' folders (other than `_get_sims4_root_dir()`)
+    for misplaced Synapse config, save data, media, or logs that belong in the real TS4 folder.
+    Ignores `.bak` backups and junctions pointing to the same real directory.
+    """
+    target_dir = _get_sims4_root_dir()
+    target_real = _norm_real_key(target_dir)
+    sources = []
+    total_files = 0
+    total_media = 0
+
+    for cand in _get_all_sims4_candidate_dirs():
+        if not os.path.isdir(cand):
+            continue
+        if _norm_real_key(cand) == target_real:
+            continue
+
+        found_files = []
+        for fn in SYNAPSE_MIGRATION_FILES:
+            fp = os.path.join(cand, fn)
+            if os.path.isfile(fp):
+                found_files.append(fn)
+
+        media_dir = os.path.join(cand, "synapse_simgram_media")
+        media_count = 0
+        if os.path.isdir(media_dir):
+            try:
+                for root, _, files in os.walk(media_dir):
+                    for fn in files:
+                        low = fn.lower()
+                        if low.endswith(".bak") or low.endswith(".tmp"):
+                            continue
+                        media_count += 1
+            except Exception:
+                media_count = 0
+
+        if found_files or media_count > 0:
+            sources.append({
+                "source_dir": cand,
+                "files": found_files,
+                "media_count": media_count,
+                "media_dir": media_dir if media_count > 0 else None,
+            })
+            total_files += len(found_files)
+            total_media += media_count
+
+    return {
+        "target_dir": target_dir,
+        "sources": sources,
+        "total_files": total_files,
+        "total_media": total_media,
+        "needs_migration": bool(sources),
+    }
+
+
+def migrate_synapse_data_to_active_dir(check_game_running=True):
+    """
+    Safely copies/merges all misplaced Synapse mod files & media into the active TS4 folder,
+    then renames the original files/folders in the old location to `.bak` backups in place.
+    """
+    info = inspect_synapse_data_migration()
+    if not info.get("needs_migration"):
+        return True, "NOTHING_TO_MIGRATE", info
+
+    if check_game_running and _is_sims4_process_running():
+        return False, "GAME_RUNNING", info
+
+    target_dir = info["target_dir"]
+    os.makedirs(target_dir, exist_ok=True)
+    target_media_dir = os.path.join(target_dir, "synapse_simgram_media")
+
+    migrated_files = []
+    merged_files = []
+    migrated_media = 0
+    bak_entries = []
+    errors = []
+
+    for src_entry in info["sources"]:
+        src_dir = src_entry["source_dir"]
+        src_media_dir = os.path.join(src_dir, "synapse_simgram_media")
+
+        # 1. Copy media files first so rewritten screenshot paths point to valid files
+        if src_entry.get("media_dir") and os.path.isdir(src_media_dir):
+            os.makedirs(target_media_dir, exist_ok=True)
+            media_copy_ok = True
+            for root, _, files in os.walk(src_media_dir):
+                rel_root = os.path.relpath(root, src_media_dir)
+                dst_root = target_media_dir if rel_root == "." else os.path.join(target_media_dir, rel_root)
+                os.makedirs(dst_root, exist_ok=True)
+                for fn in files:
+                    low = fn.lower()
+                    if low.endswith(".bak") or low.endswith(".tmp"):
+                        continue
+                    s_fp = os.path.join(root, fn)
+                    d_fp = os.path.join(dst_root, fn)
+                    try:
+                        need_copy = (not os.path.isfile(d_fp)) or (os.path.getsize(d_fp) == 0 and os.path.getsize(s_fp) > 0)
+                        if need_copy:
+                            shutil.copy2(s_fp, d_fp)
+                            migrated_media += 1
+                    except Exception as ex_m:
+                        media_copy_ok = False
+                        errors.append(f"{s_fp}: {ex_m}")
+            if media_copy_ok:
+                try:
+                    bak_media = _make_bak_path(src_media_dir)
+                    os.replace(src_media_dir, bak_media)
+                    bak_entries.append(bak_media)
+                except Exception as ex_bm:
+                    errors.append(f"rename {src_media_dir}: {ex_bm}")
+
+        # 2. Copy or merge JSON / log files and rename originals to .bak
+        for fn in src_entry["files"]:
+            s_fp = os.path.join(src_dir, fn)
+            d_fp = os.path.join(target_dir, fn)
+            if not os.path.isfile(s_fp):
+                continue
+            try:
+                is_json = fn.lower().endswith(".json")
+                dst_existed = os.path.isfile(d_fp)
+                if is_json:
+                    src_data = None
+                    try:
+                        with open(s_fp, "r", encoding="utf-8") as f:
+                            src_data = json.load(f)
+                    except Exception:
+                        src_data = None
+
+                    if isinstance(src_data, dict):
+                        src_data = _rewrite_media_paths_in_obj(src_data, src_media_dir, target_media_dir)
+                        if dst_existed:
+                            dst_data = None
+                            try:
+                                with open(d_fp, "r", encoding="utf-8") as f:
+                                    dst_data = json.load(f)
+                            except Exception:
+                                dst_data = None
+                            if isinstance(dst_data, dict):
+                                if fn == "ai_mod_config.json":
+                                    final_data = _merge_config_dicts(dst_data, src_data)
+                                else:
+                                    final_data = _deep_merge_prefer_target(dst_data, src_data)
+                                _write_json_atomic(d_fp, final_data)
+                                merged_files.append(fn)
+                            else:
+                                _write_json_atomic(d_fp, src_data)
+                                migrated_files.append(fn)
+                        else:
+                            _write_json_atomic(d_fp, src_data)
+                            migrated_files.append(fn)
+                    else:
+                        if not dst_existed:
+                            shutil.copy2(s_fp, d_fp)
+                            migrated_files.append(fn)
+                else:
+                    if not dst_existed:
+                        shutil.copy2(s_fp, d_fp)
+                        migrated_files.append(fn)
+
+                if os.path.exists(d_fp):
+                    bak_fp = _make_bak_path(s_fp)
+                    os.replace(s_fp, bak_fp)
+                    bak_entries.append(bak_fp)
+            except Exception as ex_f:
+                errors.append(f"{s_fp}: {ex_f}")
+
+    summary = {
+        "target_dir": target_dir,
+        "migrated_files": migrated_files,
+        "merged_files": merged_files,
+        "migrated_media": migrated_media,
+        "bak_entries": bak_entries,
+        "errors": errors,
+    }
+    ok = (len(errors) == 0)
+    return ok, ("OK" if ok else "; ".join(errors)), summary
 
 
 def is_bridge_running():
@@ -2382,6 +2782,13 @@ class PresetCreateModal(ctk.CTkToplevel):
         self.destroy()
 
 
+try:
+    from ai_bridge import get_v2_default_parts
+except Exception:
+    def get_v2_default_parts(prompt_tag: str, is_en: bool = False):
+        return "", ""
+
+
 class PromptJournalModal(ctk.CTkToplevel):
     """
     Spacious, full-featured modal dialog for inspecting, editing, and restoring
@@ -2426,15 +2833,26 @@ class PromptJournalModal(ctk.CTkToplevel):
         self.active_journal_lang = self._orig_master_lang
         self.is_en = (self.active_journal_lang == "en")
 
+        master_cfg = getattr(master, "cfg", {}) or {}
+        raw_ver = str(master_cfg.get("prompt_version") or "v1").strip().lower()
+        self.prompt_version = "v2" if raw_ver == "v2" else "v1"
+
         title_text = i18n.get_ui("UI_MODAL_JOURNAL_TITLE", "Журнал промптов и инструкций Synapse") if i18n else "Журнал промптов и инструкций Synapse"
         self.title(f"📜 {title_text}")
-        self.geometry("980x700")
-        self.minsize(840, 580)
-
-        # Center on parent window
         try:
-            x = master.winfo_x() + max(0, (master.winfo_width() - 980) // 2)
-            y = master.winfo_y() + max(0, (master.winfo_height() - 700) // 2)
+            scr_w = self.winfo_screenwidth()
+            scr_h = self.winfo_screenheight()
+        except Exception:
+            scr_w, scr_h = 1280, 800
+        win_w = min(980, max(820, scr_w - 60))
+        win_h = min(680, max(520, scr_h - 100))
+        self.geometry(f"{win_w}x{win_h}")
+        self.minsize(820, min(520, win_h))
+
+        # Center on parent window safely within screen bounds
+        try:
+            x = max(10, min(scr_w - win_w - 10, master.winfo_x() + max(0, (master.winfo_width() - win_w) // 2)))
+            y = max(10, min(scr_h - win_h - 50, master.winfo_y() + max(0, (master.winfo_height() - win_h) // 2)))
             self.geometry(f"+{x}+{y}")
         except Exception:
             pass
@@ -2445,9 +2863,13 @@ class PromptJournalModal(ctk.CTkToplevel):
         self.nav_buttons = {}
         self.prompts_cache_by_lang = {}
         self.defaults_by_lang = {}
+        self.prompts_v2_cache_by_lang = {}
+        self.defaults_v2_by_lang = {}
+        self.prompts_v2_data = {}
 
         self._load_language_prompts(self.active_journal_lang)
         self._build_ui()
+        self._apply_version_ui_state()
         self._select_prompt("system_prompt")
 
     def _get_catalog_for_lang(self, lang_code: str):
@@ -2477,31 +2899,51 @@ class PromptJournalModal(ctk.CTkToplevel):
             ("pet_CAT", cat_pets, "Cat" if is_en else "Кошка (Cat)", "Activates for cats: independence, royal attitude, cardboard boxes, 3 AM zoomies, purring, hissing, humans as servants." if is_en else "Активируется для кошек: независимость, величие, коробки, ночной тыгыдык, мурлыканье, шипение, отношение к человеку как к прислуге.", (self.i18n.get_prompt_for_lang(lang_code, "PROMPT_PET_CAT", DEFAULT_PET_PROMPTS.get("CAT", "")) if self.i18n else DEFAULT_PET_PROMPTS.get("CAT", ""))),
         ]
 
+    def _get_v2_defaults_for_key(self, lang_code: str, key: str, def_v1: str):
+        tag = self.PROMPT_KEY_TO_TAG.get(key, f"PROMPT_{key.upper()}")
+        def_top, def_bot = get_v2_default_parts(tag, is_en=(lang_code == "en"))
+        if self.i18n:
+            txt_top = self.i18n.get_prompt_for_lang(lang_code, f"{tag}_V2_TOP", "")
+            txt_bot = self.i18n.get_prompt_for_lang(lang_code, f"{tag}_V2_BOTTOM", "")
+            if txt_top:
+                def_top = txt_top
+            if txt_bot:
+                def_bot = txt_bot
+        if not (def_top or "").strip():
+            def_top = def_v1 or ""
+        return (def_top or "").strip(), (def_bot or "").strip()
+
     def _load_language_prompts(self, lang_code: str):
         catalog = self._get_catalog_for_lang(lang_code)
         self.catalog = catalog
         self.catalog_map = {item[0]: item for item in catalog}
 
-        if lang_code in self.prompts_cache_by_lang:
+        if lang_code in self.prompts_cache_by_lang and lang_code in self.prompts_v2_cache_by_lang:
             self.prompts_data = self.prompts_cache_by_lang[lang_code]
+            self.prompts_v2_data = self.prompts_v2_cache_by_lang[lang_code]
             return
 
         cfg = getattr(self.master_app, "cfg", {}) or {}
         lang_cfg = self.i18n.get_lang_prompts(cfg, lang_code) if self.i18n else {}
         custom_pets = lang_cfg.get("custom_pet_prompts", {}) or {}
+        custom_pets_v2_top = lang_cfg.get("custom_pet_prompts_v2_top", {}) or {}
+        custom_pets_v2_bot = lang_cfg.get("custom_pet_prompts_v2_bottom", {}) or {}
 
         def _is_valid_script(text: str) -> bool:
             if not text:
                 return False
-            has_cyr = any('\u0400' <= ch <= '\u04FF' for ch in text)
+            stripped = re.sub(r'\[(?:улыбка|смех|сердце|любовь|подмиг|грусть|злость|круто|череп|огонь|звезда|пламбоб)\]', '', text)
+            has_cyr = any('\u0400' <= ch <= '\u04FF' for ch in stripped)
             if lang_code == "en" and has_cyr:
                 return False
-            if lang_code == "ru" and not has_cyr and len(text) > 40:
+            if lang_code == "ru" and not any('\u0400' <= ch <= '\u04FF' for ch in text) and len(text) > 40:
                 return False
             return True
 
         data = {}
         defaults = {}
+        v2_data = {}
+        v2_defaults = {}
         for key, cat, title, desc, def_val in catalog:
             defaults[key] = def_val
             is_custom = bool(lang_cfg.get(f"is_custom_{key}", False))
@@ -2519,9 +2961,32 @@ class PromptJournalModal(ctk.CTkToplevel):
             else:
                 data[key] = def_val
 
+            # Load V2 Top + Bottom independently
+            def_top, def_bot = self._get_v2_defaults_for_key(lang_code, key, def_val)
+            v2_defaults[key] = {"top": def_top, "bottom": def_bot}
+
+            if key.startswith("pet_"):
+                pet_key = key[4:]
+                sv_top = (custom_pets_v2_top.get(pet_key) or "").strip() if isinstance(custom_pets_v2_top.get(pet_key), str) else ""
+                sv_bot = (custom_pets_v2_bot.get(pet_key) or "").strip() if isinstance(custom_pets_v2_bot.get(pet_key), str) else ""
+                v2_data[key] = {"top": sv_top or def_top, "bottom": sv_bot or def_bot}
+            else:
+                top_k = f"v2_top_{key}"
+                bot_k = f"v2_bottom_{key}"
+                is_c_top = bool(lang_cfg.get(f"is_custom_{top_k}", False))
+                is_c_bot = bool(lang_cfg.get(f"is_custom_{bot_k}", False))
+                sv_top = (lang_cfg.get(top_k) or "").strip()
+                sv_bot = (lang_cfg.get(bot_k) or "").strip()
+                res_top = sv_top if (is_c_top and sv_top) else (sv_top if (sv_top and sv_top != def_top and _is_valid_script(sv_top)) else def_top)
+                res_bot = sv_bot if (is_c_bot and sv_bot) else (sv_bot if (sv_bot and sv_bot != def_bot and _is_valid_script(sv_bot)) else def_bot)
+                v2_data[key] = {"top": res_top, "bottom": res_bot}
+
         self.prompts_cache_by_lang[lang_code] = data
         self.defaults_by_lang[lang_code] = defaults
         self.prompts_data = data
+        self.prompts_v2_cache_by_lang[lang_code] = v2_data
+        self.defaults_v2_by_lang[lang_code] = v2_defaults
+        self.prompts_v2_data = v2_data
 
     def _build_ui(self):
         # Top Banner
@@ -2594,6 +3059,44 @@ class PromptJournalModal(ctk.CTkToplevel):
         )
         self.export_btn.pack(side="left", padx=(0, 10))
 
+        # Distinct V1 / V2 mode switcher right after Import / Export
+        ver_switch_frame = ctk.CTkFrame(
+            title_row,
+            fg_color="#0f172a",
+            corner_radius=8,
+            border_width=1,
+            border_color="#3b4f6b",
+        )
+        ver_switch_frame.pack(side="left", padx=(4, 6))
+
+        v1_txt = self.i18n.get_ui("UI_JOURNAL_VER_V1", "V1 (Обычный)") if self.i18n else "V1 (Обычный)"
+        v2_txt = self.i18n.get_ui("UI_JOURNAL_VER_V2", "V2 (Верх + Низ)") if self.i18n else "V2 (Верх + Низ)"
+        self.ver_v1_btn = ctk.CTkButton(
+            ver_switch_frame,
+            text=v1_txt,
+            width=94,
+            height=24,
+            corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="transparent",
+            hover_color="#1e293b",
+            command=lambda: self._switch_prompt_version("v1"),
+        )
+        self.ver_v1_btn.pack(side="left", padx=(2, 1), pady=2)
+
+        self.ver_v2_btn = ctk.CTkButton(
+            ver_switch_frame,
+            text=v2_txt,
+            width=112,
+            height=24,
+            corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="transparent",
+            hover_color="#1e293b",
+            command=lambda: self._switch_prompt_version("v2"),
+        )
+        self.ver_v2_btn.pack(side="left", padx=(1, 2), pady=2)
+
         self.top_sub_lbl = ctk.CTkLabel(
             top_bar,
             text=top_subtitle,
@@ -2663,15 +3166,105 @@ class PromptJournalModal(ctk.CTkToplevel):
         )
         self.cur_desc_lbl.pack(anchor="w", padx=14, pady=(0, 8))
 
-        # Textbox Editor
+        # Switchable Editor Stack (V1 single box vs V2 Top / Locked Middle / Bottom)
+        self.editor_stack = ctk.CTkFrame(editor_frame, fg_color="transparent")
+        self.editor_stack.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.editor_stack.pack_propagate(False)
+
+        # V1 Editor Frame
+        self.v1_editor_frame = ctk.CTkFrame(self.editor_stack, fg_color="transparent")
+        self.v1_editor_frame.pack_propagate(False)
         self.editor_text = ctk.CTkTextbox(
-            editor_frame,
+            self.v1_editor_frame,
+            height=120,
             font=ctk.CTkFont(family="Consolas", size=12),
             wrap="word",
         )
-        self.editor_text.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.editor_text.pack(fill="both", expand=True)
         if hasattr(self.master_app, "_attach_context_menu"):
             self.master_app._attach_context_menu(self.editor_text)
+
+        # V2 Sandwich Editor Frame
+        self.v2_editor_frame = ctk.CTkFrame(self.editor_stack, fg_color="transparent")
+        self.v2_editor_frame.grid_propagate(False)
+        self.v2_editor_frame.grid_columnconfigure(0, weight=1)
+        self.v2_editor_frame.grid_rowconfigure(1, weight=3, minsize=70)
+        self.v2_editor_frame.grid_rowconfigure(2, weight=0)
+        self.v2_editor_frame.grid_rowconfigure(4, weight=2, minsize=60)
+
+        top_hdr_txt = self.i18n.get_ui("UI_JOURNAL_V2_TOP_TITLE", "⬆ Верхняя часть промпта (до контекста · system)") if self.i18n else "⬆ Верхняя часть промпта (до контекста · system)"
+        self.v2_top_lbl = ctk.CTkLabel(
+            self.v2_editor_frame,
+            text=top_hdr_txt,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#38bdf8",
+            anchor="w",
+        )
+        self.v2_top_lbl.grid(row=0, column=0, sticky="w", padx=2, pady=(0, 2))
+
+        self.v2_top_text = ctk.CTkTextbox(
+            self.v2_editor_frame,
+            height=90,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            wrap="word",
+            border_width=1,
+            border_color="#1d4ed8",
+        )
+        self.v2_top_text.grid(row=1, column=0, sticky="nsew", pady=(0, 5))
+        if hasattr(self.master_app, "_attach_context_menu"):
+            self.master_app._attach_context_menu(self.v2_top_text)
+
+        mid_card = ctk.CTkFrame(
+            self.v2_editor_frame,
+            fg_color=("#1e293b", "#111827"),
+            border_width=1,
+            border_color="#b45309",
+            corner_radius=8,
+        )
+        mid_card.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+
+        mid_title_txt = self.i18n.get_ui("UI_JOURNAL_V2_MID_TITLE", "🔒 КОНТЕКСТ СИМА И СЦЕНЫ (подставляется модом автоматически — нельзя редактировать)") if self.i18n else "🔒 КОНТЕКСТ СИМА И СЦЕНЫ (подставляется модом автоматически — нельзя редактировать)"
+        mid_desc_txt = self.i18n.get_ui("UI_JOURNAL_V2_MID_DESC", "Профиль сима, черты, потребности, мудлеты, отношения, память, локация, история диалога и текущая сцена.") if self.i18n else "Профиль сима, черты, потребности, мудлеты, отношения, память, локация, история диалога и текущая сцена."
+        self.v2_mid_title_lbl = ctk.CTkLabel(
+            mid_card,
+            text=mid_title_txt,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#fbbf24",
+            anchor="w",
+        )
+        self.v2_mid_title_lbl.pack(anchor="w", padx=10, pady=(4, 0))
+        self.v2_mid_desc_lbl = ctk.CTkLabel(
+            mid_card,
+            text=mid_desc_txt,
+            font=ctk.CTkFont(size=10),
+            text_color="#cbd5e1",
+            wraplength=580,
+            justify="left",
+            anchor="w",
+        )
+        self.v2_mid_desc_lbl.pack(anchor="w", padx=10, pady=(0, 4))
+
+        bot_hdr_txt = self.i18n.get_ui("UI_JOURNAL_V2_BOT_TITLE", "⬇ Нижняя часть промпта (после контекста · Depth 0)") if self.i18n else "⬇ Нижняя часть промпта (после контекста · Depth 0)"
+        self.v2_bot_lbl = ctk.CTkLabel(
+            self.v2_editor_frame,
+            text=bot_hdr_txt,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#c084fc",
+            anchor="w",
+        )
+        self.v2_bot_lbl.grid(row=3, column=0, sticky="w", padx=2, pady=(0, 2))
+
+        self.v2_bottom_text = ctk.CTkTextbox(
+            self.v2_editor_frame,
+            height=80,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            wrap="word",
+            border_width=1,
+            border_color="#7c3aed",
+        )
+        self.v2_bottom_text.grid(row=4, column=0, sticky="nsew")
+        if hasattr(self.master_app, "_attach_context_menu"):
+            self.master_app._attach_context_menu(self.v2_bottom_text)
 
         # Action Buttons Row under Textbox
         act_row = ctk.CTkFrame(editor_frame, fg_color="transparent")
@@ -2734,6 +3327,40 @@ class PromptJournalModal(ctk.CTkToplevel):
         )
         self.save_btn.pack(side="right", padx=0, pady=10)
 
+    def _apply_version_ui_state(self):
+        is_v2 = (self.prompt_version == "v2")
+        if is_v2:
+            self.ver_v1_btn.configure(fg_color="transparent", text_color="#94a3b8")
+            self.ver_v2_btn.configure(fg_color="#7c3aed", text_color="#ffffff")
+            self.v1_editor_frame.pack_forget()
+            self.v2_editor_frame.pack(fill="both", expand=True)
+            sub_txt = self.i18n.get_ui("UI_JOURNAL_SUBTITLE_V2", "Режим V2 активен: Верх промпта (до контекста), 🔒 Контекст сима (авто) и Низ промпта (Depth 0 перед ответом).") if self.i18n else "Режим V2 активен: Верх промпта (до контекста), 🔒 Контекст сима (авто) и Низ промпта (Depth 0 перед ответом)."
+        else:
+            self.ver_v1_btn.configure(fg_color="#0284c7", text_color="#ffffff")
+            self.ver_v2_btn.configure(fg_color="transparent", text_color="#94a3b8")
+            self.v2_editor_frame.pack_forget()
+            self.v1_editor_frame.pack(fill="both", expand=True)
+            sub_txt = self.i18n.get_ui("UI_MODAL_JOURNAL_SUBTITLE", "Здесь собраны основные системные промпты и инструкции питомцев. Выберите пункт слева для настройки.") if self.i18n else "Здесь собраны основные системные промпты и инструкции питомцев. Выберите пункт слева для настройки."
+        if hasattr(self, "top_sub_lbl"):
+            self.top_sub_lbl.configure(text=sub_txt)
+
+    def _switch_prompt_version(self, new_ver: str):
+        norm = "v2" if str(new_ver).strip().lower() == "v2" else "v1"
+        if norm == self.prompt_version:
+            return
+        self._save_current_to_buffer()
+        self.prompt_version = norm
+        self._apply_version_ui_state()
+        if self.active_key:
+            self._load_active_editor_fields(self.active_key)
+        stat = (
+            f"Switched to {norm.upper()} mode (click 'Save & Apply' to use in Bridge)"
+            if self.is_en
+            else f"Переключено на режим {norm.upper()} (нажмите «Сохранить и применить» для активации в Bridge)"
+        )
+        if hasattr(self, "status_lbl"):
+            self.status_lbl.configure(text=stat, text_color="#c084fc" if norm == "v2" else "#38bdf8")
+
     def destroy(self):
         # Restore master_app's active UI language on the shared i18n singleton before closing the modal
         if getattr(self, "i18n", None):
@@ -2773,7 +3400,19 @@ class PromptJournalModal(ctk.CTkToplevel):
         if hasattr(self, "export_btn"):
             exp_t = self.i18n.get_ui("UI_JOURNAL_BTN_EXPORT", "Экспорт") if self.i18n else "Экспорт"
             self.export_btn.configure(text=f"📤 {exp_t}")
-        if hasattr(self, "top_sub_lbl"): self.top_sub_lbl.configure(text=top_subtitle)
+        if hasattr(self, "ver_v1_btn"):
+            self.ver_v1_btn.configure(text=self.i18n.get_ui("UI_JOURNAL_VER_V1", "V1 (Обычный)") if self.i18n else "V1 (Обычный)")
+        if hasattr(self, "ver_v2_btn"):
+            self.ver_v2_btn.configure(text=self.i18n.get_ui("UI_JOURNAL_VER_V2", "V2 (Верх + Низ)") if self.i18n else "V2 (Верх + Низ)")
+        if hasattr(self, "v2_top_lbl"):
+            self.v2_top_lbl.configure(text=self.i18n.get_ui("UI_JOURNAL_V2_TOP_TITLE", "⬆ Верхняя часть промпта (до контекста · system)") if self.i18n else "⬆ Верхняя часть промпта (до контекста · system)")
+        if hasattr(self, "v2_mid_title_lbl"):
+            self.v2_mid_title_lbl.configure(text=self.i18n.get_ui("UI_JOURNAL_V2_MID_TITLE", "🔒 КОНТЕКСТ СИМА И СЦЕНЫ (подставляется модом автоматически — нельзя редактировать)") if self.i18n else "🔒 КОНТЕКСТ СИМА И СЦЕНЫ (подставляется модом автоматически — нельзя редактировать)")
+        if hasattr(self, "v2_mid_desc_lbl"):
+            self.v2_mid_desc_lbl.configure(text=self.i18n.get_ui("UI_JOURNAL_V2_MID_DESC", "Профиль сима, черты, потребности, мудлеты, отношения, память, локация, история диалога и текущая сцена.") if self.i18n else "Профиль сима, черты, потребности, мудлеты, отношения, память, локация, история диалога и текущая сцена.")
+        if hasattr(self, "v2_bot_lbl"):
+            self.v2_bot_lbl.configure(text=self.i18n.get_ui("UI_JOURNAL_V2_BOT_TITLE", "⬇ Нижняя часть промпта (после контекста · Depth 0)") if self.i18n else "⬇ Нижняя часть промпта (после контекста · Depth 0)")
+        self._apply_version_ui_state()
         if hasattr(self, "lang_lbl"): self.lang_lbl.configure(text=self.i18n.get_ui("LANG_MENU_TITLE", "Язык промптов:") if self.i18n else "Язык промптов:")
         if hasattr(self, "reset_cur_btn"): self.reset_cur_btn.configure(text=self.i18n.get_ui("UI_JOURNAL_RESET_CUR", "🔄 Сбросить этот промпт к оригиналу") if self.i18n else "🔄 Сбросить этот промпт к оригиналу")
         if hasattr(self, "reset_all_btn"): self.reset_all_btn.configure(text=self.i18n.get_ui("UI_JOURNAL_RESET_ALL", "⚠️ Сбросить ВСЕ промпты") if self.i18n else "⚠️ Сбросить ВСЕ промпты")
@@ -2785,11 +3424,32 @@ class PromptJournalModal(ctk.CTkToplevel):
         self.status_lbl.configure(text=stat, text_color="#38bdf8")
 
     def _save_current_to_buffer(self):
-        if self.active_key and hasattr(self, "editor_text"):
+        if not self.active_key:
+            return
+        if hasattr(self, "editor_text") and self.prompt_version == "v1":
             content = self.editor_text.get("1.0", "end").strip()
             self.prompts_data[self.active_key] = content
             if self.active_journal_lang in self.prompts_cache_by_lang:
                 self.prompts_cache_by_lang[self.active_journal_lang][self.active_key] = content
+        elif hasattr(self, "v2_top_text") and hasattr(self, "v2_bottom_text") and self.prompt_version == "v2":
+            pair = {
+                "top": self.v2_top_text.get("1.0", "end").strip(),
+                "bottom": self.v2_bottom_text.get("1.0", "end").strip(),
+            }
+            self.prompts_v2_data[self.active_key] = pair
+            if self.active_journal_lang in self.prompts_v2_cache_by_lang:
+                self.prompts_v2_cache_by_lang[self.active_journal_lang][self.active_key] = dict(pair)
+
+    def _load_active_editor_fields(self, key: str):
+        content = self.prompts_data.get(key, "")
+        self.editor_text.delete("1.0", "end")
+        self.editor_text.insert("1.0", content)
+
+        pair = self.prompts_v2_data.get(key, {}) or {}
+        self.v2_top_text.delete("1.0", "end")
+        self.v2_top_text.insert("1.0", pair.get("top", ""))
+        self.v2_bottom_text.delete("1.0", "end")
+        self.v2_bottom_text.insert("1.0", pair.get("bottom", ""))
 
     def _select_prompt(self, key):
         if self.active_key and self.active_key != key:
@@ -2807,74 +3467,121 @@ class PromptJournalModal(ctk.CTkToplevel):
         item = self.catalog_map[key]
         self.cur_title_lbl.configure(text=f"{item[1]} • {item[2]}")
         self.cur_desc_lbl.configure(text=item[3])
-
-        content = self.prompts_data.get(key, "")
-        self.editor_text.delete("1.0", "end")
-        self.editor_text.insert("1.0", content)
+        self._load_active_editor_fields(key)
 
     def _reset_current_prompt(self):
         item = self.catalog_map[self.active_key]
-        def_val = item[4]
         title = self.i18n.get_ui("UI_JOURNAL_RESET_TITLE", "Сброс промпта") if self.i18n else "Сброс промпта"
-        msg = f"Reset prompt '{item[2]}' for [{self.active_journal_lang.upper()}] to default?" if self.is_en else f"Сбросить промпт «{item[2]}» для языка [{self.active_journal_lang.upper()}] к оригинальному тексту?"
+        ver_lbl = "V2" if self.prompt_version == "v2" else "V1"
+        msg = f"Reset {ver_lbl} prompt '{item[2]}' for [{self.active_journal_lang.upper()}] to default?" if self.is_en else f"Сбросить {ver_lbl}-промпт «{item[2]}» для языка [{self.active_journal_lang.upper()}] к оригинальному тексту?"
         if messagebox.askyesno(title, msg, parent=self):
-            self.prompts_data[self.active_key] = def_val
-            if self.active_journal_lang in self.prompts_cache_by_lang:
-                self.prompts_cache_by_lang[self.active_journal_lang][self.active_key] = def_val
-            self.editor_text.delete("1.0", "end")
-            self.editor_text.insert("1.0", def_val)
-            stat = f"Prompt '{item[2]}' reset to default" if self.is_en else f"Промпт «{item[2]}» сброшен к оригиналу"
+            if self.prompt_version == "v2":
+                v2_defs = self.defaults_v2_by_lang.get(self.active_journal_lang, {}).get(self.active_key)
+                if not v2_defs:
+                    t_d, b_d = self._get_v2_defaults_for_key(self.active_journal_lang, self.active_key, item[4])
+                    v2_defs = {"top": t_d, "bottom": b_d}
+                self.prompts_v2_data[self.active_key] = dict(v2_defs)
+                if self.active_journal_lang in self.prompts_v2_cache_by_lang:
+                    self.prompts_v2_cache_by_lang[self.active_journal_lang][self.active_key] = dict(v2_defs)
+            else:
+                def_val = item[4]
+                self.prompts_data[self.active_key] = def_val
+                if self.active_journal_lang in self.prompts_cache_by_lang:
+                    self.prompts_cache_by_lang[self.active_journal_lang][self.active_key] = def_val
+            self._load_active_editor_fields(self.active_key)
+            stat = f"Prompt '{item[2]}' ({ver_lbl}) reset to default" if self.is_en else f"Промпт «{item[2]}» ({ver_lbl}) сброшен к оригиналу"
             self.status_lbl.configure(text=stat, text_color="#f59e0b")
 
     def _reset_all_prompts(self):
         title = self.i18n.get_ui("UI_JOURNAL_RESET_ALL_TITLE", "Сброс ВСЕХ промптов") if self.i18n else "Сброс ВСЕХ промптов"
-        msg = f"Reset ALL prompts for [{self.active_journal_lang.upper()}] to default?" if self.is_en else f"Вы действительно хотите сбросить ВСЕ промпты для языка [{self.active_journal_lang.upper()}] к исходным текстам?"
+        ver_lbl = "V2" if self.prompt_version == "v2" else "V1"
+        msg = f"Reset ALL {ver_lbl} prompts for [{self.active_journal_lang.upper()}] to default?" if self.is_en else f"Вы действительно хотите сбросить ВСЕ {ver_lbl}-промпты для языка [{self.active_journal_lang.upper()}] к исходным текстам?"
         if messagebox.askyesno(title, msg, parent=self):
-            for key, cat, title_val, desc, def_val in self.catalog:
-                self.prompts_data[key] = def_val
-                if self.active_journal_lang in self.prompts_cache_by_lang:
-                    self.prompts_cache_by_lang[self.active_journal_lang][key] = def_val
-            cur_item = self.catalog_map[self.active_key]
-            self.editor_text.delete("1.0", "end")
-            self.editor_text.insert("1.0", cur_item[4])
-            stat = f"All prompts for [{self.active_journal_lang.upper()}] reset to defaults" if self.is_en else f"Все промпты [{self.active_journal_lang.upper()}] сброшены к оригиналу"
+            if self.prompt_version == "v2":
+                v2_defs_map = self.defaults_v2_by_lang.get(self.active_journal_lang, {})
+                for key, cat, title_val, desc, def_val in self.catalog:
+                    v2_d = v2_defs_map.get(key)
+                    if not v2_d:
+                        t_d, b_d = self._get_v2_defaults_for_key(self.active_journal_lang, key, def_val)
+                        v2_d = {"top": t_d, "bottom": b_d}
+                    self.prompts_v2_data[key] = dict(v2_d)
+                    if self.active_journal_lang in self.prompts_v2_cache_by_lang:
+                        self.prompts_v2_cache_by_lang[self.active_journal_lang][key] = dict(v2_d)
+            else:
+                for key, cat, title_val, desc, def_val in self.catalog:
+                    self.prompts_data[key] = def_val
+                    if self.active_journal_lang in self.prompts_cache_by_lang:
+                        self.prompts_cache_by_lang[self.active_journal_lang][key] = def_val
+            self._load_active_editor_fields(self.active_key)
+            stat = f"All {ver_lbl} prompts for [{self.active_journal_lang.upper()}] reset to defaults" if self.is_en else f"Все {ver_lbl}-промпты [{self.active_journal_lang.upper()}] сброшены к оригиналу"
             self.status_lbl.configure(text=stat, text_color="#f59e0b")
 
     def _save_all_prompts(self):
         self._save_current_to_buffer()
         cfg = load_config()
+        cfg["prompt_version"] = self.prompt_version
+
+        all_langs = set(self.prompts_cache_by_lang.keys()) | set(self.prompts_v2_cache_by_lang.keys())
+        main_keys = (
+            "system_prompt",
+            "chat_system_prompt",
+            "group_chat_system_prompt",
+            "npc_chat_system_prompt",
+            "friend_chat_system_prompt",
+            "direct_dialogue_system_prompt",
+            "simplified_dialogue_system_prompt",
+            "sex_dialogue_system_prompt",
+        )
 
         # Save all modified languages in cache to cfg (preserving any unknown legacy fields)
-        for lang_code, p_data in self.prompts_cache_by_lang.items():
+        for lang_code in all_langs:
+            p_data = self.prompts_cache_by_lang.get(lang_code, {})
             defaults = self.defaults_by_lang.get(lang_code, {})
+            p_v2_data = self.prompts_v2_cache_by_lang.get(lang_code, {})
+            v2_defaults = self.defaults_v2_by_lang.get(lang_code, {})
+
             existing_lang = self.i18n.get_lang_prompts(cfg, lang_code) if self.i18n else (cfg.get("prompts_by_language", {}).get(lang_code) or {})
             lang_dict = dict(existing_lang) if isinstance(existing_lang, dict) else {}
-            lang_dict.update({
-                "system_prompt": p_data.get("system_prompt", defaults.get("system_prompt", "")),
-                "is_custom_system_prompt": (p_data.get("system_prompt", "").strip() != defaults.get("system_prompt", "").strip()),
-                "chat_system_prompt": p_data.get("chat_system_prompt", defaults.get("chat_system_prompt", "")),
-                "is_custom_chat_system_prompt": (p_data.get("chat_system_prompt", "").strip() != defaults.get("chat_system_prompt", "").strip()),
-                "group_chat_system_prompt": p_data.get("group_chat_system_prompt", defaults.get("group_chat_system_prompt", "")),
-                "is_custom_group_chat_system_prompt": (p_data.get("group_chat_system_prompt", "").strip() != defaults.get("group_chat_system_prompt", "").strip()),
-                "npc_chat_system_prompt": p_data.get("npc_chat_system_prompt", defaults.get("npc_chat_system_prompt", "")),
-                "is_custom_npc_chat_system_prompt": (p_data.get("npc_chat_system_prompt", "").strip() != defaults.get("npc_chat_system_prompt", "").strip()),
-                "friend_chat_system_prompt": p_data.get("friend_chat_system_prompt", defaults.get("friend_chat_system_prompt", "")),
-                "is_custom_friend_chat_system_prompt": (p_data.get("friend_chat_system_prompt", "").strip() != defaults.get("friend_chat_system_prompt", "").strip()),
-                "direct_dialogue_system_prompt": p_data.get("direct_dialogue_system_prompt", defaults.get("direct_dialogue_system_prompt", "")),
-                "is_custom_direct_dialogue_system_prompt": (p_data.get("direct_dialogue_system_prompt", "").strip() != defaults.get("direct_dialogue_system_prompt", "").strip()),
-                "simplified_dialogue_system_prompt": p_data.get("simplified_dialogue_system_prompt", defaults.get("simplified_dialogue_system_prompt", "")),
-                "is_custom_simplified_dialogue_system_prompt": (p_data.get("simplified_dialogue_system_prompt", "").strip() != defaults.get("simplified_dialogue_system_prompt", "").strip()),
-                "sex_dialogue_system_prompt": p_data.get("sex_dialogue_system_prompt", defaults.get("sex_dialogue_system_prompt", "")),
-                "is_custom_sex_dialogue_system_prompt": (p_data.get("sex_dialogue_system_prompt", "").strip() != defaults.get("sex_dialogue_system_prompt", "").strip()),
-            })
 
-            custom_pets = {}
-            for k, v in p_data.items():
-                if k.startswith("pet_"):
-                    pet_key = k[4:]
-                    if v.strip() != defaults.get(k, "").strip():
-                        custom_pets[pet_key] = v.strip()
-            lang_dict["custom_pet_prompts"] = custom_pets
+            if p_data:
+                for mk in main_keys:
+                    val = p_data.get(mk, defaults.get(mk, ""))
+                    lang_dict[mk] = val
+                    lang_dict[f"is_custom_{mk}"] = (val.strip() != defaults.get(mk, "").strip())
+
+                custom_pets = {}
+                for k, v in p_data.items():
+                    if k.startswith("pet_"):
+                        pet_key = k[4:]
+                        if v.strip() != defaults.get(k, "").strip():
+                            custom_pets[pet_key] = v.strip()
+                lang_dict["custom_pet_prompts"] = custom_pets
+
+            if p_v2_data:
+                for mk in main_keys:
+                    pair = p_v2_data.get(mk, {}) or {}
+                    d_pair = v2_defaults.get(mk, {}) or {}
+                    t_val = (pair.get("top") or "").strip()
+                    b_val = (pair.get("bottom") or "").strip()
+                    lang_dict[f"v2_top_{mk}"] = t_val
+                    lang_dict[f"is_custom_v2_top_{mk}"] = (t_val != (d_pair.get("top") or "").strip())
+                    lang_dict[f"v2_bottom_{mk}"] = b_val
+                    lang_dict[f"is_custom_v2_bottom_{mk}"] = (b_val != (d_pair.get("bottom") or "").strip())
+
+                custom_pets_v2_top = {}
+                custom_pets_v2_bot = {}
+                for k, pair in p_v2_data.items():
+                    if k.startswith("pet_") and isinstance(pair, dict):
+                        pet_key = k[4:]
+                        d_pair = v2_defaults.get(k, {}) or {}
+                        t_val = (pair.get("top") or "").strip()
+                        b_val = (pair.get("bottom") or "").strip()
+                        if t_val != (d_pair.get("top") or "").strip():
+                            custom_pets_v2_top[pet_key] = t_val
+                        if b_val != (d_pair.get("bottom") or "").strip():
+                            custom_pets_v2_bot[pet_key] = b_val
+                lang_dict["custom_pet_prompts_v2_top"] = custom_pets_v2_top
+                lang_dict["custom_pet_prompts_v2_bottom"] = custom_pets_v2_bot
 
             if self.i18n:
                 self.i18n.save_lang_prompts(cfg, lang_code, lang_dict)
@@ -2910,10 +3617,11 @@ class PromptJournalModal(ctk.CTkToplevel):
 
         lines = [
             "# =====================================================================",
-            "# SYNAPSE AI PROMPTS EXPORT",
+            "# SYNAPSE AI PROMPTS EXPORT (V1 + V2)",
             f"# Language: {self.active_journal_lang.upper()}",
+            f"# Active Version: {self.prompt_version.upper()}",
             f"# Total Prompts: {len(self.catalog)}",
-            "# Format: [PROMPT_TAG] ... [/PROMPT_TAG]",
+            "# Format: [PROMPT_TAG] ... [/PROMPT_TAG] and *_V2_TOP / *_V2_BOTTOM",
             "# NOTE: You can edit texts and re-import this file via 'Import' button.",
             "# =====================================================================",
             "",
@@ -2922,6 +3630,10 @@ class PromptJournalModal(ctk.CTkToplevel):
         for key, cat, title_val, desc, def_val in self.catalog:
             tag = self.PROMPT_KEY_TO_TAG.get(key, f"PROMPT_{key.upper()}")
             val = self.prompts_data.get(key, def_val).strip()
+            v2_pair = self.prompts_v2_data.get(key, {}) or {}
+            v2_top = (v2_pair.get("top") or "").strip()
+            v2_bot = (v2_pair.get("bottom") or "").strip()
+
             lines.append("# ---------------------------------------------------------------------")
             lines.append(f"# {cat} • {title_val}")
             lines.append(f"# {desc}")
@@ -2930,6 +3642,16 @@ class PromptJournalModal(ctk.CTkToplevel):
             lines.append(val)
             lines.append(f"[/{tag}]")
             lines.append("")
+            if v2_top:
+                lines.append(f"[{tag}_V2_TOP]")
+                lines.append(v2_top)
+                lines.append(f"[/{tag}_V2_TOP]")
+                lines.append("")
+            if v2_bot:
+                lines.append(f"[{tag}_V2_BOTTOM]")
+                lines.append(v2_bot)
+                lines.append(f"[/{tag}_V2_BOTTOM]")
+                lines.append("")
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:
@@ -2937,11 +3659,11 @@ class PromptJournalModal(ctk.CTkToplevel):
 
             success_title = "Экспорт инструкций" if not self.is_en else "Export Prompts"
             success_msg = (
-                f"Все инструкции ({len(self.catalog)} шт.) успешно экспортированы!\n\n"
+                f"Все инструкции ({len(self.catalog)} шт., V1 + V2) успешно экспортированы!\n\n"
                 f"Файл: {os.path.basename(file_path)}\n"
                 f"Путь: {file_path}"
                 if not self.is_en else
-                f"All prompts ({len(self.catalog)} items) successfully exported!\n\n"
+                f"All prompts ({len(self.catalog)} items, V1 + V2) successfully exported!\n\n"
                 f"File: {os.path.basename(file_path)}\n"
                 f"Path: {file_path}"
             )
@@ -2983,17 +3705,33 @@ class PromptJournalModal(ctk.CTkToplevel):
             messagebox.showerror(err_title, "⚠️ Выбранный файл пуст!\nВ нем нет инструкций для импорта." if not self.is_en else "⚠️ Selected file is empty!\nNo prompts found to import.", parent=self)
             return
 
-        # 2. Parse recognized [TAG] ... [/TAG] blocks
+        # 2. Parse recognized [TAG], [TAG_V2_TOP], [TAG_V2_BOTTOM] blocks
         found_prompts = {}
+        found_v2_parts = {}
         for m in re.finditer(r'\[([A-Za-z0-9_]+)\]\s*\n?(.*?)\n?\s*\[/\1\]', content, re.DOTALL):
             tag = m.group(1).upper()
             val = m.group(2).strip()
-            key = self.TAG_TO_PROMPT_KEY.get(tag)
-            if key and val:
-                found_prompts[key] = val
+            if not val:
+                continue
+            if tag.endswith("_V2_TOP"):
+                base_tag = tag[:-7]
+                key = self.TAG_TO_PROMPT_KEY.get(base_tag)
+                if key:
+                    found_v2_parts.setdefault(key, {})["top"] = val
+            elif tag.endswith("_V2_BOTTOM"):
+                base_tag = tag[:-10]
+                key = self.TAG_TO_PROMPT_KEY.get(base_tag)
+                if key:
+                    found_v2_parts.setdefault(key, {})["bottom"] = val
+            else:
+                key = self.TAG_TO_PROMPT_KEY.get(tag)
+                if key:
+                    found_prompts[key] = val
+
+        total_found = len(found_prompts) + sum(len(v) for v in found_v2_parts.values())
 
         # 3. Protection: Random file check!
-        if not found_prompts:
+        if total_found == 0:
             prot_title = "Защита от случайных файлов" if not self.is_en else "File Protection"
             prot_msg = (
                 "⚠️ ЗАЩИТА ОТ СЛУЧАЙНЫХ ФАЙЛОВ:\n\n"
@@ -3024,11 +3762,11 @@ class PromptJournalModal(ctk.CTkToplevel):
         lang_note = f"\n(Указанный в файле язык: [{file_lang_hint}])" if file_lang_hint else ""
         conf_msg = (
             f"Файл: {os.path.basename(file_path)}\n"
-            f"Найдено распознанных инструкций Synapse: {len(found_prompts)} из {len(self.catalog)}.{lang_note}\n\n"
+            f"Найдено блоков Synapse: V1={len(found_prompts)}, V2={len(found_v2_parts)}.{lang_note}\n\n"
             f"Применить эти инструкции к текущему языку [{self.active_journal_lang.upper()}]?"
             if not self.is_en else
             f"File: {os.path.basename(file_path)}\n"
-            f"Found recognized Synapse instructions: {len(found_prompts)} of {len(self.catalog)}.{lang_note}\n\n"
+            f"Found Synapse prompt blocks: V1={len(found_prompts)}, V2={len(found_v2_parts)}.{lang_note}\n\n"
             f"Apply these instructions to the current [{self.active_journal_lang.upper()}] language?"
         )
         if not messagebox.askyesno(conf_title, conf_msg, parent=self):
@@ -3040,28 +3778,469 @@ class PromptJournalModal(ctk.CTkToplevel):
             if self.active_journal_lang in self.prompts_cache_by_lang:
                 self.prompts_cache_by_lang[self.active_journal_lang][k] = v
 
-        if self.active_key in self.prompts_data:
-            self.editor_text.delete("1.0", "end")
-            self.editor_text.insert("1.0", self.prompts_data[self.active_key])
+        for k, parts in found_v2_parts.items():
+            cur = dict(self.prompts_v2_data.get(k, {}))
+            if "top" in parts:
+                cur["top"] = parts["top"]
+            if "bottom" in parts:
+                cur["bottom"] = parts["bottom"]
+            self.prompts_v2_data[k] = cur
+            if self.active_journal_lang in self.prompts_v2_cache_by_lang:
+                self.prompts_v2_cache_by_lang[self.active_journal_lang][k] = dict(cur)
+
+        if self.active_key:
+            self._load_active_editor_fields(self.active_key)
 
         stat_msg = (
-            f"✓ Импортировано инструкций: {len(found_prompts)}! Не забудьте нажать «💾 Сохранить и применить»."
+            f"✓ Импортировано блоков: {total_found}! Не забудьте нажать «💾 Сохранить и применить»."
             if not self.is_en else
-            f"✓ Imported instructions: {len(found_prompts)}! Click '💾 Save & Apply' to persist."
+            f"✓ Imported blocks: {total_found}! Click '💾 Save & Apply' to persist."
         )
         self.status_lbl.configure(text=stat_msg, text_color="#38bdf8")
 
         done_title = "Импорт завершен" if not self.is_en else "Import Completed"
         done_msg = (
-            f"Успешно импортировано инструкций: {len(found_prompts)}!\n\n"
+            f"Успешно импортировано блоков: {total_found} (V1={len(found_prompts)}, V2={len(found_v2_parts)})!\n\n"
             f"Инструкции загружены в редактор для языка [{self.active_journal_lang.upper()}].\n"
             f"Чтобы записать их в конфигурацию игры, нажмите кнопку «💾 Сохранить и применить»."
             if not self.is_en else
-            f"Successfully imported instructions: {len(found_prompts)}!\n\n"
+            f"Successfully imported blocks: {total_found} (V1={len(found_prompts)}, V2={len(found_v2_parts)})!\n\n"
             f"Instructions are loaded into the [{self.active_journal_lang.upper()}] editor.\n"
             f"To write them to game config, click the '💾 Save & Apply' button."
         )
         messagebox.showinfo(done_title, done_msg, parent=self)
+
+
+class VoiceSettingsModal(ctk.CTkToplevel):
+    """Modal settings window opened via header 'Settings' button before Language selector."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.master_app = master
+        i18n = getattr(master, "i18n", None)
+        self.is_en = (i18n.current_code.lower() == "en") if i18n else False
+        self._downloading = False
+        self._testing_mic = False
+        self._devices = []
+        self._dev_label_to_id = {}
+
+        self.title("⚙ Voice & Microphone Settings" if self.is_en else "⚙ Настройки · Голосовой ввод")
+        w, h = 560, 580
+        try:
+            scr_w = self.winfo_screenwidth()
+            scr_h = self.winfo_screenheight()
+            h = min(h, max(460, scr_h - 90))
+            x = max(10, min(scr_w - w - 10, master.winfo_x() + max(0, (master.winfo_width() - w) // 2)))
+            y = max(10, min(scr_h - h - 50, master.winfo_y() + max(0, (master.winfo_height() - h) // 2)))
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            self.geometry(f"{w}x{h}")
+        self.minsize(500, 480)
+        self.resizable(False, True)
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        cfg = dict(getattr(master, "cfg", {}) or {})
+        self._enabled_var = ctk.BooleanVar(value=bool(cfg.get("voice_enabled", False)))
+        self._auto_send_var = ctk.BooleanVar(value=bool(cfg.get("voice_auto_send", False)))
+        cur_model = str(cfg.get("voice_model") or "accurate").strip().lower()
+        if cur_model not in ("fast", "accurate"):
+            cur_model = "accurate"
+        self._model_key = cur_model
+
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=16, pady=(14, 12))
+
+        hdr = ctk.CTkLabel(
+            outer,
+            text=("🎙️ Voice Input in The Sims 4 (SulNet & Direct Dialogue)" if self.is_en else "🎙️ Голосовой ввод в The Sims 4 (SulNet и Живой диалог)"),
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#38bdf8",
+            anchor="w",
+        )
+        hdr.pack(fill="x", padx=2, pady=(0, 8))
+
+        wrap = ctk.CTkScrollableFrame(outer, fg_color="transparent")
+        wrap.pack(fill="both", expand=True)
+
+        if sys.platform == "darwin":
+            info_mac = ctk.CTkFrame(wrap, corner_radius=8, fg_color="#1e293b", border_width=1, border_color="#475569")
+            info_mac.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(
+                info_mac,
+                text=(
+                    "ℹ Voice input is currently Windows-only. macOS support is being researched."
+                    if self.is_en
+                    else "ℹ Голосовой ввод пока доступен только на Windows (изучаем поддержку для macOS)."
+                ),
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#fbbf24",
+                anchor="w",
+                wraplength=490,
+                justify="left",
+            ).pack(fill="x", padx=12, pady=8)
+
+        card_top = ctk.CTkFrame(wrap, corner_radius=10, border_width=1, border_color="#334155")
+        card_top.pack(fill="x", pady=(0, 10))
+        self._enable_sw = ctk.CTkSwitch(
+            card_top,
+            text=("Enable microphone button in Sims 4" if self.is_en else "Включить кнопку микрофона в игре"),
+            variable=self._enabled_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self._enable_sw.pack(anchor="w", padx=14, pady=(10, 4))
+        self._auto_send_chk = ctk.CTkCheckBox(
+            card_top,
+            text=("Auto-send immediately after dictation (unchecked = insert into input box)" if self.is_en else "Сразу отправлять фразу после диктовки (иначе вставить в поле)"),
+            variable=self._auto_send_var,
+            font=ctk.CTkFont(size=11),
+        )
+        self._auto_send_chk.pack(anchor="w", padx=14, pady=(4, 10))
+
+        card_mic = ctk.CTkFrame(wrap, corner_radius=10, border_width=1, border_color="#334155")
+        card_mic.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(
+            card_mic,
+            text=("Microphone" if self.is_en else "Микрофон"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 4))
+
+        mic_row = ctk.CTkFrame(card_mic, fg_color="transparent")
+        mic_row.pack(fill="x", padx=14, pady=(0, 6))
+        self._mic_menu = ctk.CTkOptionMenu(
+            mic_row,
+            values=["..."],
+            width=365,
+            height=30,
+            font=ctk.CTkFont(size=11),
+        )
+        self._mic_menu.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(
+            mic_row,
+            text="🔄",
+            width=36,
+            height=30,
+            fg_color="#334155",
+            hover_color="#475569",
+            command=self._refresh_devices,
+        ).pack(side="left", padx=(0, 6))
+        self._test_btn = ctk.CTkButton(
+            mic_row,
+            text=("🎤 Test" if self.is_en else "🎤 Тест"),
+            width=82,
+            height=30,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_test_mic,
+        )
+        self._test_btn.pack(side="left")
+
+        self._level_bar = ctk.CTkProgressBar(card_mic, height=8)
+        self._level_bar.set(0.0)
+        self._level_bar.pack(fill="x", padx=14, pady=(2, 4))
+        self._test_lbl = ctk.CTkLabel(
+            card_mic,
+            text=("Click Test and speak for 3 sec to verify your mic" if self.is_en else "Нажмите «Тест» и скажите пару слов (3 сек), чтобы проверить сигнал"),
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8",
+            anchor="w",
+        )
+        self._test_lbl.pack(fill="x", padx=14, pady=(0, 10))
+
+        card_mod = ctk.CTkFrame(wrap, corner_radius=10, border_width=1, border_color="#334155")
+        card_mod.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(
+            card_mod,
+            text=("Offline Speech Recognition (whisper.cpp)" if self.is_en else "Офлайн-распознавание речи (whisper.cpp)"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 6))
+
+        fast_lbl = "⚡ Быстрая (~60 МБ)" if not self.is_en else "⚡ Fast (~60 MB)"
+        acc_lbl = "🎯 Точная (~190 МБ)" if not self.is_en else "🎯 Accurate (~190 MB)"
+        self._fast_lbl = fast_lbl
+        self._acc_lbl = acc_lbl
+        self._model_seg = ctk.CTkSegmentedButton(
+            card_mod,
+            values=[fast_lbl, acc_lbl],
+            command=self._on_model_seg_changed,
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        self._model_seg.pack(fill="x", padx=14, pady=(0, 8))
+        self._model_seg.set(fast_lbl if self._model_key == "fast" else acc_lbl)
+
+        lang_row = ctk.CTkFrame(card_mod, fg_color="transparent")
+        lang_row.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(
+            lang_row,
+            text=("Speech language:" if self.is_en else "Язык речи:"),
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left", padx=(0, 8))
+        self._lang_map = (
+            {"Auto (App language)": "auto", "Russian (RU)": "ru", "English (EN)": "en"}
+            if self.is_en
+            else {"Авто (как язык мода)": "auto", "Русский (RU)": "ru", "English (EN)": "en"}
+        )
+        cur_vlang = str(cfg.get("voice_lang") or "auto").strip().lower()
+        cur_vlang_disp = next((k for k, v in self._lang_map.items() if v == cur_vlang), list(self._lang_map.keys())[0])
+        self._vlang_menu = ctk.CTkOptionMenu(
+            lang_row,
+            values=list(self._lang_map.keys()),
+            width=210,
+            height=28,
+            font=ctk.CTkFont(size=11),
+        )
+        self._vlang_menu.pack(side="left")
+        self._vlang_menu.set(cur_vlang_disp)
+
+        self._dl_status_lbl = ctk.CTkLabel(
+            card_mod,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            anchor="w",
+        )
+        self._dl_status_lbl.pack(fill="x", padx=14, pady=(2, 4))
+        self._dl_bar = ctk.CTkProgressBar(card_mod, height=8)
+        self._dl_bar.set(0.0)
+        self._dl_bar.pack(fill="x", padx=14, pady=(0, 8))
+
+        self._dl_btn = ctk.CTkButton(
+            card_mod,
+            text="",
+            height=34,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#059669",
+            hover_color="#047857",
+            command=self._on_download_pack,
+        )
+        self._dl_btn.pack(fill="x", padx=14, pady=(0, 12))
+
+        ftr = ctk.CTkFrame(outer, fg_color="transparent")
+        ftr.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(
+            ftr,
+            text=("Close" if self.is_en else "Закрыть"),
+            width=110,
+            height=34,
+            fg_color="#334155",
+            hover_color="#475569",
+            command=self._on_close,
+        ).pack(side="left")
+        ctk.CTkButton(
+            ftr,
+            text=("💾 Save & Apply" if self.is_en else "💾 Сохранить и применить"),
+            width=190,
+            height=34,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_save,
+        ).pack(side="right")
+
+        self._refresh_devices(initial_dev_id=cfg.get("voice_device_id", -1))
+        self._refresh_install_status()
+        if sys.platform == "darwin":
+            for _w in (self._enable_sw, self._auto_send_chk, self._test_btn, self._dl_btn):
+                try:
+                    _w.configure(state="disabled")
+                except Exception:
+                    pass
+            try:
+                self._test_lbl.configure(
+                    text=("Windows-only for now (macOS under study)" if self.is_en else "Пока только для Windows (поддержка macOS изучается)"),
+                    text_color="#94a3b8",
+                )
+            except Exception:
+                pass
+
+    def _on_close(self):
+        if self._downloading:
+            return
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+    def _on_model_seg_changed(self, val):
+        self._model_key = "fast" if val == self._fast_lbl else "accurate"
+        self._refresh_install_status()
+
+    def _refresh_devices(self, initial_dev_id=None):
+        if _HAS_VOICE and _voice_mgr is not None:
+            self._devices = _voice_mgr.list_input_devices(is_en=self.is_en)
+        else:
+            self._devices = [{"id": -1, "name": "System Default" if self.is_en else "По умолчанию"}]
+        self._dev_label_to_id = {}
+        labels = []
+        for d in self._devices:
+            lbl = f"{d['name']}" if d["id"] < 0 else f"[{d['id']}] {d['name']}"
+            self._dev_label_to_id[lbl] = int(d["id"])
+            labels.append(lbl)
+        self._mic_menu.configure(values=labels)
+        target_id = int(initial_dev_id) if initial_dev_id is not None else self._dev_label_to_id.get(self._mic_menu.get(), -1)
+        chosen = next((k for k, v in self._dev_label_to_id.items() if v == target_id), labels[0])
+        self._mic_menu.set(chosen)
+
+    def _refresh_install_status(self):
+        if not (_HAS_VOICE and _voice_mgr is not None):
+            self._dl_status_lbl.configure(text="voice_manager module missing", text_color="#f87171")
+            self._dl_btn.configure(state="disabled")
+            return
+        cli_ok = bool(_voice_mgr.find_whisper_cli_path())
+        spec = _voice_mgr.get_model_spec(self._model_key)
+        mod_file = os.path.join(_voice_mgr.get_voice_models_dir(create=False), spec["filename"])
+        mod_ok = os.path.isfile(mod_file) and os.path.getsize(mod_file) > 5 * 1024 * 1024
+        if cli_ok and mod_ok:
+            self._dl_status_lbl.configure(
+                text=("✓ Engine + selected model installed and ready" if self.is_en else "✓ Движок и выбранная модель установлены и готовы к работе"),
+                text_color="#4ade80",
+            )
+            self._dl_bar.set(1.0)
+            self._dl_btn.configure(
+                text=("✓ Installed (Verify / Update)" if self.is_en else "✓ Готово (Проверить / Обновить)"),
+                fg_color="#1e293b",
+                hover_color="#334155",
+            )
+        else:
+            self._dl_status_lbl.configure(
+                text=("⚠ Voice pack not downloaded yet (~60–200 MB)" if self.is_en else "⚠ Голосовой пакет ещё не скачан (нажмите кнопку ниже)"),
+                text_color="#fbbf24",
+            )
+            self._dl_bar.set(0.0)
+            self._dl_btn.configure(
+                text=(f"📥 Download & Install (~{spec['size_mb']} MB)" if self.is_en else f"📥 Скачать и установить (~{spec['size_mb']} МБ)"),
+                fg_color="#059669",
+                hover_color="#047857",
+            )
+
+    def _on_test_mic(self):
+        if self._testing_mic or not (_HAS_VOICE and _voice_mgr is not None):
+            return
+        self._testing_mic = True
+        dev_id = self._dev_label_to_id.get(self._mic_menu.get(), -1)
+        self._test_btn.configure(state="disabled")
+        self._test_lbl.configure(
+            text=("Listening (3 sec)... speak now!" if self.is_en else "Слушаю (3 сек)... скажите что-нибудь!"),
+            text_color="#38bdf8",
+        )
+        self._level_bar.set(0.0)
+
+        state = {"level": 0.0, "done": None}
+
+        def _lvl(v):
+            state["level"] = float(v)
+
+        def _worker():
+            try:
+                ok, peak, err = _voice_mgr.run_mic_test(device_id=dev_id, duration_secs=3.0, on_level=_lvl)
+            except Exception as exc:
+                ok, peak, err = False, 0.0, str(exc)
+            state["done"] = (ok, peak, err)
+
+        def _poll():
+            if not self.winfo_exists():
+                self._testing_mic = False
+                return
+            self._level_bar.set(max(0.0, min(1.0, state["level"])))
+            done = state["done"]
+            if done is None:
+                self.after(60, _poll)
+                return
+            ok, peak, err = done
+            self._testing_mic = False
+            self._test_btn.configure(state="normal")
+            self._level_bar.set(min(1.0, peak) if ok else 0.0)
+            if not ok:
+                self._test_lbl.configure(text=f"✗ {err}", text_color="#f87171")
+            elif peak < 0.04:
+                self._test_lbl.configure(
+                    text=("⚠ Signal very quiet — check mic mute/volume" if self.is_en else "⚠ Почти тишина — проверьте громкость/выбор микрофона"),
+                    text_color="#fbbf24",
+                )
+            else:
+                self._test_lbl.configure(
+                    text=(f"✓ Microphone works! Peak level: {int(peak * 100)}%" if self.is_en else f"✓ Микрофон работает! Уровень сигнала: {int(peak * 100)}%"),
+                    text_color="#4ade80",
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.after(60, _poll)
+
+    def _on_download_pack(self):
+        if self._downloading or not (_HAS_VOICE and _voice_mgr is not None):
+            return
+        self._downloading = True
+        self._dl_btn.configure(state="disabled")
+        self._dl_bar.set(0.02)
+        m_key = self._model_key
+        state = {"pct": 2.0, "txt": "", "done": None}
+
+        def _prog(pct, txt):
+            state["pct"] = float(pct)
+            state["txt"] = str(txt or "")
+
+        def _worker():
+            try:
+                ok, msg = _voice_mgr.install_voice_pack(model_key=m_key, progress_cb=_prog, is_en=self.is_en)
+            except Exception as exc:
+                ok, msg = False, str(exc)
+            state["done"] = (ok, msg)
+
+        def _poll():
+            if not self.winfo_exists():
+                self._downloading = False
+                return
+            if state["txt"]:
+                self._dl_bar.set(max(0.0, min(1.0, state["pct"] / 100.0)))
+                self._dl_status_lbl.configure(text=f"{int(state['pct'])}% • {state['txt']}", text_color="#38bdf8")
+            done = state["done"]
+            if done is None:
+                self.after(80, _poll)
+                return
+            ok, msg = done
+            self._downloading = False
+            self._dl_btn.configure(state="normal")
+            if ok:
+                self._enabled_var.set(True)
+                self._refresh_install_status()
+            else:
+                self._dl_status_lbl.configure(
+                    text=(f"✗ Download error: {msg}" if self.is_en else f"✗ Ошибка скачивания: {msg}"),
+                    text_color="#f87171",
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.after(80, _poll)
+
+    def _on_save(self):
+        if self._downloading:
+            return
+        dev_lbl = self._mic_menu.get()
+        dev_id = self._dev_label_to_id.get(dev_lbl, -1)
+        v_lang = self._lang_map.get(self._vlang_menu.get(), "auto")
+
+        disk_cfg = load_config()
+        disk_cfg["voice_enabled"] = bool(self._enabled_var.get())
+        disk_cfg["voice_device_id"] = int(dev_id)
+        disk_cfg["voice_device_name"] = dev_lbl
+        disk_cfg["voice_model"] = self._model_key
+        disk_cfg["voice_lang"] = v_lang
+        disk_cfg["voice_auto_send"] = bool(self._auto_send_var.get())
+        save_config(disk_cfg)
+        self.master_app.cfg = dict(disk_cfg)
+        if hasattr(self.master_app, "save_status_lbl"):
+            try:
+                self.master_app.save_status_lbl.configure(
+                    text=("✓ Voice settings saved" if self.is_en else "✓ Настройки микрофона сохранены"),
+                    text_color="#4ade80",
+                )
+            except Exception:
+                pass
+        self._on_close()
 
 
 class AILauncherApp(ctk.CTk):
@@ -3070,6 +4249,13 @@ class AILauncherApp(ctk.CTk):
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+
+        if sys.platform == "darwin":
+            # Hide initial un-composited Cocoa backing buffer while building widgets (fixes blank white window on macOS)
+            try:
+                self.withdraw()
+            except Exception:
+                pass
 
         self.title("⚡ SYNAPSE — AI Bridge for The Sims 4")
         
@@ -3146,6 +4332,44 @@ class AILauncherApp(ctk.CTk):
 
         # Periodic bridge status checker
         self._status_loop_after_id = self.after(1000, self._check_bridge_status_loop)
+        try:
+            self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+        except Exception:
+            pass
+
+        if sys.platform == "darwin":
+            try:
+                self.update_idletasks()
+                self.deiconify()
+                self.lift()
+                self.focus_force()
+                self.update()
+                self.after(150, self._macos_force_redraw)
+                self.after(450, self._macos_force_redraw)
+            except Exception:
+                pass
+
+    def _macos_force_redraw(self):
+        try:
+            if not self.winfo_exists():
+                return
+            self.update_idletasks()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            if w > 100 and h > 100:
+                self.geometry(f"{w + 1}x{h}")
+                self.update_idletasks()
+                self.geometry(f"{w}x{h}")
+                self.update_idletasks()
+        except Exception:
+            pass
+
+    def _on_app_close(self):
+        self.destroy()
+        try:
+            self.quit()
+        except Exception:
+            pass
 
     def destroy(self):
         after_id = getattr(self, "_status_loop_after_id", None)
@@ -3215,7 +4439,21 @@ class AILauncherApp(ctk.CTk):
             dropdown_font=ctk.CTkFont(size=11),
             command=self._on_language_changed,
         )
-        self.lang_menu.pack(side="right", padx=16, pady=10)
+        self.lang_menu.pack(side="right", padx=(6, 16), pady=10)
+
+        settings_btn_txt = self.i18n.t("UI_BTN_SETTINGS", "⚙ Настройки") if self.i18n else "⚙ Настройки"
+        self.voice_settings_btn = ctk.CTkButton(
+            header,
+            text=settings_btn_txt,
+            width=116,
+            height=30,
+            corner_radius=6,
+            fg_color="#334155",
+            hover_color="#475569",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._open_voice_settings_modal,
+        )
+        self.voice_settings_btn.pack(side="right", padx=(8, 0), pady=10)
 
         # Scrollable Main Body
         self.scroll = ctk.CTkScrollableFrame(self, corner_radius=10)
@@ -3248,6 +4486,30 @@ class AILauncherApp(ctk.CTk):
             command=self._on_repair_mods_clicked,
         )
         self.mods_repair_btn.pack(side="right")
+
+        self.mods_migration_sep = ctk.CTkFrame(self.mods_guard_frame, height=1, fg_color=("#cbd5e1", "#334155"))
+        self.mods_migration_row = ctk.CTkFrame(self.mods_guard_frame, fg_color="transparent")
+        self.mods_migration_lbl = ctk.CTkLabel(
+            self.mods_migration_row,
+            text="",
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        )
+        self.mods_migration_lbl.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.mods_migrate_btn = ctk.CTkButton(
+            self.mods_migration_row,
+            text="📦 Перенести данные",
+            width=148,
+            height=30,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+            command=self._on_migrate_synapse_data_clicked,
+        )
+        self.mods_migrate_btn.pack(side="right")
+
         self._refresh_mods_guard_status()
 
         # ----------------------------------------------------
@@ -6103,8 +7365,128 @@ class AILauncherApp(ctk.CTk):
                     hover_color="#b91c1c",
                     width=175,
                 )
+
+            mig = inspect_synapse_data_migration()
+            if mig.get("needs_migration"):
+                src_list = mig.get("sources") or []
+                src_paths_short = ", ".join(s.get("source_dir", "") for s in src_list)
+                n_files = int(mig.get("total_files", 0) or 0)
+                n_media = int(mig.get("total_media", 0) or 0)
+                target_dir = mig.get("target_dir", "")
+                if is_en:
+                    mig_msg = (
+                        f"📦 Found Synapse data in another folder ({n_files} file(s), {n_media} media file(s)):\n"
+                        f"From: {src_paths_short}\n"
+                        f"To: {target_dir}\n"
+                        f"Click Migrate to move them safely (originals stay as .bak backups)."
+                    )
+                    self.mods_migrate_btn.configure(text="📦 Migrate (.bak)")
+                else:
+                    mig_msg = (
+                        f"📦 Найдены сохранения/данные Synapse в другой папке (файлов: {n_files}, фото медиа: {n_media}):\n"
+                        f"Откуда: {src_paths_short}\n"
+                        f"Куда: {target_dir}\n"
+                        f"Можно безопасно перенести — старые файлы останутся рядом с расширением .bak."
+                    )
+                    self.mods_migrate_btn.configure(text="📦 Перенести (.bak)")
+                self.mods_migration_lbl.configure(
+                    text=mig_msg,
+                    text_color=("#92400e", "#fcd34d"),
+                )
+                if not self.mods_migration_sep.winfo_manager():
+                    self.mods_migration_sep.pack(fill="x", padx=12, pady=(0, 6))
+                if not self.mods_migration_row.winfo_manager():
+                    self.mods_migration_row.pack(fill="x", padx=12, pady=(0, 8))
+            else:
+                if self.mods_migration_row.winfo_manager():
+                    self.mods_migration_row.pack_forget()
+                if self.mods_migration_sep.winfo_manager():
+                    self.mods_migration_sep.pack_forget()
         except Exception as e:
             print(f"[WARN] Mods guard check failed: {e}")
+
+    def _on_migrate_synapse_data_clicked(self):
+        info = inspect_synapse_data_migration()
+        is_en = bool(self.i18n and self.i18n.current_code == "en")
+        if not info.get("needs_migration"):
+            self._refresh_mods_guard_status()
+            messagebox.showinfo(
+                "Synapse",
+                ("All Synapse files are already in the active Sims 4 folder." if is_en else "Все файлы Synapse уже находятся в правильной активной папке The Sims 4."),
+                parent=self,
+            )
+            return
+
+        if _is_sims4_process_running():
+            messagebox.showwarning(
+                "Synapse",
+                (
+                    "Please save and close The Sims 4 first before transferring Synapse saves/data."
+                    if is_en else
+                    "Пожалуйста, сохраните игру и закройте The Sims 4 перед переносом данных Synapse."
+                ),
+                parent=self,
+            )
+            return
+
+        src_lines = []
+        for s in info.get("sources") or []:
+            items = list(s.get("files") or [])
+            if s.get("media_count"):
+                items.append(f"synapse_simgram_media ({s['media_count']})")
+            src_lines.append(f"• {s['source_dir']}: {', '.join(items)}")
+        detail_preview = "\n".join(src_lines)
+        confirm_msg = (
+            f"Move/merge Synapse data to the active folder:\n{info['target_dir']}\n\nSources:\n{detail_preview}\n\nOriginals will be safely kept in place as .bak backups."
+            if is_en else
+            f"Перенести / объединить данные Synapse в правильную папку игры:\n{info['target_dir']}\n\nНайдено:\n{detail_preview}\n\nСтарые файлы в исходной папке не удаляются, а безопасно переименовываются в .bak."
+        )
+        if not messagebox.askyesno("Synapse", confirm_msg, parent=self):
+            return
+
+        ok, status_msg, summary = migrate_synapse_data_to_active_dir(check_game_running=True)
+        if not ok and status_msg == "GAME_RUNNING":
+            messagebox.showwarning(
+                "Synapse",
+                ("Please close The Sims 4 before migrating." if is_en else "Закройте The Sims 4 перед переносом файлов."),
+                parent=self,
+            )
+            return
+
+        # Reload config into launcher UI in case ai_mod_config.json was moved/merged
+        self.cfg = load_config()
+        self.provider_keys = _safe_dict(self.cfg.get("provider_keys"))
+        self.provider_models = _safe_dict(self.cfg.get("provider_models"))
+        self.provider_urls = _safe_dict(self.cfg.get("provider_urls"))
+        self._load_values()
+        self._refresh_mods_guard_status()
+
+        n_copied = len(summary.get("migrated_files") or [])
+        n_merged = len(summary.get("merged_files") or [])
+        n_media = int(summary.get("migrated_media") or 0)
+        n_bak = len(summary.get("bak_entries") or [])
+        if ok:
+            done_msg = (
+                f"Done! Transferred to:\n{summary['target_dir']}\n\n"
+                f"• Copied files: {n_copied}\n"
+                f"• Merged files: {n_merged}\n"
+                f"• Media files copied: {n_media}\n"
+                f"• Originals renamed to .bak: {n_bak}"
+                if is_en else
+                f"Готово! Данные перенесены в:\n{summary['target_dir']}\n\n"
+                f"• Перенесено файлов: {n_copied}\n"
+                f"• Объединено файлов: {n_merged}\n"
+                f"• Перенесено фото медиа: {n_media}\n"
+                f"• Старых файлов/папок оставлено в .bak: {n_bak}"
+            )
+            messagebox.showinfo("Synapse", done_msg, parent=self)
+        else:
+            err_msg = (
+                f"Completed with warnings:\n{status_msg}\n\nCopied: {n_copied}, Merged: {n_merged}, Media: {n_media}, .bak: {n_bak}"
+                if is_en else
+                f"Перенос завершён с предупреждениями:\n{status_msg}\n\nПеренесено: {n_copied}, Объединено: {n_merged}, Медиа: {n_media}, .bak: {n_bak}"
+            )
+            messagebox.showwarning("Synapse", err_msg, parent=self)
 
     def _on_repair_mods_clicked(self):
         info = inspect_mods_installation()
@@ -6402,7 +7784,9 @@ class AILauncherApp(ctk.CTk):
         if hasattr(self, "current_cloud_pid"):
             self._update_cloud_provider_ui(self.current_cloud_pid, fetch_endpoints=False)
 
-        # Refresh dropdown display
+        # Refresh dropdown display & header buttons
+        if hasattr(self, "voice_settings_btn"):
+            self.voice_settings_btn.configure(text=self.i18n.t("UI_BTN_SETTINGS", "⚙ Настройки"))
         if hasattr(self, "lang_menu"):
             self.lang_menu.set(self.i18n.get_current_display_name())
 
@@ -6906,6 +8290,16 @@ class AILauncherApp(ctk.CTk):
         elif action == "select_all":
             self._universal_select_all(mock_ev)
 
+    def _open_voice_settings_modal(self):
+        if hasattr(self, "_voice_modal") and self._voice_modal is not None:
+            try:
+                if self._voice_modal.winfo_exists():
+                    self._voice_modal.focus_force()
+                    return
+            except Exception:
+                pass
+        self._voice_modal = VoiceSettingsModal(self)
+
 
 if __name__ == "__main__":
     exe_name = os.path.basename(sys.executable).lower() if getattr(sys, 'frozen', False) else os.path.basename(sys.argv[0]).lower()
@@ -6950,3 +8344,4 @@ if __name__ == "__main__":
     else:
         app = AILauncherApp()
         app.mainloop()
+        os._exit(0)

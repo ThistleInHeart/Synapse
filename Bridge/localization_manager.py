@@ -11,6 +11,18 @@ import sys
 import re
 import json
 
+V2_PROMPT_CUSTOM_KEYS = (
+    "system_prompt",
+    "chat_system_prompt",
+    "group_chat_system_prompt",
+    "npc_chat_system_prompt",
+    "friend_chat_system_prompt",
+    "direct_dialogue_system_prompt",
+    "simplified_dialogue_system_prompt",
+    "sex_dialogue_system_prompt",
+)
+
+
 class LocalizationManager:
     _instance = None
 
@@ -133,7 +145,7 @@ class LocalizationManager:
             data["display_name"] = f"🌐 Language: {data['code'].upper()}"
 
         # 2. Extract multi-line prompts [TAG] ... [/TAG]
-        for m in re.finditer(r'\[([A-Z0-9_]+)\]\s*\n(.*?)\n\s*\[/\1\]', content, re.DOTALL):
+        for m in re.finditer(r'\[([A-Z0-9_]+)\][ \t]*\r?\n(.*?)(?:\r?\n)?[ \t]*\[/\1\]', content, re.DOTALL):
             tag = m.group(1)
             val = m.group(2).strip()
             data["prompts"][tag] = val
@@ -282,8 +294,8 @@ class LocalizationManager:
         if target_lang not in p_by_lang:
             legacy_lang = normalize_lang_code(cfg.get("language", "ru"))
             # If target language matches legacy config language, migrate existing keys
-            if target_lang == legacy_lang and (cfg.get("system_prompt") or cfg.get("is_custom_system_prompt")):
-                p_by_lang[target_lang] = {
+            if target_lang == legacy_lang and (cfg.get("system_prompt") or cfg.get("is_custom_system_prompt") or cfg.get("v2_top_system_prompt") or cfg.get("v2_bottom_system_prompt")):
+                migrated = {
                     "system_prompt": cfg.get("system_prompt", ""),
                     "is_custom_system_prompt": bool(cfg.get("is_custom_system_prompt", False)),
                     "chat_system_prompt": cfg.get("chat_system_prompt", ""),
@@ -305,7 +317,15 @@ class LocalizationManager:
                     "custom_age_prompts": dict(cfg.get("custom_age_prompts", {})),
                     "custom_special_prompts": dict(cfg.get("custom_special_prompts", {})),
                     "custom_pet_prompts": dict(cfg.get("custom_pet_prompts", {})),
+                    "custom_pet_prompts_v2_top": dict(cfg.get("custom_pet_prompts_v2_top", {})),
+                    "custom_pet_prompts_v2_bottom": dict(cfg.get("custom_pet_prompts_v2_bottom", {})),
                 }
+                for _ck in V2_PROMPT_CUSTOM_KEYS:
+                    for _pref in ("v2_top_", "v2_bottom_"):
+                        _k = f"{_pref}{_ck}"
+                        migrated[_k] = cfg.get(_k, "")
+                        migrated[f"is_custom_{_k}"] = bool(cfg.get(f"is_custom_{_k}", False))
+                p_by_lang[target_lang] = migrated
             else:
                 p_by_lang[target_lang] = {}
 
@@ -361,6 +381,13 @@ class LocalizationManager:
         cfg["custom_age_prompts"] = dict(lang_p.get("custom_age_prompts", {}))
         cfg["custom_special_prompts"] = dict(lang_p.get("custom_special_prompts", {}))
         cfg["custom_pet_prompts"] = dict(lang_p.get("custom_pet_prompts", {}))
+        cfg["custom_pet_prompts_v2_top"] = dict(lang_p.get("custom_pet_prompts_v2_top", {}))
+        cfg["custom_pet_prompts_v2_bottom"] = dict(lang_p.get("custom_pet_prompts_v2_bottom", {}))
+        for _ck in V2_PROMPT_CUSTOM_KEYS:
+            for _pref in ("v2_top_", "v2_bottom_"):
+                _k = f"{_pref}{_ck}"
+                cfg[_k] = lang_p.get(_k, "")
+                cfg[f"is_custom_{_k}"] = bool(lang_p.get(f"is_custom_{_k}", False))
 
     def export_bundle_for_web_tool(self) -> dict:
         """
