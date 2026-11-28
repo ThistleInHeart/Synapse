@@ -47,14 +47,17 @@ jobs:
           .venv_ci/bin/python -c "
           import os, sys, ssl
           import tkinter, customtkinter, PIL, urllib3, certifi
+          print('macOS TkVersion:', tkinter.TkVersion)
           sys.path.insert(0, 'Bridge')
           import localization_manager as lm_mod
+          import voice_manager as vm
           import ai_bridge as ab
           import launcher as ln
           lm = lm_mod.LocalizationManager.get_instance()
           assert 'ru' in lm.available_languages and 'en' in lm.available_languages
           assert ab._create_ssl_context() is not None
           assert ln._create_ssl_context() is not None
+          assert vm.list_input_devices(is_en=True)[0]['id'] == -1
           cm = ab.ConnectionManager()
           assert cm.timeout > 0
           print('Live macOS smoke tests PASSED on', sys.platform)
@@ -64,12 +67,14 @@ jobs:
         working-directory: Bridge
         run: |
           ../.venv_ci/bin/python -m PyInstaller --noconfirm --clean --onefile --console \
-            --collect-all certifi --hidden-import urllib3 \
+            --collect-all certifi --hidden-import urllib3 --hidden-import voice_manager \
             --name ai_bridge ai_bridge.py
 
-          ../.venv_ci/bin/python -m PyInstaller --noconfirm --clean --onefile --windowed \
+          # Use --onedir --windowed for macOS .app (avoids PyInstaller --onefile dual-process white-window bug on Sonoma/Sequoia)
+          ../.venv_ci/bin/python -m PyInstaller --noconfirm --clean --onedir --windowed \
             --add-data "languages:languages" \
-            --collect-all customtkinter --collect-all certifi --hidden-import urllib3 --hidden-import ai_bridge \
+            --collect-all customtkinter --collect-all certifi \
+            --hidden-import urllib3 --hidden-import ai_bridge --hidden-import voice_manager \
             --name Synapse launcher.py
 
       - name: Package macOS release folder
@@ -82,10 +87,12 @@ jobs:
           cp Bridge/dist/ai_bridge "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge"
           chmod +x "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge"
           cp Bridge/ai_bridge.py "$OUT_DIR/Synapse.app/Contents/MacOS/ai_bridge.py"
+          cp Bridge/voice_manager.py "$OUT_DIR/Synapse.app/Contents/MacOS/voice_manager.py"
           cp -R Bridge/languages "$OUT_DIR/languages"
           cp Bridge/ai_bridge.py "$OUT_DIR/ai_bridge.py"
           cp Bridge/launcher.py "$OUT_DIR/launcher.py"
           cp Bridge/localization_manager.py "$OUT_DIR/localization_manager.py"
+          cp Bridge/voice_manager.py "$OUT_DIR/voice_manager.py"
           xattr -cr "$OUT_DIR" || true
 
       - name: Verify built app binary responds to --help / import check
