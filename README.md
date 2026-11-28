@@ -79,7 +79,7 @@ There are no pre-scripted lines or canned responses. Every thought, face-to-face
 │       ├── mod_strings_en.json         # English in-game strings
 │       └── mod_strings_ru.json         # Russian in-game strings
 │
-├── LICENSE                       # Synapse License and Terms of Use (v0.4)
+├── LICENSE                       # Synapse License and Terms of Use (v0.5)
 └── README.md                     # Project documentation
 ```
 
