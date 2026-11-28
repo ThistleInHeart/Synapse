@@ -9,8 +9,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_BASE = os.path.join(SCRIPT_DIR, "src")
 BUILD_DIR = os.path.join(SCRIPT_DIR, "build")
 
-# Auto-detect default Sims 4 Mods directory if present
-USER_DOCS = os.path.expanduser(r"~\Documents\Electronic Arts\The Sims 4\Mods")
+# Auto-detect default Sims 4 Mods directory if present (supports redirected Documents / OneDrive / macOS)
+try:
+    sys.path.insert(0, os.path.join(SRC_BASE, "ai_thought_reader"))
+    from ts4_paths import get_sims4_user_dir
+    USER_DOCS = os.path.join(get_sims4_user_dir(), "Mods")
+except Exception:
+    USER_DOCS = os.path.join(os.path.expanduser("~"), "Documents", "Electronic Arts", "The Sims 4", "Mods")
 SYNAPSE_MODS_DIR = os.path.join(USER_DOCS, "SynapseMod") if os.path.exists(os.path.join(USER_DOCS, "SynapseMod")) else (os.path.join(USER_DOCS, "Synapse") if os.path.exists(USER_DOCS) else None)
 
 PACKAGES_TO_SYNC = [
@@ -67,7 +72,7 @@ def compile_package(mod_info):
                         os.makedirs(os.path.dirname(temp_pyc), exist_ok=True)
 
                         # Compile with Python 3.7
-                        py_compile.compile(full_py, cfile=temp_pyc, doraise=True)
+                        py_compile.compile(full_py, cfile=temp_pyc, dfile=rel_path.replace("\\", "/"), doraise=True)
                         print(f"[COMPILED] {rel_path} -> {rel_pyc}")
                         zf.write(temp_pyc, rel_pyc)
                         if mod_info["sub_dir"] == "balloons" and file == "synapse_balloons.py":
